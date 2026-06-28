@@ -117,15 +117,10 @@ async function checkAuthStatus() {
       // Set nav avatar
       document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${Date.now()}`;
       
-      // Admin Tabs anzeigen falls Admin
-      if (currentUser.role === 'admin') {
-        document.getElementById('admin-settings-tab').style.display = 'flex';
-        document.getElementById('admin-users-tab').style.display = 'flex';
-        document.getElementById('dropdown-admin-btn').style.display = 'flex';
-      } else {
-        document.getElementById('admin-settings-tab').style.display = 'none';
-        document.getElementById('admin-users-tab').style.display = 'none';
-        document.getElementById('dropdown-admin-btn').style.display = 'none';
+      // Admin Button anzeigen falls Admin
+      const adminBtn = document.getElementById('dropdown-admin-btn');
+      if (adminBtn) {
+        adminBtn.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
       }
       
       appHeader.style.display = 'flex';
@@ -229,6 +224,11 @@ function updateAuthUI(isRegister) {
     forgotPasswordBtn.style.display = isEmailConfigured ? 'inline-block' : 'none';
     if (label) label.textContent = 'Benutzername oder E-Mail';
     if (input) input.placeholder = 'z. B. alex oder alex@gamerfreak.eu';
+  }
+
+  const passkeyBtn = document.getElementById('passkey-login-btn');
+  if (passkeyBtn) {
+    passkeyBtn.style.display = isRegister ? 'none' : 'flex';
   }
 }
 
