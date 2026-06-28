@@ -553,13 +553,23 @@ if (dropdownAdminBtn) {
   };
 }
 
+function closeSettingsOrAdmin() {
+  if (window.history.length > 1) {
+    window.history.back();
+  } else {
+    window.location.hash = '#dashboard';
+  }
+}
+
 document.getElementById('back-to-dashboard-btn').onclick = () => {
-  window.location.hash = '#dashboard';
+  closeSettingsOrAdmin();
 };
 
 document.getElementById('logo-btn').onclick = (e) => {
   e.preventDefault();
+  currentFolderId = null;
   window.location.hash = '#dashboard';
+  showView('dashboard');
 };
 
 /* ==========================================================================
@@ -2858,7 +2868,7 @@ window.onload = () => {
   const adminBackBtn = document.getElementById('admin-back-to-dashboard-btn');
   if (adminBackBtn) {
     adminBackBtn.onclick = () => {
-      window.location.hash = '#dashboard';
+      closeSettingsOrAdmin();
     };
   }
 
@@ -3141,7 +3151,7 @@ window.addEventListener('keydown', (e) => {
 
     // 3. Close settings or admin (go back to dashboard)
     if (window.location.hash === '#settings' || window.location.hash === '#admin') {
-      window.location.hash = '#dashboard';
+      closeSettingsOrAdmin();
       return;
     }
   }
@@ -3152,7 +3162,7 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) {
       if (overlay.id === 'settings-view' || overlay.id === 'admin-view') {
-        window.location.hash = '#dashboard';
+        closeSettingsOrAdmin();
       } else if (overlay.id === 'office-editor-overlay') {
         // Do not close office editor on backdrop click
       } else {
