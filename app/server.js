@@ -1299,6 +1299,86 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
    SETTINGS & ADMIN PANEL ROUTES
    ========================================================================== */
 
+// Upload Avatar
+app.post('/api/settings/avatar', requireAuth, upload.single('avatar'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No image file provided.' });
+  }
+
+  const userId = req.session.userId;
+
+  // Verify it is an image
+  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif'];
+  if (!allowedMimeTypes.includes(req.file.mimetype)) {
+    fs.unlinkSync(req.file.path);
+    return res.status(400).json({ error: 'Only JPEG, PNG, or GIF images are allowed.' });
+  }
+
+  // Max size 2MB
+  if (req.file.size > 2 * 1024 * 1024) {
+    fs.unlinkSync(req.file.path);
+    return res.status(400).json({ error: 'Image size must be less than 2 MB.' });
+  }
+
+  try {
+    // Get old avatar path
+    const oldAvatarRes = await pool.query('SELECT avatar_path FROM users WHERE id = $1', [userId]);
+    const oldAvatarPath = oldAvatarRes.rows[0]?.avatar_path;
+
+    // Save new avatar path in DB
+    await pool.query('UPDATE users SET avatar_path = $1 WHERE id = $2', [req.file.filename, userId]);
+
+    // Delete old avatar file from disk if it exists
+    if (oldAvatarPath) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldAvatarPath);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+
+    res.json({ success: true, avatarUrl: `/api/users/${userId}/avatar?t=${Date.now()}` });
+  } catch (err) {
+    console.error('Error saving avatar:', err);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get User Avatar
+app.get('/api/users/:id/avatar', async (req, res) => {
+  const userId = parseInt(req.params.id);
+
+  try {
+    const userRes = await pool.query('SELECT username, avatar_path FROM users WHERE id = $1', [userId]);
+    if (userRes.rows.length === 0) {
+      return res.status(404).send('User not found');
+    }
+
+    const user = userRes.rows[0];
+    if (user.avatar_path) {
+      const filePath = path.join(UPLOADS_DIR, user.avatar_path);
+      if (fs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+    }
+
+    // Fallback: Generate Initial SVG Avatar using Accent colors from CSS
+    const initials = user.username.charAt(0).toUpperCase();
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+      <rect width="100" height="100" fill="#161f30" rx="50"/>
+      <text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" font-family="'Outfit', sans-serif" font-size="45" font-weight="700" fill="#00d2ff">${initials}</text>
+    </svg>`;
+    
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.send(svg);
+  } catch (err) {
+    console.error('Error fetching avatar:', err);
+    res.status(500).send('Internal server error');
+  }
+});
+
 // Get settings (User profile and config)
 app.get('/api/settings', requireAuth, async (req, res) => {
   const userId = req.session.userId;

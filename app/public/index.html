@@ -26,13 +26,25 @@
         <i data-lucide="cloud"></i> my<span>Cloud</span>
       </a>
       <div class="user-nav">
-        <span id="nav-username" style="font-weight: 500;"></span>
-        <button class="btn" id="settings-nav-btn">
-          <i data-lucide="settings"></i> Einstellungen
-        </button>
-        <button class="btn btn-primary" id="logout-btn">
-          <i data-lucide="log-out"></i> Abmelden
-        </button>
+        <div class="user-menu-container" id="user-menu-container">
+          <div class="user-menu-trigger" id="user-menu-trigger">
+            <img id="nav-avatar" class="user-avatar" src="" alt="A">
+            <span id="nav-username" style="font-weight: 500;"></span>
+            <i data-lucide="chevron-down" style="width: 16px; height: 16px;"></i>
+          </div>
+          <div class="user-dropdown-menu" id="user-dropdown-menu">
+            <a href="#settings" class="dropdown-item" id="dropdown-settings-btn">
+              <i data-lucide="user" style="width: 16px; height: 16px;"></i> Einstellungen
+            </a>
+            <a href="#settings" class="dropdown-item" id="dropdown-admin-btn" style="display: none;">
+              <i data-lucide="sliders" style="width: 16px; height: 16px;"></i> Admin-Einstellungen
+            </a>
+            <div class="dropdown-divider"></div>
+            <button class="dropdown-item" id="dropdown-logout-btn" style="width: 100%; border: none; background: transparent; text-align: left; cursor: pointer;">
+              <i data-lucide="log-out" style="width: 16px; height: 16px;"></i> Abmelden
+            </button>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -167,6 +179,20 @@
           
           <!-- Section 1: Profil & Passkeys -->
           <section id="profile-settings" class="settings-section active">
+            <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+              <h3>Profilbild ändern</h3>
+              <div style="display: flex; align-items: center; gap: 1.5rem; margin-top: 1.5rem; flex-wrap: wrap;">
+                <img id="settings-avatar-preview" class="user-avatar-large" src="" alt="Avatar">
+                <div>
+                  <label class="btn btn-primary" style="margin: 0; cursor: pointer;">
+                    <i data-lucide="image"></i> Bild hochladen
+                    <input type="file" id="avatar-upload-input" style="display: none;" accept="image/*">
+                  </label>
+                  <p style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.5rem;">Unterstützt PNG, JPG oder GIF. Max. 2 MB.</p>
+                </div>
+              </div>
+            </div>
+
             <div class="card" style="background: rgba(0,0,0,0.15);">
               <h3>Passwort ändern</h3>
               <form id="change-password-form" style="margin-top: 1rem;">

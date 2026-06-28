@@ -57,13 +57,18 @@ async function checkAuthStatus() {
       currentUser = data.user;
       document.getElementById('nav-username').textContent = currentUser.username;
       
+      // Set nav avatar
+      document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${Date.now()}`;
+      
       // Admin Tabs anzeigen falls Admin
       if (currentUser.role === 'admin') {
         document.getElementById('admin-settings-tab').style.display = 'flex';
         document.getElementById('admin-users-tab').style.display = 'flex';
+        document.getElementById('dropdown-admin-btn').style.display = 'flex';
       } else {
         document.getElementById('admin-settings-tab').style.display = 'none';
         document.getElementById('admin-users-tab').style.display = 'none';
+        document.getElementById('dropdown-admin-btn').style.display = 'none';
       }
       
       appHeader.style.display = 'flex';
@@ -270,24 +275,82 @@ document.getElementById('passkey-login-btn').onclick = async () => {
   }
 };
 
-// Standard Logout Button
-document.getElementById('logout-btn').onclick = async () => {
-  try {
-    const res = await fetch('/api/auth/logout', { method: 'POST' });
-    if (res.ok) {
-      currentUser = null;
-      window.location.hash = '#login';
-      checkAuthStatus();
-    }
-  } catch (err) {
-    showToast('Fehler beim Abmelden.');
-  }
-};
+// User Menu Trigger (Toggle Dropdown)
+const userMenuTrigger = document.getElementById('user-menu-trigger');
+const userDropdownMenu = document.getElementById('user-dropdown-menu');
 
-// Logo & Settings Buttons navigation
-document.getElementById('settings-nav-btn').onclick = () => {
-  window.location.hash = '#settings';
-};
+if (userMenuTrigger && userDropdownMenu) {
+  userMenuTrigger.onclick = (e) => {
+    e.stopPropagation();
+    userDropdownMenu.classList.toggle('show');
+  };
+
+  // Close dropdown when clicking anywhere else
+  document.addEventListener('click', (e) => {
+    if (!userMenuTrigger.contains(e.target) && !userDropdownMenu.contains(e.target)) {
+      userDropdownMenu.classList.remove('show');
+    }
+  });
+}
+
+// Standard Logout Button in Dropdown
+const dropdownLogoutBtn = document.getElementById('dropdown-logout-btn');
+if (dropdownLogoutBtn) {
+  dropdownLogoutBtn.onclick = async () => {
+    try {
+      const res = await fetch('/api/auth/logout', { method: 'POST' });
+      if (res.ok) {
+        currentUser = null;
+        userDropdownMenu.classList.remove('show');
+        window.location.hash = '#login';
+        checkAuthStatus();
+      }
+    } catch (err) {
+      showToast('Fehler beim Abmelden.');
+    }
+  };
+}
+
+// Dropdown Navigation Items
+const dropdownSettingsBtn = document.getElementById('dropdown-settings-btn');
+if (dropdownSettingsBtn) {
+  dropdownSettingsBtn.onclick = (e) => {
+    e.preventDefault();
+    userDropdownMenu.classList.remove('show');
+    window.location.hash = '#settings';
+    
+    // Switch to profile section inside settings layout
+    document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
+    
+    const profileTab = document.querySelector('[data-section="profile-settings"]');
+    const profileSection = document.getElementById('profile-settings');
+    if (profileTab && profileSection) {
+      profileTab.classList.add('active');
+      profileSection.classList.add('active');
+    }
+  };
+}
+
+const dropdownAdminBtn = document.getElementById('dropdown-admin-btn');
+if (dropdownAdminBtn) {
+  dropdownAdminBtn.onclick = (e) => {
+    e.preventDefault();
+    userDropdownMenu.classList.remove('show');
+    window.location.hash = '#settings';
+    
+    // Switch to admin section inside settings layout
+    document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
+    
+    const adminTab = document.querySelector('[data-section="admin-settings"]');
+    const adminSection = document.getElementById('admin-settings');
+    if (adminTab && adminSection) {
+      adminTab.classList.add('active');
+      adminSection.classList.add('active');
+    }
+  };
+}
 
 document.getElementById('back-to-dashboard-btn').onclick = () => {
   window.location.hash = '#dashboard';
@@ -1041,6 +1104,12 @@ async function loadSettings() {
     const res = await fetch('/api/settings');
     const data = await res.json();
 
+    // Set settings avatar preview
+    const previewImg = document.getElementById('settings-avatar-preview');
+    if (previewImg && currentUser) {
+      previewImg.src = `/api/users/${currentUser.id}/avatar?t=${Date.now()}`;
+    }
+
     // Render passkeys
     renderPasskeyList(data.passkeys);
 
@@ -1401,4 +1470,38 @@ window.onload = () => {
   }
 
   checkAuthStatus();
+
+  // Avatar Upload Listener
+  const avatarInput = document.getElementById('avatar-upload-input');
+  if (avatarInput) {
+    avatarInput.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const formData = new FormData();
+      formData.append('avatar', file);
+
+      showToast('Lade Profilbild hoch...');
+
+      try {
+        const res = await fetch('/api/settings/avatar', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+          showToast('Profilbild erfolgreich geändert!');
+          // Cache busting forcing browser image reload
+          const t = Date.now();
+          document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${t}`;
+          document.getElementById('settings-avatar-preview').src = `/api/users/${currentUser.id}/avatar?t=${t}`;
+        } else {
+          showToast(data.error || 'Fehler beim Hochladen.');
+        }
+      } catch (err) {
+        showToast('Verbindungsfehler beim Avatar-Upload.');
+      }
+    };
+  }
 };

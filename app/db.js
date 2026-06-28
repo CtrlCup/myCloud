@@ -23,6 +23,9 @@ async function initDb() {
       )
     `);
 
+    // Add avatar_path column if not exists
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_path VARCHAR(255)');
+
     // Passkeys Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS passkeys (
