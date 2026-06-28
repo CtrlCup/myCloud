@@ -1421,6 +1421,8 @@ document.getElementById('change-password-form').onsubmit = async (e) => {
   } catch (err) {
     showToast('Fehler beim Ändern des Passworts.');
   }
+};
+
 // Change Email Form Submit
 const changeEmailForm = document.getElementById('change-email-form');
 if (changeEmailForm) {
