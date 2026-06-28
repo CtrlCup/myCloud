@@ -1,0 +1,23 @@
+{
+  "name": "mycloud-app",
+  "version": "1.0.0",
+  "description": "Minimalistic 2-color Cloud Storage Application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "^9.0.3",
+    "archiver": "^6.0.2",
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^9.0.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.9.13",
+    "pg": "^8.11.5"
+  },
+  "private": true
+}

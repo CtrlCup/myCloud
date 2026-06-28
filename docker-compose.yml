@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: mycloud_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-mycloud}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-mycloud_secure_password}
+      POSTGRES_DB: ${DB_NAME:-mycloud}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - mycloud_network
+
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: mycloud_app
+    restart: always
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-mycloud}:${DB_PASSWORD:-mycloud_secure_password}@db:5432/${DB_NAME:-mycloud}
+      SESSION_SECRET: ${SESSION_SECRET:-change_this_to_a_long_random_string}
+      EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST}
+      EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT}
+      EMAIL_SMTP_USER: ${EMAIL_SMTP_USER}
+      EMAIL_SMTP_PASS: ${EMAIL_SMTP_PASS}
+      EMAIL_FROM: ${EMAIL_FROM}
+      SSO_ENABLED: ${SSO_ENABLED:-false}
+      SSO_CLIENT_ID: ${SSO_CLIENT_ID}
+      SSO_CLIENT_SECRET: ${SSO_CLIENT_SECRET}
+      SSO_ISSUER_URL: ${SSO_ISSUER_URL}
+      SSO_REDIRECT_URI: ${SSO_REDIRECT_URI}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+    volumes:
+      - uploads_data:/usr/src/app/uploads
+    depends_on:
+      - db
+    networks:
+      - mycloud_network
+
+volumes:
+  db_data:
+  uploads_data:
+
+networks:
+  mycloud_network:
+    driver: bridge

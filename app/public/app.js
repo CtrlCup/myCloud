@@ -1,0 +1,1133 @@
+// State Management
+let currentUser = null;
+let currentFolderId = null;
+let breadcrumbsHistory = [];
+let isRegisterMode = false;
+let allShares = []; // Alle Shares des Users
+
+// DOM Elements
+const authView = document.getElementById('auth-view');
+const dashboardView = document.getElementById('dashboard-view');
+const settingsView = document.getElementById('settings-view');
+const appHeader = document.getElementById('app-header');
+
+const toast = document.getElementById('toast');
+const toastMessage = document.getElementById('toast-message');
+
+/* ==========================================================================
+   TOAST HELPER
+   ========================================================================== */
+function showToast(message) {
+  toastMessage.textContent = message;
+  toast.classList.add('show');
+  setTimeout(() => {
+    toast.classList.remove('show');
+  }, 3500);
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0 || !bytes) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+/* ==========================================================================
+   ROUTING
+   ========================================================================== */
+async function checkAuthStatus() {
+  try {
+    const res = await fetch('/api/auth/status');
+    const data = await res.json();
+    
+    // SSO Button anzeigen falls aktiv
+    const ssoBtn = document.getElementById('sso-login-btn');
+    if (data.ssoEnabled) {
+      ssoBtn.style.display = 'inline-flex';
+    } else {
+      ssoBtn.style.display = 'none';
+    }
+
+    if (data.loggedIn) {
+      currentUser = data.user;
+      document.getElementById('nav-username').textContent = currentUser.username;
+      
+      // Admin Tabs anzeigen falls Admin
+      if (currentUser.role === 'admin') {
+        document.getElementById('admin-settings-tab').style.display = 'flex';
+        document.getElementById('admin-users-tab').style.display = 'flex';
+      } else {
+        document.getElementById('admin-settings-tab').style.display = 'none';
+        document.getElementById('admin-users-tab').style.display = 'none';
+      }
+      
+      appHeader.style.display = 'flex';
+      
+      // Weiche Navigation
+      const hash = window.location.hash;
+      if (hash === '#settings') {
+        showView('settings');
+      } else {
+        window.location.hash = '#dashboard';
+        showView('dashboard');
+      }
+    } else {
+      currentUser = null;
+      appHeader.style.display = 'none';
+      
+      // First-run Modus (erster Benutzer registriert sich als Admin)
+      if (data.firstRun) {
+        isRegisterMode = true;
+        updateAuthUI(true);
+        showToast('Ersteinrichtung: Registriere den ersten Admin-Benutzer.');
+      }
+      
+      showView('auth');
+    }
+  } catch (err) {
+    console.error('Auth check failed:', err);
+    showToast('Verbindungsfehler zum Server.');
+  }
+}
+
+function showView(viewName) {
+  authView.style.display = 'none';
+  dashboardView.style.display = 'none';
+  settingsView.style.display = 'none';
+
+  if (viewName === 'auth') {
+    authView.style.display = 'flex';
+  } else if (viewName === 'dashboard') {
+    dashboardView.style.display = 'flex';
+    loadFiles(currentFolderId);
+  } else if (viewName === 'settings') {
+    settingsView.style.display = 'block';
+    loadSettings();
+  }
+  lucide.createIcons();
+}
+
+window.addEventListener('hashchange', () => {
+  const hash = window.location.hash;
+  if (!currentUser && hash !== '#login') {
+    window.location.hash = '#login';
+    showView('auth');
+  } else if (currentUser) {
+    if (hash === '#settings') {
+      showView('settings');
+    } else {
+      showView('dashboard');
+    }
+  }
+});
+
+/* ==========================================================================
+   AUTHENTICATION LOGIC
+   ========================================================================== */
+const authForm = document.getElementById('auth-form');
+const authSubmitBtn = document.getElementById('auth-submit-btn');
+const toggleAuthModeBtn = document.getElementById('toggle-auth-mode');
+const forgotPasswordBtn = document.getElementById('forgot-password-btn');
+
+function updateAuthUI(isRegister) {
+  isRegisterMode = isRegister;
+  const title = document.getElementById('auth-subtitle');
+  if (isRegister) {
+    title.textContent = 'Erstelle ein neues Konto';
+    authSubmitBtn.textContent = 'Registrieren';
+    toggleAuthModeBtn.textContent = 'Bereits ein Konto? Anmelden';
+    forgotPasswordBtn.style.display = 'none';
+  } else {
+    title.textContent = 'Willkommen! Bitte melde dich an.';
+    authSubmitBtn.textContent = 'Anmelden';
+    toggleAuthModeBtn.textContent = 'Noch kein Konto? Registrieren';
+    forgotPasswordBtn.style.display = 'inline-block';
+  }
+}
+
+toggleAuthModeBtn.onclick = () => {
+  updateAuthUI(!isRegisterMode);
+};
+
+// Forgot Password Request
+forgotPasswordBtn.onclick = async () => {
+  const username = document.getElementById('username').value.trim();
+  if (!username) {
+    showToast('Bitte gib deinen Benutzernamen (E-Mail) in das Feld ein.');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/reset-password-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+    });
+    
+    const data = await res.json();
+    if (res.ok) {
+      if (data.devLink) {
+        console.log('Dev Reset Link:', data.devLink);
+        showToast(`[DEV] Link: ${data.devLink}`);
+        // Automatisches Weiterleiten zum Testen des Resets
+        const token = new URL(data.devLink).searchParams.get('token');
+        handleResetPasswordFlow(token);
+      } else {
+        showToast(data.message || 'Zurücksetzungs-E-Mail gesendet.');
+      }
+    } else {
+      showToast(data.error);
+    }
+  } catch (err) {
+    showToast('Fehler bei der Anfrage.');
+  }
+};
+
+async function handleResetPasswordFlow(token) {
+  const newPassword = prompt('Bitte gib dein neues Passwort ein:');
+  if (!newPassword) return;
+
+  try {
+    const res = await fetch('/api/auth/reset-password-execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, newPassword }),
+    });
+
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Passwort erfolgreich zurückgesetzt. Du kannst dich jetzt anmelden.');
+    } else {
+      showToast(data.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Zurücksetzen des Passworts.');
+  }
+}
+
+// Handle login/register form submission
+authForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+
+  const endpoint = isRegisterMode ? '/api/auth/register' : '/api/auth/login';
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+
+    const data = await res.json();
+    if (res.ok) {
+      showToast(isRegisterMode ? 'Registrierung erfolgreich!' : 'Erfolgreich angemeldet!');
+      checkAuthStatus();
+    } else {
+      showToast(data.error || 'Fehler beim Authentifizieren.');
+    }
+  } catch (err) {
+    showToast('Fehler beim Senden der Daten.');
+  }
+};
+
+// WebAuthn Passkey Login
+document.getElementById('passkey-login-btn').onclick = async () => {
+  try {
+    // 1. Get options from server
+    const optionsRes = await fetch('/api/auth/passkey/login-options', { method: 'POST' });
+    if (!optionsRes.ok) {
+      throw new Error('Optionen konnten nicht abgerufen werden.');
+    }
+    const options = await optionsRes.json();
+
+    // 2. Start authentication via browser
+    const assertion = await SimpleWebAuthnBrowser.startAuthentication(options);
+
+    // 3. Verify assertion on server
+    const verifyRes = await fetch('/api/auth/passkey/login-verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(assertion),
+    });
+
+    const verifyData = await verifyRes.json();
+    if (verifyRes.ok && verifyData.success) {
+      showToast('Mit Passkey erfolgreich angemeldet!');
+      checkAuthStatus();
+    } else {
+      showToast(verifyData.error || 'Passkey-Login fehlgeschlagen.');
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('Passkey-Anmeldung abgebrochen oder fehlgeschlagen.');
+  }
+};
+
+// Standard Logout Button
+document.getElementById('logout-btn').onclick = async () => {
+  try {
+    const res = await fetch('/api/auth/logout', { method: 'POST' });
+    if (res.ok) {
+      currentUser = null;
+      window.location.hash = '#login';
+      checkAuthStatus();
+    }
+  } catch (err) {
+    showToast('Fehler beim Abmelden.');
+  }
+};
+
+// Logo & Settings Buttons navigation
+document.getElementById('settings-nav-btn').onclick = () => {
+  window.location.hash = '#settings';
+};
+
+document.getElementById('back-to-dashboard-btn').onclick = () => {
+  window.location.hash = '#dashboard';
+};
+
+document.getElementById('logo-btn').onclick = (e) => {
+  e.preventDefault();
+  window.location.hash = '#dashboard';
+};
+
+/* ==========================================================================
+   DASHBOARD / FILES EXPLORER LOGIC
+   ========================================================================== */
+async function loadFiles(folderId = null) {
+  try {
+    currentFolderId = folderId;
+    let url = '/api/files/list';
+    if (folderId) {
+      url += `?parentId=${folderId}`;
+    }
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      if (res.status === 401) {
+        checkAuthStatus();
+        return;
+      }
+      throw new Error('Dateien konnten nicht geladen werden.');
+    }
+
+    const files = await res.json();
+    renderFiles(files);
+    renderBreadcrumbs();
+  } catch (err) {
+    console.error(err);
+    showToast('Fehler beim Laden des Datei-Explorers.');
+  }
+}
+
+function renderBreadcrumbs() {
+  const container = document.getElementById('breadcrumbs');
+  container.innerHTML = '';
+
+  // Home Breadcrumb
+  const homeLink = document.createElement('a');
+  homeLink.href = '#';
+  homeLink.className = 'breadcrumb-item';
+  homeLink.textContent = 'Home';
+  homeLink.onclick = (e) => {
+    e.preventDefault();
+    breadcrumbsHistory = [];
+    loadFiles(null);
+  };
+  container.appendChild(homeLink);
+
+  breadcrumbsHistory.forEach((crumb, index) => {
+    const sep = document.createElement('span');
+    sep.className = 'breadcrumb-separator';
+    sep.textContent = '/';
+    container.appendChild(sep);
+
+    if (index === breadcrumbsHistory.length - 1) {
+      const activeSpan = document.createElement('span');
+      activeSpan.className = 'breadcrumb-current';
+      activeSpan.textContent = crumb.name;
+      container.appendChild(activeSpan);
+    } else {
+      const link = document.createElement('a');
+      link.href = '#';
+      link.className = 'breadcrumb-item';
+      link.textContent = crumb.name;
+      link.onclick = (e) => {
+        e.preventDefault();
+        breadcrumbsHistory = breadcrumbsHistory.slice(0, index + 1);
+        loadFiles(crumb.id);
+      };
+      container.appendChild(link);
+    }
+  });
+}
+
+function renderFiles(files) {
+  const grid = document.getElementById('file-grid');
+  grid.innerHTML = '';
+
+  if (files.length === 0) {
+    grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--color-text-muted); padding: 3rem 0;">Dieser Ordner ist leer.</div>`;
+    return;
+  }
+
+  files.forEach(file => {
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    
+    const iconName = file.is_folder ? 'folder' : 'file';
+
+    item.innerHTML = `
+      <div class="file-icon"><i data-lucide="${iconName}"></i></div>
+      <div class="file-name" title="${file.name}">${file.name}</div>
+      <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
+      <div class="file-actions">
+        <button class="btn btn-icon btn-action-more" style="padding: 4px; background: var(--color-surface); border-radius: 4px;" title="Optionen">
+          <i data-lucide="more-vertical" style="width: 16px; height: 16px;"></i>
+        </button>
+      </div>
+    `;
+
+    // Click handler to navigate folders or download files
+    item.onclick = (e) => {
+      // ignore click if it was on action button
+      if (e.target.closest('.btn-action-more') || e.target.closest('.file-actions')) {
+        return;
+      }
+      
+      if (file.is_folder) {
+        breadcrumbsHistory.push({ id: file.id, name: file.name });
+        loadFiles(file.id);
+      } else {
+        window.location.href = `/api/files/download/${file.id}`;
+      }
+    };
+
+    // Action Menu Button
+    item.querySelector('.btn-action-more').onclick = (e) => {
+      e.stopPropagation();
+      showFileContextMenu(file, e.clientX, e.clientY);
+    };
+
+    grid.appendChild(item);
+  });
+  
+  lucide.createIcons();
+}
+
+// Custom simple Context Menu
+function showFileContextMenu(file, x, y) {
+  // Remove existing menus
+  const existing = document.querySelector('.context-menu');
+  if (existing) existing.remove();
+
+  const menu = document.createElement('div');
+  menu.className = 'card context-menu';
+  menu.style.position = 'fixed';
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  menu.style.zIndex = '999';
+  menu.style.padding = '0.5rem';
+  menu.style.display = 'flex';
+  menu.style.flexDirection = 'column';
+  menu.style.gap = '0.25rem';
+  menu.style.minWidth = '150px';
+
+  const actions = [];
+  
+  if (!file.is_folder) {
+    actions.push({
+      label: 'Herunterladen',
+      icon: 'download',
+      action: () => window.location.href = `/api/files/download/${file.id}`
+    });
+  } else {
+    actions.push({
+      label: 'Als ZIP laden',
+      icon: 'file-archive',
+      action: () => window.location.href = `/api/files/download-zip/${file.id}`
+    });
+  }
+
+  // Sharing is allowed for both files and folders
+  actions.push({
+    label: 'Teilen',
+    icon: 'share-2',
+    action: () => openShareModal(file)
+  });
+
+  actions.push({
+    label: 'Löschen',
+    icon: 'trash-2',
+    action: () => deleteFile(file)
+  });
+
+  actions.forEach(act => {
+    const btn = document.createElement('button');
+    btn.className = 'btn';
+    btn.style.border = 'none';
+    btn.style.justifyContent = 'flex-start';
+    btn.style.padding = '0.5rem 1rem';
+    btn.style.width = '100%';
+    btn.innerHTML = `<i data-lucide="${act.icon}" style="width: 16px; height: 16px;"></i> ${act.label}`;
+    
+    if (act.label === 'Löschen') {
+      btn.style.color = '#ff5555';
+    }
+
+    btn.onclick = () => {
+      act.action();
+      menu.remove();
+    };
+    menu.appendChild(btn);
+  });
+
+  document.body.appendChild(menu);
+  lucide.createIcons();
+
+  // Close context menu on click outside
+  const closeMenu = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeMenu), 50);
+}
+
+// Action: Create Folder
+document.getElementById('new-folder-btn').onclick = async () => {
+  const name = prompt('Bitte gib einen Namen für den neuen Ordner ein:');
+  if (!name) return;
+
+  try {
+    const res = await fetch('/api/files/folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, parentId: currentFolderId }),
+    });
+
+    if (res.ok) {
+      showToast('Ordner erfolgreich erstellt.');
+      loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Erstellen des Ordners.');
+  }
+};
+
+// Action: Upload File via Click
+document.getElementById('file-upload-input').onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  await uploadFile(file);
+};
+
+async function uploadFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (currentFolderId) {
+    formData.append('parentId', currentFolderId);
+  }
+
+  showToast('Lade Datei hoch...');
+
+  try {
+    const res = await fetch('/api/files/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (res.ok) {
+      showToast('Datei erfolgreich hochgeladen!');
+      loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Datei-Upload.');
+  }
+}
+
+// Action: Delete File
+async function deleteFile(file) {
+  const confirmMsg = file.is_folder 
+    ? `Möchtest du den Ordner "${file.name}" und alle darin enthaltenen Dateien wirklich löschen?`
+    : `Möchtest du die Datei "${file.name}" wirklich löschen?`;
+    
+  if (!confirm(confirmMsg)) return;
+
+  try {
+    const res = await fetch(`/api/files/${file.id}`, {
+      method: 'DELETE',
+    });
+
+    if (res.ok) {
+      showToast('Element gelöscht.');
+      loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Löschen.');
+  }
+}
+
+// Drag & Drop
+const dropzone = document.getElementById('dropzone');
+['dragenter', 'dragover'].forEach(name => {
+  dropzone.addEventListener(name, (e) => {
+    e.preventDefault();
+    dropzone.classList.add('dragover');
+  });
+});
+['dragleave', 'drop'].forEach(name => {
+  dropzone.addEventListener(name, (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+  });
+});
+dropzone.addEventListener('drop', async (e) => {
+  const files = e.dataTransfer.files;
+  if (files.length === 0) return;
+  await uploadFile(files[0]);
+});
+
+/* ==========================================================================
+   SHARING MODAL LOGIC
+   ========================================================================== */
+const shareModal = document.getElementById('share-modal-overlay');
+const shareForm = document.getElementById('share-form');
+const shareSlugInput = document.getElementById('share-slug');
+const shareCanWriteCheck = document.getElementById('share-can-write');
+const shareCanDownloadCheck = document.getElementById('share-can-download');
+const shareCanZipCheck = document.getElementById('share-can-zip');
+const shareExpiresInput = document.getElementById('share-expires');
+const deleteShareBtn = document.getElementById('delete-share-btn');
+const shareResultSection = document.getElementById('share-result-section');
+const shareResultInput = document.getElementById('share-result-input');
+
+async function openShareModal(file) {
+  document.getElementById('share-file-id').value = file.id;
+  document.getElementById('share-url-prefix').textContent = `${window.location.origin}/s/`;
+  
+  // Set defaults
+  shareSlugInput.value = '';
+  shareCanWriteCheck.checked = false;
+  shareCanDownloadCheck.checked = true;
+  shareCanZipCheck.checked = true;
+  shareExpiresInput.value = '';
+  deleteShareBtn.style.display = 'none';
+  shareResultSection.style.display = 'none';
+  document.getElementById('share-existing-id').value = '';
+
+  // Schreibrechte-Checkbox aktivieren/deaktivieren, falls es eine Datei ist (Schreiben auf Datei macht keinen Sinn, nur auf Ordner)
+  if (!file.is_folder) {
+    shareCanWriteCheck.checked = false;
+    shareCanWriteCheck.disabled = true;
+  } else {
+    shareCanWriteCheck.disabled = false;
+  }
+
+  // Check if already shared
+  try {
+    const res = await fetch('/api/shares');
+    const shares = await res.json();
+    const existing = shares.find(s => s.file_id === file.id);
+
+    if (existing) {
+      document.getElementById('share-existing-id').value = existing.id;
+      shareSlugInput.value = existing.slug;
+      shareCanWriteCheck.checked = existing.can_write;
+      shareCanDownloadCheck.checked = existing.can_download;
+      shareCanZipCheck.checked = existing.can_zip;
+      
+      if (existing.expires_at) {
+        const diffTime = Math.abs(new Date(existing.expires_at) - new Date());
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        shareExpiresInput.value = diffDays;
+      }
+      
+      deleteShareBtn.style.display = 'inline-flex';
+      displayGeneratedLink(existing.slug);
+    }
+  } catch (err) {
+    console.error('Error checking existing share:', err);
+  }
+
+  shareModal.classList.add('active');
+  lucide.createIcons();
+}
+
+function displayGeneratedLink(slug) {
+  const fullUrl = `${window.location.origin}/s/${slug}`;
+  shareResultInput.value = fullUrl;
+  shareResultSection.style.display = 'block';
+}
+
+document.getElementById('close-share-modal-btn').onclick = () => {
+  shareModal.classList.remove('active');
+};
+
+// Copy Share Link to Clipboard
+document.getElementById('copy-share-link-btn').onclick = () => {
+  shareResultInput.select();
+  document.execCommand('copy');
+  showToast('Link in die Zwischenablage kopiert!');
+};
+
+// Submit Share Form (Create or Update)
+shareForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const fileId = document.getElementById('share-file-id').value;
+  const existingId = document.getElementById('share-existing-id').value;
+  
+  const payload = {
+    fileId: parseInt(fileId),
+    customSlug: shareSlugInput.value.trim(),
+    canRead: true,
+    canWrite: shareCanWriteCheck.checked,
+    canDownload: shareCanDownloadCheck.checked,
+    canZip: shareCanZipCheck.checked,
+    expiresDays: shareExpiresInput.value ? parseInt(shareExpiresInput.value) : null,
+  };
+
+  const url = existingId ? `/api/shares/${existingId}` : '/api/shares';
+  const method = existingId ? 'PUT' : 'POST';
+
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+    if (res.ok) {
+      showToast(existingId ? 'Freigabe aktualisiert!' : 'Freigabe-Link erstellt!');
+      document.getElementById('share-existing-id').value = data.id;
+      deleteShareBtn.style.display = 'inline-flex';
+      displayGeneratedLink(data.slug);
+    } else {
+      showToast(data.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Speichern der Freigabe.');
+  }
+};
+
+// Delete share
+deleteShareBtn.onclick = async () => {
+  const existingId = document.getElementById('share-existing-id').value;
+  if (!existingId) return;
+
+  if (!confirm('Möchtest du diese Freigabe wirklich aufheben? Der Link wird ungültig.')) return;
+
+  try {
+    const res = await fetch(`/api/shares/${existingId}`, {
+      method: 'DELETE',
+    });
+
+    if (res.ok) {
+      showToast('Freigabe aufgehoben.');
+      shareModal.classList.remove('active');
+      loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Aufheben der Freigabe.');
+  }
+};
+
+/* ==========================================================================
+   SETTINGS & ADMIN LOGIC
+   ========================================================================== */
+// Sidebar navigation inside Settings
+document.querySelectorAll('.settings-nav-item').forEach(item => {
+  item.onclick = () => {
+    document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
+    
+    item.classList.add('active');
+    const targetSection = item.getAttribute('data-section');
+    document.getElementById(targetSection).classList.add('active');
+  };
+});
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+
+    // Render passkeys
+    renderPasskeyList(data.passkeys);
+
+    // If Admin, fill config inputs
+    if (currentUser.role === 'admin' && data.adminConfig) {
+      const conf = data.adminConfig;
+      document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
+      document.getElementById('admin-sso-enabled').checked = conf.sso_enabled === 'true';
+      document.getElementById('admin-sso-issuer').value = conf.sso_issuer_url || '';
+      document.getElementById('admin-sso-client-id').value = conf.sso_client_id || '';
+      document.getElementById('admin-sso-client-secret').value = conf.sso_client_secret_configured ? '__placeholder__' : '';
+      document.getElementById('admin-sso-redirect').value = `${window.location.origin}/auth/sso/callback`;
+      
+      document.getElementById('admin-smtp-host').value = conf.email_smtp_host || '';
+      document.getElementById('admin-smtp-port').value = conf.email_smtp_port || '';
+      document.getElementById('admin-smtp-user').value = conf.email_smtp_user || '';
+      document.getElementById('admin-smtp-pass').value = conf.email_smtp_pass_configured ? '__placeholder__' : '';
+      document.getElementById('admin-smtp-from').value = conf.email_from || '';
+
+      // Load Users List
+      loadAdminUsers();
+    }
+
+    // Load Geteilte Links List
+    loadUserShares();
+
+  } catch (err) {
+    console.error('Settings load error:', err);
+    showToast('Fehler beim Laden der Einstellungen.');
+  }
+}
+
+// Render User Passkeys
+function renderPasskeyList(passkeys) {
+  const container = document.getElementById('passkey-list');
+  container.innerHTML = '';
+
+  if (passkeys.length === 0) {
+    container.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--color-text-muted);">Keine Passkeys registriert.</td></tr>`;
+    return;
+  }
+
+  passkeys.forEach(pk => {
+    const row = document.createElement('tr');
+    
+    const date = new Date(pk.created_at).toLocaleDateString('de-DE', {
+      day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+
+    row.innerHTML = `
+      <td>${date}</td>
+      <td style="font-family: monospace;">${pk.id.slice(0, 15)}...</td>
+      <td>
+        <button class="btn btn-action-delete-passkey" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 10px;">
+          Löschen
+        </button>
+      </td>
+    `;
+
+    row.querySelector('.btn-action-delete-passkey').onclick = async () => {
+      if (!confirm('Diesen Passkey wirklich löschen?')) return;
+      try {
+        const res = await fetch(`/api/settings/passkeys/${pk.id}`, { method: 'DELETE' });
+        if (res.ok) {
+          showToast('Passkey gelöscht.');
+          loadSettings();
+        }
+      } catch (err) {
+        showToast('Fehler beim Löschen des Passkeys.');
+      }
+    };
+
+    container.appendChild(row);
+  });
+}
+
+// Register new Passkey
+document.getElementById('register-passkey-btn').onclick = async () => {
+  try {
+    // 1. Get options from server
+    const optionsRes = await fetch('/api/auth/passkey/register-options', { method: 'POST' });
+    if (!optionsRes.ok) throw new Error('Registrierungsoptionen konnten nicht geholt werden.');
+    const options = await optionsRes.json();
+
+    // 2. Start browser registration
+    const credential = await SimpleWebAuthnBrowser.startRegistration(options);
+
+    // 3. Verify on server
+    const verifyRes = await fetch('/api/auth/passkey/register-verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(credential),
+    });
+
+    const verifyData = await verifyRes.json();
+    if (verifyRes.ok && verifyData.success) {
+      showToast('Passkey erfolgreich registriert!');
+      loadSettings();
+    } else {
+      showToast(verifyData.error || 'Passkey-Registrierung fehlgeschlagen.');
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('Registrierung abgebrochen oder nicht unterstützt.');
+  }
+};
+
+// Change Password Form Submit
+document.getElementById('change-password-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const currentPassword = document.getElementById('current-password').value;
+  const newPassword = document.getElementById('new-password').value;
+
+  try {
+    const res = await fetch('/api/settings/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Passwort erfolgreich geändert.');
+      document.getElementById('change-password-form').reset();
+    } else {
+      showToast(data.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Ändern des Passworts.');
+  }
+};
+
+// Admin Config Form Submit
+document.getElementById('admin-config-form').onsubmit = async (e) => {
+  e.preventDefault();
+
+  const secretInput = document.getElementById('admin-sso-client-secret').value;
+  const smtpPassInput = document.getElementById('admin-smtp-pass').value;
+
+  const payload = {
+    registration_enabled: document.getElementById('admin-reg-enabled').checked ? 'true' : 'false',
+    sso_enabled: document.getElementById('admin-sso-enabled').checked ? 'true' : 'false',
+    sso_issuer_url: document.getElementById('admin-sso-issuer').value.trim(),
+    sso_client_id: document.getElementById('admin-sso-client-id').value.trim(),
+    sso_client_secret: secretInput === '__placeholder__' ? '__placeholder__' : secretInput,
+    
+    email_smtp_host: document.getElementById('admin-smtp-host').value.trim(),
+    email_smtp_port: document.getElementById('admin-smtp-port').value.trim(),
+    email_smtp_user: document.getElementById('admin-smtp-user').value.trim(),
+    email_smtp_pass: smtpPassInput === '__placeholder__' ? '__placeholder__' : smtpPassInput,
+    email_from: document.getElementById('admin-smtp-from').value.trim(),
+  };
+
+  try {
+    const res = await fetch('/api/settings/admin/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (res.ok) {
+      showToast('Systemkonfigurationen gespeichert.');
+      loadSettings();
+    } else {
+      const err = await res.json();
+      showToast(err.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Speichern der Konfiguration.');
+  }
+};
+
+// Admin Test SMTP
+document.getElementById('test-smtp-btn').onclick = async () => {
+  const to = document.getElementById('admin-smtp-test-recipient').value.trim();
+  if (!to) {
+    showToast('Bitte gib einen Test-Empfänger ein.');
+    return;
+  }
+
+  showToast('Sende Test-E-Mail...');
+
+  try {
+    const res = await fetch('/api/settings/admin/test-smtp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to }),
+    });
+
+    const data = await res.json();
+    if (res.ok) {
+      showToast('Test-E-Mail erfolgreich versendet!');
+    } else {
+      showToast(`SMTP Fehler: ${data.error}`);
+    }
+  } catch (err) {
+    showToast('SMTP Test fehlgeschlagen.');
+  }
+};
+
+// Admin: Load Users List
+async function loadAdminUsers() {
+  try {
+    const res = await fetch('/api/settings/admin/users');
+    const users = await res.json();
+
+    const container = document.getElementById('admin-user-list');
+    container.innerHTML = '';
+
+    users.forEach(user => {
+      const row = document.createElement('tr');
+      const ssoText = user.sso_provider ? `Authentik (${user.sso_provider})` : 'Nein';
+      
+      row.innerHTML = `
+        <td>${user.username}</td>
+        <td>
+          <select class="form-control select-role" style="padding: 2px 6px; font-size: 0.85rem; width: auto; background: var(--color-surface);">
+            <option value="user" ${user.role === 'user' ? 'selected' : ''}>User</option>
+            <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin</option>
+          </select>
+        </td>
+        <td>${ssoText}</td>
+        <td>${user.file_count}</td>
+        <td>${formatBytes(user.storage_used)}</td>
+        <td>
+          <button class="btn btn-action-delete-user" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 10px;">
+            Löschen
+          </button>
+        </td>
+      `;
+
+      // Handle role change
+      row.querySelector('.select-role').onchange = async (e) => {
+        const newRole = e.target.value;
+        try {
+          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'role', role: newRole }),
+          });
+          if (r.ok) {
+            showToast('Benutzerrolle geändert.');
+          } else {
+            const err = await r.json();
+            showToast(err.error);
+            loadSettings(); // Rollback UI state
+          }
+        } catch (err) {
+          showToast('Fehler beim Ändern der Rolle.');
+        }
+      };
+
+      // Handle delete user
+      row.querySelector('.btn-action-delete-user').onclick = async () => {
+        if (!confirm(`Möchtest du den Benutzer "${user.username}" und alle seine Dateien wirklich unwiderruflich löschen?`)) return;
+        try {
+          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'delete' }),
+          });
+          if (r.ok) {
+            showToast('Benutzer gelöscht.');
+            loadSettings();
+          } else {
+            const err = await r.json();
+            showToast(err.error);
+          }
+        } catch (err) {
+          showToast('Fehler beim Löschen des Benutzers.');
+        }
+      };
+
+      // Disable delete on current user
+      if (user.id === currentUser.id) {
+        row.querySelector('.btn-action-delete-user').disabled = true;
+        row.querySelector('.btn-action-delete-user').style.opacity = '0.5';
+        row.querySelector('.select-role').disabled = true;
+      }
+
+      container.appendChild(row);
+    });
+  } catch (err) {
+    console.error('Error loading admin users:', err);
+  }
+}
+
+// User Geteilte Links auflisten
+async function loadUserShares() {
+  try {
+    const res = await fetch('/api/shares');
+    allShares = await res.json();
+
+    const container = document.getElementById('user-shares-list');
+    container.innerHTML = '';
+
+    if (allShares.length === 0) {
+      container.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--color-text-muted);">Du hast noch keine Links geteilt.</td></tr>`;
+      return;
+    }
+
+    allShares.forEach(share => {
+      const row = document.createElement('tr');
+      const typeText = share.is_folder ? 'Ordner' : 'Datei';
+      const expiresText = share.expires_at 
+        ? new Date(share.expires_at).toLocaleDateString('de-DE') 
+        : 'Nie';
+
+      const permissions = [];
+      if (share.can_read) permissions.push('Read');
+      if (share.can_write) permissions.push('Write');
+      if (share.can_download) permissions.push('Download');
+      if (share.can_zip) permissions.push('ZIP');
+
+      row.innerHTML = `
+        <td style="font-weight: 500;">${share.file_name}</td>
+        <td>${typeText}</td>
+        <td><a href="/s/${share.slug}" target="_blank" style="color: var(--color-accent); text-decoration: none;">/s/${share.slug}</a></td>
+        <td><span style="font-size: 0.8rem; color: var(--color-text-muted);">${permissions.join(', ')}</span></td>
+        <td>${expiresText}</td>
+        <td>
+          <button class="btn btn-action-delete-share" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 10px;">
+            Löschen
+          </button>
+        </td>
+      `;
+
+      row.querySelector('.btn-action-delete-share').onclick = async () => {
+        if (!confirm('Diesen Freigabelink wirklich löschen?')) return;
+        try {
+          const r = await fetch(`/api/shares/${share.id}`, { method: 'DELETE' });
+          if (r.ok) {
+            showToast('Freigabe gelöscht.');
+            loadSettings();
+          }
+        } catch (err) {
+          showToast('Fehler beim Löschen.');
+        }
+      };
+
+      container.appendChild(row);
+    });
+  } catch (err) {
+    console.error('Error loading shares:', err);
+  }
+}
+
+/* ==========================================================================
+   INITIALIZATION
+   ========================================================================== */
+window.onload = () => {
+  // Check reset password URL param
+  const urlParams = new URLSearchParams(window.location.search);
+  const resetToken = urlParams.get('token');
+  if (resetToken) {
+    window.history.replaceState({}, document.title, "/");
+    handleResetPasswordFlow(resetToken);
+  }
+
+  checkAuthStatus();
+};

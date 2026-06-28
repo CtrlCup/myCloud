@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>myCloud - Sicherer Cloud-Speicher</title>
+  <!-- Google Fonts Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- SimpleWebAuthn Browser helper -->
+  <script src="https://unpkg.com/@simplewebauthn/browser/dist/bundle/index.umd.min.js"></script>
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+  <!-- Haupt-Container -->
+  <div class="container">
+    
+    <!-- HEADER -->
+    <header id="app-header" style="display: none;">
+      <a href="/#dashboard" class="logo" id="logo-btn">
+        <i data-lucide="cloud"></i> my<span>Cloud</span>
+      </a>
+      <div class="user-nav">
+        <span id="nav-username" style="font-weight: 500;"></span>
+        <button class="btn" id="settings-nav-btn">
+          <i data-lucide="settings"></i> Einstellungen
+        </button>
+        <button class="btn btn-primary" id="logout-btn">
+          <i data-lucide="log-out"></i> Abmelden
+        </button>
+      </div>
+    </header>
+
+    <!-- 1. AUTHENTIFIZIERUNGS-ANSICHT -->
+    <main id="auth-view" class="auth-container">
+      <div class="card auth-card">
+        <h1 class="logo auth-title" style="justify-content: center; margin-bottom: 0.5rem;">
+          <i data-lucide="cloud" style="width: 32px; height: 32px;"></i> my<span>Cloud</span>
+        </h1>
+        <p class="auth-subtitle" id="auth-subtitle">Willkommen! Bitte melde dich an.</p>
+        
+        <form id="auth-form">
+          <div class="form-group">
+            <label for="username">Benutzername</label>
+            <input type="text" id="username" class="form-control" placeholder="z. B. alex" required autocomplete="username">
+          </div>
+          
+          <div class="form-group" id="password-group">
+            <label for="password">Passwort</label>
+            <input type="password" id="password" class="form-control" placeholder="••••••••" required autocomplete="current-password">
+          </div>
+          
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" style="justify-content: center;" id="auth-submit-btn">
+              Anmelden
+            </button>
+            
+            <button type="button" class="btn" id="passkey-login-btn" style="justify-content: center;">
+              <i data-lucide="key-round"></i> Mit Passkey anmelden
+            </button>
+            
+            <a href="/auth/sso" class="btn" id="sso-login-btn" style="display: none; justify-content: center;">
+              <i data-lucide="shield-check"></i> Über Authentik (SSO) anmelden
+            </a>
+          </div>
+        </form>
+        
+        <div class="divider" id="auth-divider">oder</div>
+        
+        <div style="text-align: center;">
+          <button type="button" class="btn" id="toggle-auth-mode" style="border: none; background: transparent; padding: 0;">
+            Noch kein Konto? Registrieren
+          </button>
+        </div>
+
+        <div style="text-align: center; margin-top: 1rem;" id="forgot-password-container">
+          <button type="button" class="btn" id="forgot-password-btn" style="border: none; background: transparent; padding: 0; font-size: 0.85rem; opacity: 0.8;">
+            Passwort vergessen?
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <!-- 2. DASHBOARD / FILE-EXPLORER -->
+    <main id="dashboard-view" class="explorer" style="display: none;">
+      <div class="toolbar">
+        <div class="breadcrumbs" id="breadcrumbs">
+          <!-- Dynamisch generiert -->
+        </div>
+        <div style="display: flex; gap: 0.75rem;">
+          <button class="btn" id="new-folder-btn">
+            <i data-lucide="folder-plus"></i> Neuer Ordner
+          </button>
+          <label class="btn btn-primary" style="margin: 0; cursor: pointer;">
+            <i data-lucide="upload"></i> Datei hochladen
+            <input type="file" id="file-upload-input" style="display: none;">
+          </label>
+        </div>
+      </div>
+
+      <!-- Drag & Drop Zone -->
+      <div id="dropzone" class="dropzone">
+        <i data-lucide="upload-cloud" style="width: 48px; height: 48px; color: var(--color-accent); margin-bottom: 0.5rem;"></i>
+        <p>Dateien per Drag & Drop hierher ziehen oder klicken zum Hochladen</p>
+      </div>
+
+      <!-- Dateiliste -->
+      <div class="file-grid" id="file-grid">
+        <!-- Dynamisch generiert -->
+      </div>
+    </main>
+
+    <!-- 3. EINSTELLUNGS-ANSICHT -->
+    <main id="settings-view" class="card" style="display: none; padding: 2.5rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; border-bottom: 1px solid var(--color-border); padding-bottom: 1rem;">
+        <h2>Einstellungen</h2>
+        <button class="btn" id="back-to-dashboard-btn">
+          <i data-lucide="arrow-left"></i> Zurück zum Dashboard
+        </button>
+      </div>
+      
+      <div class="settings-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="settings-nav">
+          <div class="settings-nav-item active" data-section="profile-settings">
+            <i data-lucide="user"></i> Profil & Passkeys
+          </div>
+          <div class="settings-nav-item" data-section="admin-settings" id="admin-settings-tab" style="display: none;">
+            <i data-lucide="sliders"></i> Systemeinstellungen
+          </div>
+          <div class="settings-nav-item" data-section="admin-users" id="admin-users-tab" style="display: none;">
+            <i data-lucide="users"></i> Benutzerverwaltung
+          </div>
+          <div class="settings-nav-item" data-section="shares-settings">
+            <i data-lucide="link"></i> Geteilte Links
+          </div>
+        </aside>
+
+        <!-- Content Bereich -->
+        <div class="settings-content">
+          
+          <!-- Section 1: Profil & Passkeys -->
+          <section id="profile-settings" class="settings-section active">
+            <div class="card" style="background: rgba(0,0,0,0.15);">
+              <h3>Passwort ändern</h3>
+              <form id="change-password-form" style="margin-top: 1rem;">
+                <div class="form-group">
+                  <label for="current-password">Aktuelles Passwort</label>
+                  <input type="password" id="current-password" class="form-control" required>
+                </div>
+                <div class="form-group">
+                  <label for="new-password">Neues Passwort</label>
+                  <input type="password" id="new-password" class="form-control" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Passwort speichern</button>
+              </form>
+            </div>
+
+            <div class="card" style="background: rgba(0,0,0,0.15); margin-top: 2rem;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <h3>Passkeys (Passwortloses Login)</h3>
+                <button class="btn btn-primary" id="register-passkey-btn">
+                  <i data-lucide="plus"></i> Passkey hinzufügen
+                </button>
+              </div>
+              <p style="font-size: 0.9rem; color: var(--color-text-muted); margin-bottom: 1.5rem;">
+                Passkeys ermöglichen eine hochsichere und passwortlose Anmeldung über Windows Hello, Face ID, Touch ID oder Sicherheits-Keys.
+              </p>
+              <div class="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Registriert am</th>
+                      <th>ID (Auszug)</th>
+                      <th>Aktion</th>
+                    </tr>
+                  </thead>
+                  <tbody id="passkey-list">
+                    <!-- Dynamisch generiert -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <!-- Section 2: Admin Systemeinstellungen -->
+          <section id="admin-settings" class="settings-section">
+            <form id="admin-config-form">
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>Allgemein</h3>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem;">
+                  <div>
+                    <strong style="display: block;">Registrierung erlauben</strong>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Erlaubt neuen Benutzern, ein Konto auf der Anmeldeseite zu erstellen.</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="admin-reg-enabled">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>SSO / Authentik Integration</h3>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; margin-bottom: 1.5rem;">
+                  <div>
+                    <strong style="display: block;">SSO Login aktivieren</strong>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Zeigt den SSO-Button auf der Login-Seite an.</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="admin-sso-enabled">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="form-group">
+                  <label for="admin-sso-issuer">OIDC Issuer URL</label>
+                  <input type="url" id="admin-sso-issuer" class="form-control" placeholder="https://authentik.company.local/application/o/mycloud/">
+                </div>
+                <div class="form-group">
+                  <label for="admin-sso-client-id">Client ID</label>
+                  <input type="text" id="admin-sso-client-id" class="form-control">
+                </div>
+                <div class="form-group">
+                  <label for="admin-sso-client-secret">Client Secret</label>
+                  <input type="password" id="admin-sso-client-secret" class="form-control" placeholder="Unverändert lassen oder neu eingeben">
+                </div>
+                <div class="form-group">
+                  <label for="admin-sso-redirect">Redirect URI (Callback)</label>
+                  <input type="text" id="admin-sso-redirect" class="form-control" readonly>
+                </div>
+              </div>
+
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>E-Mail Service (SMTP)</h3>
+                <div class="form-group">
+                  <label for="admin-smtp-host">SMTP Host</label>
+                  <input type="text" id="admin-smtp-host" class="form-control" placeholder="smtp.mailtrap.io">
+                </div>
+                <div class="form-group">
+                  <label for="admin-smtp-port">SMTP Port</label>
+                  <input type="number" id="admin-smtp-port" class="form-control" placeholder="587">
+                </div>
+                <div class="form-group">
+                  <label for="admin-smtp-user">SMTP Username</label>
+                  <input type="text" id="admin-smtp-user" class="form-control">
+                </div>
+                <div class="form-group">
+                  <label for="admin-smtp-pass">SMTP Password</label>
+                  <input type="password" id="admin-smtp-pass" class="form-control" placeholder="Unverändert lassen oder neu eingeben">
+                </div>
+                <div class="form-group">
+                  <label for="admin-smtp-from">Absender-Adresse (From)</label>
+                  <input type="email" id="admin-smtp-from" class="form-control" placeholder="noreply@mycloud.local">
+                </div>
+                
+                <div style="display: flex; gap: 1rem; align-items: flex-end; border-top: 1px solid var(--color-border); padding-top: 1.5rem; margin-top: 1.5rem;">
+                  <div style="flex-grow: 1;">
+                    <label for="admin-smtp-test-recipient">Test-Empfänger E-Mail</label>
+                    <input type="email" id="admin-smtp-test-recipient" class="form-control" placeholder="empfaenger@domain.com">
+                  </div>
+                  <button type="button" class="btn" id="test-smtp-btn">SMTP testen</button>
+                </div>
+              </div>
+
+              <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
+                Systemkonfigurationen speichern
+              </button>
+            </form>
+          </section>
+
+          <!-- Section 3: Admin Benutzerverwaltung -->
+          <section id="admin-users" class="settings-section">
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Benutzername</th>
+                    <th>Rolle</th>
+                    <th>SSO</th>
+                    <th>Dateien</th>
+                    <th>Speicher</th>
+                    <th>Aktionen</th>
+                  </tr>
+                </thead>
+                <tbody id="admin-user-list">
+                  <!-- Dynamisch generiert -->
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Section 4: Geteilte Links -->
+          <section id="shares-settings" class="settings-section">
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Element</th>
+                    <th>Typ</th>
+                    <th>Link (Slug)</th>
+                    <th>Rechte</th>
+                    <th>Ablaufdatum</th>
+                    <th>Aktion</th>
+                  </tr>
+                </thead>
+                <tbody id="user-shares-list">
+                  <!-- Dynamisch generiert -->
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </main>
+
+  </div>
+
+  <!-- SHARE MODAL -->
+  <div class="modal-overlay" id="share-modal-overlay">
+    <div class="card modal">
+      <div class="modal-header">
+        <h3 class="modal-title">Ordner/Datei teilen</h3>
+        <button class="close-btn" id="close-share-modal-btn">&times;</button>
+      </div>
+      <form id="share-form">
+        <input type="hidden" id="share-file-id">
+        <input type="hidden" id="share-existing-id">
+        
+        <div class="form-group">
+          <label for="share-slug">Freigabe-Link bearbeiten (Slug)</label>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <span style="color: var(--color-text-muted); font-size: 0.9rem;" id="share-url-prefix">http://localhost:3000/s/</span>
+            <input type="text" id="share-slug" class="form-control" placeholder="mein-ordner" pattern="[a-z0-9-_]+" title="Nur Kleinbuchstaben, Zahlen, - und _">
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 0.75rem; margin: 1.5rem 0;">
+          <strong style="font-size: 0.85rem; text-transform: uppercase; color: var(--color-text-muted); letter-spacing: 0.05em;">Berechtigungen</strong>
+          
+          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
+            <input type="checkbox" id="share-can-read" checked disabled>
+            <span>Inhalte anzeigen (Leserechte)</span>
+          </label>
+          
+          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
+            <input type="checkbox" id="share-can-write">
+            <span>Dateien hochladen (Schreibrechte)</span>
+          </label>
+          
+          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
+            <input type="checkbox" id="share-can-download" checked>
+            <span>Dateien herunterladen</span>
+          </label>
+          
+          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
+            <input type="checkbox" id="share-can-zip" checked>
+            <span>Als ZIP herunterladen</span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label for="share-expires">Ablaufdatum (Tage)</label>
+          <input type="number" id="share-expires" class="form-control" placeholder="Nie (leer lassen)" min="1">
+        </div>
+
+        <div class="form-actions" style="margin-top: 1.5rem;">
+          <button type="submit" class="btn btn-primary" style="justify-content: center;">Link generieren</button>
+          <button type="button" class="btn" id="delete-share-btn" style="display: none; border-color: rgba(255,0,0,0.3); color: #ff5555; justify-content: center;">Freigabe aufheben</button>
+        </div>
+
+        <!-- Result Link Section -->
+        <div id="share-result-section" style="display: none; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--color-border);">
+          <label>Freigabe-Link</label>
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+            <input type="text" id="share-result-input" class="form-control" readonly>
+            <button type="button" class="btn btn-primary" id="copy-share-link-btn">
+              <i data-lucide="copy"></i> Kopieren
+            </button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- NOTIFICATION TOAST -->
+  <div class="notification" id="toast">
+    <span id="toast-message">Meldung</span>
+  </div>
+
+  <!-- Client-side Logic Script -->
+  <script src="/app.js"></script>
+</body>
+</html>

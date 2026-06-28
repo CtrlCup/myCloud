@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Freigabe - myCloud</title>
+  <!-- Google Fonts Outfit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+  <div class="container">
+    <!-- HEADER -->
+    <header>
+      <div class="logo">
+        <i data-lucide="cloud"></i> my<span>Cloud</span> Shared
+      </div>
+      <div class="user-nav">
+        <span class="badge" id="share-owner-badge" style="font-weight: 500;">Geteilter Inhalt</span>
+      </div>
+    </header>
+
+    <!-- CONTENT -->
+    <main class="explorer">
+      
+      <!-- Geteilte Ordner Info -->
+      <div class="card" id="share-meta-card" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+        <div>
+          <h2 id="shared-title" style="display: flex; align-items: center; gap: 0.5rem;">
+            <i data-lucide="folder"></i> Ordner laden...
+          </h2>
+          <div class="share-permissions-badges" id="share-permissions-badges" style="justify-content: flex-start;">
+            <!-- Badges werden dynamisch geladen -->
+          </div>
+        </div>
+        <div>
+          <button class="btn btn-primary" id="download-all-zip-btn" style="display: none;">
+            <i data-lucide="file-archive"></i> Als ZIP herunterladen
+          </button>
+        </div>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="toolbar">
+        <div class="breadcrumbs" id="share-breadcrumbs">
+          <!-- Dynamisch -->
+        </div>
+        <div style="display: flex; gap: 0.75rem;">
+          <!-- Upload Button, nur sichtbar bei Schreibrechten -->
+          <label class="btn btn-primary" id="public-upload-label" style="display: none; margin: 0; cursor: pointer;">
+            <i data-lucide="upload"></i> Datei hochladen
+            <input type="file" id="public-file-upload-input" style="display: none;">
+          </label>
+        </div>
+      </div>
+
+      <!-- Dropzone (nur sichtbar bei Schreibrechten) -->
+      <div id="public-dropzone" class="dropzone" style="display: none;">
+        <i data-lucide="upload-cloud" style="width: 48px; height: 48px; color: var(--color-accent); margin-bottom: 0.5rem;"></i>
+        <p>Dateien per Drag & Drop in diese Freigabe hochladen</p>
+      </div>
+
+      <!-- Dateiliste -->
+      <div class="file-grid" id="public-file-grid">
+        <!-- Dynamisch generiert -->
+      </div>
+    </main>
+  </div>
+
+  <!-- NOTIFICATION TOAST -->
+  <div class="notification" id="public-toast">
+    <span id="public-toast-message">Meldung</span>
+  </div>
+
+  <!-- Client-side Logic Script for public share page -->
+  <script>
+    // Config und State
+    const slug = window.location.pathname.split('/').pop();
+    let currentFolderId = null;
+    let shareConfig = null;
+    let breadcrumbsHistory = [];
+
+    // Toast Helper
+    function showToast(message) {
+      const toast = document.getElementById('public-toast');
+      document.getElementById('public-toast-message').textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    // Byte-Größen formatieren
+    function formatBytes(bytes) {
+      if (bytes === 0 || !bytes) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    // Daten laden
+    async function loadShareData(folderId = null) {
+      try {
+        let url = `/api/public/shares/${slug}`;
+        if (folderId) url += `?parentId=${folderId}`;
+
+        const res = await fetch(url);
+        if (!res.ok) {
+          const err = await res.json();
+          document.getElementById('shared-title').innerHTML = `<i data-lucide="alert-triangle"></i> Fehler`;
+          document.getElementById('shared-title').style.color = '#ff5555';
+          document.getElementById('public-file-grid').innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--color-text-muted);">${err.error || 'Fehler beim Laden.'}</div>`;
+          lucide.createIcons();
+          return;
+        }
+
+        const data = await res.json();
+        shareConfig = data.share;
+        currentFolderId = data.currentFolderId;
+
+        // Render Meta Info
+        document.getElementById('shared-title').innerHTML = `
+          <i data-lucide="${data.baseFile.is_folder ? 'folder' : 'file'}"></i> ${data.baseFile.name}
+        `;
+        
+        // Badges
+        const badges = [];
+        if (shareConfig.can_read) badges.push('<span class="badge">Lesen</span>');
+        if (shareConfig.can_write) badges.push('<span class="badge">Schreiben/Hochladen</span>');
+        if (shareConfig.can_download) badges.push('<span class="badge">Download</span>');
+        if (shareConfig.can_zip) badges.push('<span class="badge">ZIP-Export</span>');
+        document.getElementById('share-permissions-badges').innerHTML = badges.join('');
+
+        // ZIP-Download Button anzeigen
+        if (shareConfig.can_zip && data.baseFile.is_folder) {
+          const zipBtn = document.getElementById('download-all-zip-btn');
+          zipBtn.style.display = 'inline-flex';
+          zipBtn.onclick = () => {
+            window.location.href = `/api/public/shares/${slug}/download-zip/${currentFolderId}`;
+          };
+        }
+
+        // Schreibrechte aktivieren
+        if (shareConfig.can_write && data.baseFile.is_folder) {
+          document.getElementById('public-upload-label').style.display = 'inline-flex';
+          document.getElementById('public-dropzone').style.display = 'block';
+        } else {
+          document.getElementById('public-upload-label').style.display = 'none';
+          document.getElementById('public-dropzone').style.display = 'none';
+        }
+
+        // Update Breadcrumbs
+        updateBreadcrumbs(data.baseFile, currentFolderId);
+
+        // Render Files
+        renderFiles(data.files);
+        
+        lucide.createIcons();
+      } catch (err) {
+        console.error('Error loading share:', err);
+        showToast('Fehler beim Verbinden mit dem Server.');
+      }
+    }
+
+    // Breadcrumbs generieren
+    function updateBreadcrumbs(baseFile, activeId) {
+      const container = document.getElementById('share-breadcrumbs');
+      container.innerHTML = '';
+
+      if (activeId === baseFile.id) {
+        breadcrumbsHistory = [{ id: baseFile.id, name: baseFile.name }];
+      }
+
+      breadcrumbsHistory.forEach((crumb, idx) => {
+        if (idx > 0) {
+          const sep = document.createElement('span');
+          sep.className = 'breadcrumb-separator';
+          sep.textContent = '/';
+          container.appendChild(sep);
+        }
+
+        if (idx === breadcrumbsHistory.length - 1) {
+          const cur = document.createElement('span');
+          cur.className = 'breadcrumb-current';
+          cur.textContent = crumb.name;
+          container.appendChild(cur);
+        } else {
+          const link = document.createElement('a');
+          link.href = '#';
+          link.className = 'breadcrumb-item';
+          link.textContent = crumb.name;
+          link.onclick = (e) => {
+            e.preventDefault();
+            breadcrumbsHistory = breadcrumbsHistory.slice(0, idx + 1);
+            loadShareData(crumb.id);
+          };
+          container.appendChild(link);
+        }
+      });
+    }
+
+    // Render Files Grid
+    function renderFiles(files) {
+      const grid = document.getElementById('public-file-grid');
+      grid.innerHTML = '';
+
+      if (files.length === 0) {
+        grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--color-text-muted); padding: 3rem 0;">Dieser Ordner ist leer.</div>`;
+        return;
+      }
+
+      files.forEach(file => {
+        const item = document.createElement('div');
+        item.className = 'file-item';
+
+        const iconName = file.is_folder ? 'folder' : 'file';
+        
+        item.innerHTML = `
+          <div class="file-icon"><i data-lucide="${iconName}"></i></div>
+          <div class="file-name" title="${file.name}">${file.name}</div>
+          <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
+        `;
+
+        item.onclick = () => {
+          if (file.is_folder) {
+            // In Breadcrumb history packen
+            if (!breadcrumbsHistory.some(c => c.id === file.id)) {
+              breadcrumbsHistory.push({ id: file.id, name: file.name });
+            }
+            loadShareData(file.id);
+          } else {
+            if (shareConfig.can_download) {
+              window.location.href = `/api/public/shares/${slug}/download/${file.id}`;
+            } else {
+              showToast('Download für diese Freigabe deaktiviert.');
+            }
+          }
+        };
+
+        grid.appendChild(item);
+      });
+    }
+
+    // Datei-Upload per Input
+    document.getElementById('public-file-upload-input').onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const formData = new FormData();
+      formData.append('file', file);
+      if (currentFolderId) formData.append('parentId', currentFolderId);
+
+      showToast('Lade Datei hoch...');
+
+      try {
+        const res = await fetch(`/api/public/shares/${slug}/upload`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (res.ok) {
+          showToast('Erfolgreich hochgeladen!');
+          loadShareData(currentFolderId);
+        } else {
+          const err = await res.json();
+          showToast(`Fehler: ${err.error}`);
+        }
+      } catch (err) {
+        showToast('Verbindungsfehler beim Upload.');
+      }
+    };
+
+    // Drag and Drop implementation
+    const dropzone = document.getElementById('public-dropzone');
+    ['dragenter', 'dragover'].forEach(name => {
+      dropzone.addEventListener(name, (e) => {
+        e.preventDefault();
+        dropzone.classList.add('dragover');
+      });
+    });
+    ['dragleave', 'drop'].forEach(name => {
+      dropzone.addEventListener(name, (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+      });
+    });
+    dropzone.addEventListener('drop', async (e) => {
+      const files = e.dataTransfer.files;
+      if (files.length === 0) return;
+      
+      const file = files[0];
+      const formData = new FormData();
+      formData.append('file', file);
+      if (currentFolderId) formData.append('parentId', currentFolderId);
+
+      showToast('Lade Datei hoch...');
+
+      try {
+        const res = await fetch(`/api/public/shares/${slug}/upload`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (res.ok) {
+          showToast('Erfolgreich hochgeladen!');
+          loadShareData(currentFolderId);
+        } else {
+          const err = await res.json();
+          showToast(`Fehler: ${err.error}`);
+        }
+      } catch (err) {
+        showToast('Verbindungsfehler beim Upload.');
+      }
+    });
+
+    // Start
+    window.onload = () => loadShareData();
+  </script>
+</body>
+</html>
