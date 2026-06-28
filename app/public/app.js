@@ -568,6 +568,7 @@ document.getElementById('back-to-dashboard-btn').onclick = () => {
 document.getElementById('logo-btn').onclick = (e) => {
   e.preventDefault();
   currentFolderId = null;
+  breadcrumbsHistory = [];
   window.location.hash = '#dashboard';
   showView('dashboard');
 };
