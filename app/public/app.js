@@ -4,6 +4,10 @@ let currentFolderId = null;
 let breadcrumbsHistory = [];
 let isRegisterMode = false;
 let allShares = []; // Alle Shares des Users
+let selectedFileIds = [];
+let renderedFilesList = [];
+let lastSelectedId = null; // Für Shift-Auswahl
+
 
 // DOM Elements
 const authView = document.getElementById('auth-view');
@@ -366,6 +370,7 @@ function renderBreadcrumbs() {
 }
 
 function renderFiles(files) {
+  renderedFilesList = files;
   const grid = document.getElementById('file-grid');
   grid.innerHTML = '';
 
@@ -377,10 +382,15 @@ function renderFiles(files) {
   files.forEach(file => {
     const item = document.createElement('div');
     item.className = 'file-item';
+    item.setAttribute('data-id', file.id);
+    if (selectedFileIds.includes(file.id)) {
+      item.classList.add('selected');
+    }
     
     const iconName = file.is_folder ? 'folder' : 'file';
 
     item.innerHTML = `
+      <div class="file-item-checkbox"></div>
       <div class="file-icon"><i data-lucide="${iconName}"></i></div>
       <div class="file-name" title="${file.name}">${file.name}</div>
       <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
@@ -391,19 +401,73 @@ function renderFiles(files) {
       </div>
     `;
 
-    // Click handler to navigate folders or download files
+    // Click handler for Multi-selection and Normal Actions
     item.onclick = (e) => {
-      // ignore click if it was on action button
       if (e.target.closest('.btn-action-more') || e.target.closest('.file-actions')) {
         return;
       }
       
-      if (file.is_folder) {
-        breadcrumbsHistory.push({ id: file.id, name: file.name });
-        loadFiles(file.id);
+      const isCheckbox = e.target.closest('.file-item-checkbox');
+      const isMultiSelectActive = selectedFileIds.length > 0;
+      
+      if (isCheckbox || e.ctrlKey || e.metaKey || isMultiSelectActive) {
+        e.preventDefault();
+        
+        if (e.shiftKey && lastSelectedId !== null) {
+          // Range selection
+          const startIdx = renderedFilesList.findIndex(f => f.id === lastSelectedId);
+          const endIdx = renderedFilesList.findIndex(f => f.id === file.id);
+          if (startIdx !== -1 && endIdx !== -1) {
+            const min = Math.min(startIdx, endIdx);
+            const max = Math.max(startIdx, endIdx);
+            
+            // clear selections between first
+            selectedFileIds = [];
+            for (let i = min; i <= max; i++) {
+              selectedFileIds.push(renderedFilesList[i].id);
+            }
+          }
+        } else {
+          // Toggle selection
+          const idx = selectedFileIds.indexOf(file.id);
+          if (idx === -1) {
+            selectedFileIds.push(file.id);
+            lastSelectedId = file.id;
+          } else {
+            selectedFileIds.splice(idx, 1);
+            if (lastSelectedId === file.id) {
+              lastSelectedId = selectedFileIds[selectedFileIds.length - 1] || null;
+            }
+          }
+        }
+        updateMultiSelectUI();
       } else {
-        window.location.href = `/api/files/download/${file.id}`;
+        // Normal Action (Navigation/Download)
+        if (file.is_folder) {
+          breadcrumbsHistory.push({ id: file.id, name: file.name });
+          loadFiles(file.id);
+        } else {
+          window.location.href = `/api/files/download/${file.id}`;
+        }
       }
+    };
+
+    // Right Click context menu for item
+    item.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (!selectedFileIds.includes(file.id)) {
+        if (!e.ctrlKey && !e.metaKey) {
+          selectedFileIds = [file.id];
+        } else {
+          selectedFileIds.push(file.id);
+        }
+        lastSelectedId = file.id;
+        updateMultiSelectUI();
+      }
+
+      showFileContextMenu(file, e.clientX, e.clientY);
     };
 
     // Action Menu Button
@@ -418,9 +482,36 @@ function renderFiles(files) {
   lucide.createIcons();
 }
 
-// Custom simple Context Menu
+// Multi Selection UI Updates
+function updateMultiSelectUI() {
+  const bar = document.getElementById('multi-actions-bar');
+  const countSpan = document.getElementById('multi-selection-count');
+  
+  document.querySelectorAll('.file-item').forEach(item => {
+    const id = parseInt(item.getAttribute('data-id'));
+    if (selectedFileIds.includes(id)) {
+      item.classList.add('selected');
+    } else {
+      item.classList.remove('selected');
+    }
+  });
+
+  if (selectedFileIds.length > 0) {
+    bar.style.display = 'flex';
+    countSpan.textContent = `${selectedFileIds.length} Element(e) ausgewählt`;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+function clearSelection() {
+  selectedFileIds = [];
+  lastSelectedId = null;
+  updateMultiSelectUI();
+}
+
+// Item Context Menu
 function showFileContextMenu(file, x, y) {
-  // Remove existing menus
   const existing = document.querySelector('.context-menu');
   if (existing) existing.remove();
 
@@ -434,36 +525,58 @@ function showFileContextMenu(file, x, y) {
   menu.style.display = 'flex';
   menu.style.flexDirection = 'column';
   menu.style.gap = '0.25rem';
-  menu.style.minWidth = '150px';
+  menu.style.minWidth = '180px';
 
   const actions = [];
-  
-  if (!file.is_folder) {
+
+  if (selectedFileIds.length > 1) {
+    // Context Actions for Multiple Items
     actions.push({
-      label: 'Herunterladen',
-      icon: 'download',
-      action: () => window.location.href = `/api/files/download/${file.id}`
+      label: 'Ausgewählte als ZIP',
+      icon: 'file-archive',
+      action: () => {
+        window.location.href = `/api/files/download-zip-multiple?ids=${selectedFileIds.join(',')}`;
+        clearSelection();
+      }
+    });
+    actions.push({
+      label: 'Ausgewählte löschen',
+      icon: 'trash-2',
+      action: () => deleteSelectedFiles()
+    });
+    actions.push({
+      label: 'Auswahl aufheben',
+      icon: 'x-square',
+      action: () => clearSelection()
     });
   } else {
+    // Context Actions for Single Item
+    if (!file.is_folder) {
+      actions.push({
+        label: 'Herunterladen',
+        icon: 'download',
+        action: () => window.location.href = `/api/files/download/${file.id}`
+      });
+    } else {
+      actions.push({
+        label: 'Als ZIP laden',
+        icon: 'file-archive',
+        action: () => window.location.href = `/api/files/download-zip/${file.id}`
+      });
+    }
+
     actions.push({
-      label: 'Als ZIP laden',
-      icon: 'file-archive',
-      action: () => window.location.href = `/api/files/download-zip/${file.id}`
+      label: 'Teilen',
+      icon: 'share-2',
+      action: () => openShareModal(file)
+    });
+
+    actions.push({
+      label: 'Löschen',
+      icon: 'trash-2',
+      action: () => deleteFile(file)
     });
   }
-
-  // Sharing is allowed for both files and folders
-  actions.push({
-    label: 'Teilen',
-    icon: 'share-2',
-    action: () => openShareModal(file)
-  });
-
-  actions.push({
-    label: 'Löschen',
-    icon: 'trash-2',
-    action: () => deleteFile(file)
-  });
 
   actions.forEach(act => {
     const btn = document.createElement('button');
@@ -474,7 +587,7 @@ function showFileContextMenu(file, x, y) {
     btn.style.width = '100%';
     btn.innerHTML = `<i data-lucide="${act.icon}" style="width: 16px; height: 16px;"></i> ${act.label}`;
     
-    if (act.label === 'Löschen') {
+    if (act.label.includes('löschen') || act.label === 'Löschen') {
       btn.style.color = '#ff5555';
     }
 
@@ -488,7 +601,6 @@ function showFileContextMenu(file, x, y) {
   document.body.appendChild(menu);
   lucide.createIcons();
 
-  // Close context menu on click outside
   const closeMenu = (e) => {
     if (!menu.contains(e.target)) {
       menu.remove();
@@ -498,8 +610,87 @@ function showFileContextMenu(file, x, y) {
   setTimeout(() => document.addEventListener('click', closeMenu), 50);
 }
 
+// Global Dashboard Background Right Click Menu
+document.getElementById('dashboard-view').oncontextmenu = (e) => {
+  if (e.target.closest('.file-item') || e.target.closest('.settings-layout') || e.target.closest('header') || e.target.closest('.modal') || e.target.closest('#multi-actions-bar')) {
+    return;
+  }
+  
+  e.preventDefault();
+
+  const existing = document.querySelector('.context-menu');
+  if (existing) existing.remove();
+
+  const menu = document.createElement('div');
+  menu.className = 'card context-menu';
+  menu.style.position = 'fixed';
+  menu.style.left = `${e.clientX}px`;
+  menu.style.top = `${e.clientY}px`;
+  menu.style.zIndex = '999';
+  menu.style.padding = '0.5rem';
+  menu.style.display = 'flex';
+  menu.style.flexDirection = 'column';
+  menu.style.gap = '0.25rem';
+  menu.style.minWidth = '180px';
+
+  const actions = [
+    {
+      label: 'Neuer Ordner',
+      icon: 'folder-plus',
+      action: () => createNewFolder()
+    },
+    {
+      label: 'Neue Datei erstellen',
+      icon: 'file-plus',
+      action: () => createNewEmptyFile()
+    },
+    {
+      label: 'Datei hochladen',
+      icon: 'upload',
+      action: () => document.getElementById('file-upload-input').click()
+    }
+  ];
+
+  if (selectedFileIds.length > 0) {
+    actions.push({
+      label: 'Auswahl aufheben',
+      icon: 'x-square',
+      action: () => clearSelection()
+    });
+  }
+
+  actions.forEach(act => {
+    const btn = document.createElement('button');
+    btn.className = 'btn';
+    btn.style.border = 'none';
+    btn.style.justifyContent = 'flex-start';
+    btn.style.padding = '0.5rem 1rem';
+    btn.style.width = '100%';
+    btn.innerHTML = `<i data-lucide="${act.icon}" style="width: 16px; height: 16px;"></i> ${act.label}`;
+
+    btn.onclick = () => {
+      act.action();
+      menu.remove();
+    };
+    menu.appendChild(btn);
+  });
+
+  document.body.appendChild(menu);
+  lucide.createIcons();
+
+  const closeMenu = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeMenu), 50);
+};
+
 // Action: Create Folder
-document.getElementById('new-folder-btn').onclick = async () => {
+document.getElementById('new-folder-btn').onclick = () => createNewFolder();
+
+async function createNewFolder() {
   const name = prompt('Bitte gib einen Namen für den neuen Ordner ein:');
   if (!name) return;
 
@@ -520,7 +711,31 @@ document.getElementById('new-folder-btn').onclick = async () => {
   } catch (err) {
     showToast('Fehler beim Erstellen des Ordners.');
   }
-};
+}
+
+// Action: Create Empty File
+async function createNewEmptyFile() {
+  const name = prompt('Bitte gib einen Dateinamen ein (z. B. notizen.txt):');
+  if (!name) return;
+
+  try {
+    const res = await fetch('/api/files/create-empty', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, parentId: currentFolderId }),
+    });
+
+    if (res.ok) {
+      showToast('Leere Datei erfolgreich erstellt.');
+      loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Erstellen der Datei.');
+  }
+}
 
 // Action: Upload File via Click
 document.getElementById('file-upload-input').onchange = async (e) => {
@@ -546,7 +761,7 @@ async function uploadFile(file) {
     });
 
     if (res.ok) {
-      showToast('Datei erfolgreich hochgeladen!');
+      showToast(`Datei "${file.name}" erfolgreich hochgeladen!`);
       loadFiles(currentFolderId);
     } else {
       const err = await res.json();
@@ -557,7 +772,7 @@ async function uploadFile(file) {
   }
 }
 
-// Action: Delete File
+// Action: Delete Single File
 async function deleteFile(file) {
   const confirmMsg = file.is_folder 
     ? `Möchtest du den Ordner "${file.name}" und alle darin enthaltenen Dateien wirklich löschen?`
@@ -582,25 +797,81 @@ async function deleteFile(file) {
   }
 }
 
-// Drag & Drop
-const dropzone = document.getElementById('dropzone');
-['dragenter', 'dragover'].forEach(name => {
-  dropzone.addEventListener(name, (e) => {
-    e.preventDefault();
-    dropzone.classList.add('dragover');
-  });
+// Action: Delete Multiple Selected Files
+async function deleteSelectedFiles() {
+  if (selectedFileIds.length === 0) return;
+  if (!confirm(`Möchtest du die ${selectedFileIds.length} ausgewählten Elemente wirklich löschen?`)) return;
+
+  try {
+    const res = await fetch('/api/files/delete-multiple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: selectedFileIds }),
+    });
+
+    if (res.ok) {
+      showToast('Ausgewählte Elemente gelöscht.');
+      clearSelection();
+      loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error);
+    }
+  } catch (err) {
+    showToast('Fehler beim Löschen.');
+  }
+}
+
+// Multi Select Bar Event Listeners
+document.getElementById('multi-cancel-btn').onclick = () => clearSelection();
+document.getElementById('multi-delete-btn').onclick = () => deleteSelectedFiles();
+document.getElementById('multi-zip-btn').onclick = () => {
+  if (selectedFileIds.length === 0) return;
+  window.location.href = `/api/files/download-zip-multiple?ids=${selectedFileIds.join(',')}`;
+  clearSelection();
+};
+
+// Fullscreen Drag & Drop on Dashboard
+const dragOverlay = document.getElementById('drag-overlay');
+const dashboard = document.getElementById('dashboard-view');
+let dragCounter = 0;
+
+dashboard.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  dragCounter++;
+  if (dragCounter === 1) {
+    dragOverlay.style.display = 'flex';
+  }
 });
-['dragleave', 'drop'].forEach(name => {
-  dropzone.addEventListener(name, (e) => {
-    e.preventDefault();
-    dropzone.classList.remove('dragover');
-  });
+
+dashboard.addEventListener('dragover', (e) => {
+  e.preventDefault();
 });
-dropzone.addEventListener('drop', async (e) => {
+
+dashboard.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter === 0) {
+    dragOverlay.style.display = 'none';
+  }
+});
+
+dashboard.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  dragCounter = 0;
+  dragOverlay.style.display = 'none';
+
   const files = e.dataTransfer.files;
   if (files.length === 0) return;
-  await uploadFile(files[0]);
+
+  showToast(`Lade ${files.length} Datei(en) hoch...`);
+  
+  // Sequential Upload
+  for (let i = 0; i < files.length; i++) {
+    await uploadFile(files[i]);
+  }
 });
+
 
 /* ==========================================================================
    SHARING MODAL LOGIC

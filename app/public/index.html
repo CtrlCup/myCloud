@@ -103,14 +103,35 @@
         </div>
       </div>
 
-      <!-- Drag & Drop Zone -->
-      <div id="dropzone" class="dropzone">
-        <i data-lucide="upload-cloud" style="width: 48px; height: 48px; color: var(--color-accent); margin-bottom: 0.5rem;"></i>
-        <p>Dateien per Drag & Drop hierher ziehen oder klicken zum Hochladen</p>
+      <!-- Mehrfachauswahl Aktionsleiste -->
+      <div id="multi-actions-bar" class="card" style="display: none; padding: 1rem 1.5rem; margin-bottom: 1.5rem; justify-content: space-between; align-items: center; background: rgba(0, 210, 255, 0.05); border-color: var(--color-accent); flex-wrap: wrap; gap: 1rem;">
+        <div style="font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
+          <i data-lucide="check-square" style="color: var(--color-accent); width: 20px; height: 20px;"></i>
+          <span id="multi-selection-count">0 Elemente ausgewählt</span>
+        </div>
+        <div style="display: flex; gap: 0.75rem;">
+          <button class="btn" id="multi-zip-btn">
+            <i data-lucide="file-archive"></i> Als ZIP laden
+          </button>
+          <button class="btn" id="multi-delete-btn" style="color: #ff5555; border-color: rgba(255,0,0,0.3);">
+            <i data-lucide="trash-2"></i> Löschen
+          </button>
+          <button class="btn" id="multi-cancel-btn">
+            Auswahl aufheben
+          </button>
+        </div>
+      </div>
+
+      <!-- Drag & Drop Overlay über das gesamte Dashboard -->
+      <div id="drag-overlay" class="drag-overlay-fs" style="display: none;">
+        <div class="drag-overlay-content">
+          <i data-lucide="upload-cloud" style="width: 64px; height: 64px; color: var(--color-accent); margin-bottom: 1rem;"></i>
+          <h2>Dateien zum Hochladen hier ablegen</h2>
+        </div>
       </div>
 
       <!-- Dateiliste -->
-      <div class="file-grid" id="file-grid">
+      <div class="file-grid" id="file-grid" style="position: relative; min-height: 400px;">
         <!-- Dynamisch generiert -->
       </div>
     </main>

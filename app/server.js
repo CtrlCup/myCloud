@@ -796,6 +796,121 @@ app.delete('/api/files/:id', requireAuth, async (req, res) => {
   }
 });
 
+// Delete multiple files/folders
+app.post('/api/files/delete-multiple', requireAuth, async (req, res) => {
+  const { ids } = req.body;
+  const userId = req.session.userId;
+  
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'No IDs provided' });
+  }
+
+  try {
+    for (const id of ids) {
+      const fileId = parseInt(id);
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+      if (fileRes.rows.length === 0) continue;
+
+      const file = fileRes.rows[0];
+      if (file.owner_id !== userId) continue;
+
+      if (file.is_folder) {
+        await deleteFolderRecursive(file.id, userId);
+      } else {
+        const filePath = path.join(UPLOADS_DIR, file.path);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+        await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting multiple files:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Download multiple files/folders as a single ZIP
+app.get('/api/files/download-zip-multiple', requireAuth, async (req, res) => {
+  const idsParam = req.query.ids;
+  const userId = req.session.userId;
+
+  if (!idsParam) {
+    return res.status(400).json({ error: 'No IDs provided' });
+  }
+
+  const ids = idsParam.split(',').map(id => parseInt(id));
+
+  try {
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="mycloud_selection.zip"');
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => { throw err; });
+    archive.pipe(res);
+
+    for (const id of ids) {
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [id]);
+      if (fileRes.rows.length === 0) continue;
+
+      const file = fileRes.rows[0];
+      if (file.owner_id !== userId) continue;
+
+      if (file.is_folder) {
+        await addFolderToZip(archive, file.id, file.name, userId);
+      } else {
+        const physicalPath = path.join(UPLOADS_DIR, file.path);
+        if (fs.existsSync(physicalPath)) {
+          archive.file(physicalPath, { name: file.name });
+        }
+      }
+    }
+    await archive.finalize();
+  } catch (err) {
+    console.error('Error zipping multiple files:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to create ZIP archive' });
+    }
+  }
+});
+
+// Create new empty file
+app.post('/api/files/create-empty', requireAuth, async (req, res) => {
+  const { name, parentId } = req.body;
+  const userId = req.session.userId;
+  const parsedParentId = parentId ? parseInt(parentId) : null;
+
+  if (!name) {
+    return res.status(400).json({ error: 'File name is required' });
+  }
+
+  try {
+    if (parsedParentId !== null) {
+      const isOwner = await verifyFileOwner(parsedParentId, userId);
+      if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const uniqueFilename = crypto.randomUUID() + '.txt';
+    const physicalPath = path.join(UPLOADS_DIR, uniqueFilename);
+    
+    // Create empty file on disk
+    fs.writeFileSync(physicalPath, '');
+
+    const result = await pool.query(
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [name, uniqueFilename, 'text/plain', 0, false, parsedParentId, userId]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Error creating empty file:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
 /* ==========================================================================
    SHARING SYSTEM ROUTES
    ========================================================================== */
