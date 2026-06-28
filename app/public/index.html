@@ -58,7 +58,7 @@
         
         <form id="auth-form">
           <div class="form-group">
-            <label for="username">Benutzername</label>
+            <label for="username" id="username-label">Benutzername</label>
             <input type="text" id="username" class="form-control" placeholder="z. B. alex" required autocomplete="username">
           </div>
           
@@ -104,7 +104,11 @@
         <div class="breadcrumbs" id="breadcrumbs">
           <!-- Dynamisch generiert -->
         </div>
-        <div style="display: flex; gap: 0.75rem;">
+        <div style="display: flex; gap: 0.75rem; align-items: center;">
+          <div class="view-toggle">
+            <button class="btn-icon" id="view-grid-btn" title="Kachelansicht"><i data-lucide="layout-grid"></i></button>
+            <button class="btn-icon" id="view-list-btn" title="Listenansicht"><i data-lucide="list"></i></button>
+          </div>
           <button class="btn" id="new-folder-btn">
             <i data-lucide="folder-plus"></i> Neuer Ordner
           </button>
@@ -187,6 +191,20 @@
               </div>
             </div>
 
+            <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+              <h3>E-Mail-Adresse</h3>
+              <p style="font-size: 0.85rem; color: var(--color-text-muted); margin-bottom: 1rem;">
+                Hinterlege deine E-Mail-Adresse, um im Notfall dein Passwort per Mail zurücksetzen zu können.
+              </p>
+              <form id="change-email-form">
+                <div class="form-group">
+                  <label for="settings-email-input">E-Mail-Adresse</label>
+                  <input type="email" id="settings-email-input" class="form-control" placeholder="max@mustermann.de" required autocomplete="email">
+                </div>
+                <button type="submit" class="btn btn-primary">E-Mail speichern</button>
+              </form>
+            </div>
+
             <div class="card" style="background: rgba(0,0,0,0.15);">
               <h3>Passwort ändern</h3>
               <form id="change-password-form" style="margin-top: 1rem;">
@@ -225,6 +243,38 @@
                     <!-- Dynamisch generiert -->
                   </tbody>
                 </table>
+              </div>
+            </div>
+
+            <div class="card" style="background: rgba(0,0,0,0.15); margin-top: 2rem;">
+              <h3>Zwei-Faktor-Authentifizierung (2FA)</h3>
+              <p style="font-size: 0.9rem; color: var(--color-text-muted); margin-bottom: 1.5rem;">
+                Schütze dein Konto zusätzlich mit einem zweiten Faktor. (2FA per E-Mail erfordert SMTP-Einrichtung)
+              </p>
+              <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+                
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <div>
+                    <h4 style="margin: 0; font-size: 1rem;">2FA per E-Mail</h4>
+                    <p style="font-size: 0.8rem; color: var(--color-text-muted); margin: 0.25rem 0 0 0;">Sendet einen 6-stelligen Login-Code an deine E-Mail-Adresse.</p>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="2fa-email-toggle">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 1.5rem;">
+                  <div>
+                    <h4 style="margin: 0; font-size: 1rem;">2FA per Authenticator App (TOTP)</h4>
+                    <p style="font-size: 0.8rem; color: var(--color-text-muted); margin: 0.25rem 0 0 0;">Generiert Codes in Apps wie Google Authenticator oder Bitwarden.</p>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="2fa-totp-toggle">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
               </div>
             </div>
           </section>
@@ -535,6 +585,58 @@
         <div class="form-actions" style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end;">
           <button type="button" class="btn" id="cancel-input-modal-btn" style="justify-content: center;">Abbrechen</button>
           <button type="submit" class="btn btn-primary" style="justify-content: center;">Bestätigen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- EUROOFFICE MODAL (FULLSCREEN EDITOR) -->
+  <div class="modal-overlay" id="office-editor-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: #0b0f19;">
+    <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
+      <div style="background: var(--color-surface); padding: 0.75rem 1.5rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--color-border); flex-shrink: 0;">
+        <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="office-editor-title">
+          <i data-lucide="file-text"></i> Dokument bearbeiten
+        </div>
+        <button class="btn btn-primary" id="close-office-editor-btn">
+          <i data-lucide="save"></i> Schließen & Speichern
+        </button>
+      </div>
+      <div id="office-iframe-container" style="flex: 1; width: 100%; height: 100%; background: #fff; position: relative;">
+        <!-- Initialisiert EuroOffice DocsAPI -->
+      </div>
+    </div>
+  </div>
+
+  <!-- TOTP SETUP MODAL -->
+  <div class="modal-overlay" id="totp-setup-overlay" style="display: none;">
+    <div class="card modal-content" style="max-width: 400px; width: 90%;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h3>Authenticator App einrichten</h3>
+        <button class="btn-icon" id="close-totp-setup-btn" type="button">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <p style="font-size: 0.85rem; color: var(--color-text-muted); margin-bottom: 1.5rem;">
+        Scanne den QR-Code mit einer Authenticator App (z.B. Google Authenticator) oder gib den Secret-Schlüssel manuell ein.
+      </p>
+      
+      <div style="display: flex; justify-content: center; margin-bottom: 1.5rem; background: #fff; padding: 1rem; border-radius: 8px;">
+        <img id="totp-qr-image" style="width: 200px; height: 200px; display: block;" src="" alt="QR Code">
+      </div>
+
+      <div class="form-group" style="margin-bottom: 1.5rem;">
+        <label>Manuelles Secret</label>
+        <code id="totp-secret-text" style="display: block; padding: 0.5rem; background: rgba(255,255,255,0.05); border-radius: 4px; word-break: break-all; text-align: center; font-size: 0.9rem;">-</code>
+      </div>
+
+      <form id="totp-confirm-form">
+        <div class="form-group">
+          <label for="totp-confirm-code">6-stelligen Bestätigungscode eingeben</label>
+          <input type="text" id="totp-confirm-code" class="form-control" placeholder="123456" pattern="[0-9]{6}" required autocomplete="off">
+        </div>
+        <div class="form-actions" style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button type="button" class="btn" id="cancel-totp-setup-btn">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Aktivieren</button>
         </div>
       </form>
     </div>

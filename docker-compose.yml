@@ -22,6 +22,10 @@ services:
     restart: always
     ports:
       - "${PORT:-3000}:3000"
+    volumes:
+      - uploads_data:/usr/src/app/uploads
+    depends_on:
+      - db
     environment:
       DATABASE_URL: postgresql://${DB_USER:-mycloud}:${DB_PASSWORD:-mycloud_secure_password}@db:5432/${DB_NAME:-mycloud}
       SESSION_SECRET: ${SESSION_SECRET:-change_this_to_a_long_random_string}
@@ -35,17 +39,31 @@ services:
       SSO_CLIENT_SECRET: ${SSO_CLIENT_SECRET}
       SSO_ISSUER_URL: ${SSO_ISSUER_URL}
       SSO_REDIRECT_URI: ${SSO_REDIRECT_URI}
-      APP_URL: ${APP_URL:-http://localhost:3000}
+      APP_URL: ${APP_URL:-http://localhost:3030}
+      EURO_OFFICE_URL: ${EURO_OFFICE_URL:-http://eurooffice:80}
+      EURO_OFFICE_PUBLIC_URL: ${EURO_OFFICE_PUBLIC_URL:-http://localhost:8080}
+    networks:
+      - mycloud_network
+
+  eurooffice:
+    image: ghcr.io/euro-office/documentserver:latest
+    container_name: mycloud_eurooffice
+    restart: always
+    ports:
+      - "${EURO_OFFICE_PORT:-8080}:80"
+    environment:
+      JWT_ENABLED: "false"
     volumes:
-      - uploads_data:/usr/src/app/uploads
-    depends_on:
-      - db
+      - eurooffice_data:/var/lib/euro-office/documentserver
+      - eurooffice_logs:/var/log/euro-office/documentserver
     networks:
       - mycloud_network
 
 volumes:
   db_data:
   uploads_data:
+  eurooffice_data:
+  eurooffice_logs:
 
 networks:
   mycloud_network:

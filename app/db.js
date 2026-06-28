@@ -25,6 +25,15 @@ async function initDb() {
 
     // Add avatar_path column if not exists
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_path VARCHAR(255)');
+    // Add email column if not exists
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)');
+    // Add verification and 2FA columns
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT TRUE');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token VARCHAR(255)');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_email BOOLEAN DEFAULT FALSE');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_totp BOOLEAN DEFAULT FALSE');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret VARCHAR(255)');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS has_custom_username BOOLEAN DEFAULT FALSE');
 
     // Passkeys Table
     await client.query(`

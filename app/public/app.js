@@ -7,6 +7,8 @@ let allShares = []; // Alle Shares des Users
 let selectedFileIds = [];
 let renderedFilesList = [];
 let lastSelectedId = null; // Für Shift-Auswahl
+let viewMode = localStorage.getItem('viewMode') || 'grid';
+let isEmailConfigured = false;
 
 
 // DOM Elements
@@ -210,16 +212,23 @@ const forgotPasswordBtn = document.getElementById('forgot-password-btn');
 function updateAuthUI(isRegister) {
   isRegisterMode = isRegister;
   const title = document.getElementById('auth-subtitle');
+  const label = document.getElementById('username-label');
+  const input = document.getElementById('username');
+
   if (isRegister) {
     title.textContent = 'Erstelle ein neues Konto';
     authSubmitBtn.textContent = 'Registrieren';
     toggleAuthModeBtn.textContent = 'Bereits ein Konto? Anmelden';
     forgotPasswordBtn.style.display = 'none';
+    if (label) label.textContent = 'E-Mail-Adresse';
+    if (input) input.placeholder = 'z. B. alex@gamerfreak.eu';
   } else {
     title.textContent = 'Willkommen! Bitte melde dich an.';
     authSubmitBtn.textContent = 'Anmelden';
     toggleAuthModeBtn.textContent = 'Noch kein Konto? Registrieren';
-    forgotPasswordBtn.style.display = 'inline-block';
+    forgotPasswordBtn.style.display = isEmailConfigured ? 'inline-block' : 'none';
+    if (label) label.textContent = 'Benutzername oder E-Mail';
+    if (input) input.placeholder = 'z. B. alex oder alex@gamerfreak.eu';
   }
 }
 
@@ -229,11 +238,8 @@ toggleAuthModeBtn.onclick = () => {
 
 // Forgot Password Request
 forgotPasswordBtn.onclick = async () => {
-  const username = document.getElementById('username').value.trim();
-  if (!username) {
-    showToast('Bitte gib deinen Benutzernamen (E-Mail) in das Feld ein.');
-    return;
-  }
+  const username = await showInputPrompt('Passwort vergessen', 'Bitte gib deinen Benutzernamen oder deine E-Mail-Adresse ein:', '', 'Benutzername oder E-Mail');
+  if (!username) return;
 
   try {
     const res = await fetch('/api/auth/reset-password-request', {
@@ -290,18 +296,56 @@ authForm.onsubmit = async (e) => {
   const password = document.getElementById('password').value;
 
   const endpoint = isRegisterMode ? '/api/auth/register' : '/api/auth/login';
+  const payload = isRegisterMode ? { email: username, password } : { username, password };
 
   try {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(payload),
     });
 
     const data = await res.json();
     if (res.ok) {
-      showToast(isRegisterMode ? 'Registrierung erfolgreich!' : 'Erfolgreich angemeldet!');
-      checkAuthStatus();
+      if (isRegisterMode) {
+        if (data.requiresVerification) {
+          showToast(data.message || 'Registrierung erfolgreich. Bitte bestätige deine E-Mail.');
+          updateAuthUI(false); // In Login-Modus wechseln
+        } else {
+          showToast('Registrierung erfolgreich!');
+          checkAuthStatus();
+        }
+      } else {
+        // Login-Modus
+        if (data.requires2FA) {
+          const typeStr = data.type === 'totp' ? 'Authenticator App (TOTP)' : 'E-Mail';
+          const code = await showInputPrompt('2FA Verifizierung', `Bitte gib den Bestätigungscode deiner ${typeStr} ein:`, '', '6-stelliger Code');
+          if (!code) return;
+
+          const verifyRes = await fetch('/api/auth/login/verify-2fa', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code }),
+          });
+
+          const verifyData = await verifyRes.json();
+          if (verifyRes.ok) {
+            showToast('Erfolgreich angemeldet!');
+            if (verifyData.user && !verifyData.user.hasCustomUsername) {
+              await promptAndSetCustomUsername();
+            }
+            checkAuthStatus();
+          } else {
+            showToast(verifyData.error || '2FA Verifizierung fehlgeschlagen.');
+          }
+        } else {
+          showToast('Erfolgreich angemeldet!');
+          if (data.user && !data.user.hasCustomUsername) {
+            await promptAndSetCustomUsername();
+          }
+          checkAuthStatus();
+        }
+      }
     } else {
       showToast(data.error || 'Fehler beim Authentifizieren.');
     }
@@ -309,6 +353,35 @@ authForm.onsubmit = async (e) => {
     showToast('Fehler beim Senden der Daten.');
   }
 };
+
+// Helper to prompt and set custom username
+async function promptAndSetCustomUsername() {
+  let success = false;
+  while (!success) {
+    const desired = await showInputPrompt('Benutzername festlegen', 'Bitte wähle deinen Wunschnamen für diese Cloud:', '', 'Wunschname');
+    if (!desired) {
+      showToast('Ein Benutzername ist zwingend erforderlich.');
+      continue;
+    }
+
+    try {
+      const res = await fetch('/api/auth/set-username', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: desired }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast('Benutzername erfolgreich festgelegt!');
+        success = true;
+      } else {
+        showToast(data.error || 'Fehler beim Setzen des Benutzernamens.');
+      }
+    } catch (e) {
+      showToast('Verbindungsfehler beim Setzen des Benutzernamens.');
+    }
+  }
+}
 
 // WebAuthn Passkey Login
 document.getElementById('passkey-login-btn').onclick = async () => {
@@ -505,6 +578,12 @@ function renderFiles(files) {
   const grid = document.getElementById('file-grid');
   grid.innerHTML = '';
 
+  if (viewMode === 'list') {
+    grid.classList.add('list-view');
+  } else {
+    grid.classList.remove('list-view');
+  }
+
   if (files.length === 0) {
     grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--color-text-muted); padding: 3rem 0;">Dieser Ordner ist leer.</div>`;
     return;
@@ -578,7 +657,13 @@ function renderFiles(files) {
           breadcrumbsHistory.push({ id: file.id, name: file.name });
           loadFiles(file.id);
         } else {
-          window.location.href = `/api/files/download/${file.id}`;
+          const ext = file.name.split('.').pop().toLowerCase();
+          const supportedExts = ['docx', 'xlsx', 'pptx', 'txt', 'odt', 'ods', 'odp'];
+          if (supportedExts.includes(ext)) {
+            openOfficeEditor(file.id, file.name);
+          } else {
+            window.location.href = `/api/files/download/${file.id}`;
+          }
         }
       }
     };
@@ -676,6 +761,15 @@ function showFileContextMenu(file, x, y) {
   } else {
     // Context Actions for Single Item
     if (!file.is_folder) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      const supportedExts = ['docx', 'xlsx', 'pptx', 'txt', 'odt', 'ods', 'odp'];
+      if (supportedExts.includes(ext)) {
+        actions.push({
+          label: 'In EuroOffice bearbeiten',
+          icon: 'edit-3',
+          action: () => openOfficeEditor(file.id, file.name)
+        });
+      }
       actions.push({
         label: 'Herunterladen',
         icon: 'download',
@@ -1197,6 +1291,22 @@ async function loadSettings() {
     const res = await fetch('/api/settings');
     const data = await res.json();
 
+    // Set email input
+    const emailInput = document.getElementById('settings-email-input');
+    if (emailInput && data.user) {
+      emailInput.value = data.user.email || '';
+    }
+
+    // Set 2FA checkboxes
+    const emailToggle = document.getElementById('2fa-email-toggle');
+    if (emailToggle && data.user) {
+      emailToggle.checked = data.user.two_factor_email || false;
+    }
+    const totpToggle = document.getElementById('2fa-totp-toggle');
+    if (totpToggle && data.user) {
+      totpToggle.checked = data.user.two_factor_totp || false;
+    }
+
     // Set settings avatar preview
     const previewImg = document.getElementById('settings-avatar-preview');
     if (previewImg && currentUser) {
@@ -1311,7 +1421,32 @@ document.getElementById('change-password-form').onsubmit = async (e) => {
   } catch (err) {
     showToast('Fehler beim Ändern des Passworts.');
   }
-};
+// Change Email Form Submit
+const changeEmailForm = document.getElementById('change-email-form');
+if (changeEmailForm) {
+  changeEmailForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('settings-email-input').value.trim();
+
+    try {
+      const res = await fetch('/api/settings/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        showToast('E-Mail-Adresse erfolgreich gespeichert.');
+        loadSettings();
+      } else {
+        showToast(data.error);
+      }
+    } catch (err) {
+      showToast('Fehler beim Ändern der E-Mail-Adresse.');
+    }
+  };
+}
 
 async function loadAdminSettings() {
   try {
@@ -1626,6 +1761,13 @@ async function loadBranding() {
     // Update Document Title
     document.title = data.tabName || 'myCloud';
 
+    // Toggle forgot password link visibility based on SMTP configuration & test status
+    isEmailConfigured = data.emailConfigured || false;
+    const forgotPasswordContainer = document.getElementById('forgot-password-container');
+    if (forgotPasswordContainer) {
+      forgotPasswordContainer.style.display = isEmailConfigured ? 'block' : 'none';
+    }
+
     // Update Header and Login logos
     const logoTexts = document.querySelectorAll('.logo');
     logoTexts.forEach(logo => {
@@ -1670,6 +1812,36 @@ window.onload = () => {
 
   checkAuthStatus();
 
+  // Layout View Mode Switcher
+  const gridBtn = document.getElementById('view-grid-btn');
+  const listBtn = document.getElementById('view-list-btn');
+
+  const updateViewModeButtons = () => {
+    if (viewMode === 'list') {
+      listBtn.classList.add('active');
+      gridBtn.classList.remove('active');
+    } else {
+      gridBtn.classList.add('active');
+      listBtn.classList.remove('active');
+    }
+  };
+
+  if (gridBtn && listBtn) {
+    updateViewModeButtons();
+    gridBtn.onclick = () => {
+      viewMode = 'grid';
+      localStorage.setItem('viewMode', 'grid');
+      updateViewModeButtons();
+      renderFiles(renderedFilesList);
+    };
+    listBtn.onclick = () => {
+      viewMode = 'list';
+      localStorage.setItem('viewMode', 'list');
+      updateViewModeButtons();
+      renderFiles(renderedFilesList);
+    };
+  }
+
   // Admin back button
   const adminBackBtn = document.getElementById('admin-back-to-dashboard-btn');
   if (adminBackBtn) {
@@ -1712,3 +1884,176 @@ window.onload = () => {
     };
   }
 };
+
+// EuroOffice Editor logic
+let docEditorInstance = null;
+
+function loadOfficeScript(publicUrl) {
+  return new Promise((resolve, reject) => {
+    if (window.DocsAPI) return resolve();
+    const script = document.createElement('script');
+    script.src = `${publicUrl}/web-apps/apps/api/documents/api.js`;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("EuroOffice Script konnte nicht geladen werden."));
+    document.head.appendChild(script);
+  });
+}
+
+async function openOfficeEditor(fileId, fileName) {
+  showToast('Bereite Office-Editor vor...');
+
+  try {
+    const res = await fetch(`/api/eurooffice/config/${fileId}`);
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(err.error || 'Fehler beim Laden der Office-Konfiguration.');
+      return;
+    }
+
+    const { publicUrl, config } = await res.json();
+
+    // Dynamically load EuroOffice Javascript API
+    await loadOfficeScript(publicUrl);
+
+    // Title update
+    document.getElementById('office-editor-title').innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
+    lucide.createIcons();
+
+    // Clear previous editor
+    const container = document.getElementById('office-iframe-container');
+    container.innerHTML = '<div id="office-iframe-placeholder" style="width:100%; height:100%;"></div>';
+
+    // Show editor UI overlay
+    document.getElementById('office-editor-overlay').style.display = 'block';
+
+    // Initialize DocsAPI Editor
+    docEditorInstance = new DocsAPI.DocEditor("office-iframe-placeholder", config);
+
+  } catch (err) {
+    console.error('Error opening office editor:', err);
+    showToast('EuroOffice Server ist momentan nicht erreichbar.');
+  }
+}
+
+// Close and save Office Editor
+document.getElementById('close-office-editor-btn').onclick = () => {
+  if (docEditorInstance) {
+    docEditorInstance.destroyEditor();
+    docEditorInstance = null;
+  }
+  document.getElementById('office-editor-overlay').style.display = 'none';
+  // Reload files to reflect changes
+  loadFiles(currentFolderId);
+};
+
+// 2FA Setup & Toggle logic
+const email2faToggle = document.getElementById('2fa-email-toggle');
+if (email2faToggle) {
+  email2faToggle.onchange = async () => {
+    const enabled = email2faToggle.checked;
+    try {
+      const res = await fetch('/api/settings/2fa/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Fehler beim Ändern des E-Mail-2FA-Status.');
+        email2faToggle.checked = !enabled; // Reset checkbox state
+      } else {
+        showToast(enabled ? 'E-Mail-2FA erfolgreich aktiviert.' : 'E-Mail-2FA deaktiviert.');
+      }
+    } catch (e) {
+      showToast('Netzwerkfehler.');
+      email2faToggle.checked = !enabled;
+    }
+  };
+}
+
+const totp2faToggle = document.getElementById('2fa-totp-toggle');
+const totpSetupOverlay = document.getElementById('totp-setup-overlay');
+const closeTotpBtn = document.getElementById('close-totp-setup-btn');
+const cancelTotpBtn = document.getElementById('cancel-totp-setup-btn');
+const totpForm = document.getElementById('totp-confirm-form');
+
+if (totp2faToggle) {
+  totp2faToggle.onchange = async () => {
+    const enabled = totp2faToggle.checked;
+    
+    if (enabled) {
+      // Trigger setup
+      try {
+        const res = await fetch('/api/settings/2fa/totp/setup', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+          document.getElementById('totp-qr-image').src = data.qrCodeUrl;
+          document.getElementById('totp-secret-text').textContent = data.secret;
+          document.getElementById('totp-confirm-code').value = '';
+          totpSetupOverlay.style.display = 'block';
+        } else {
+          showToast(data.error || 'Fehler beim Setup.');
+          totp2faToggle.checked = false;
+        }
+      } catch (e) {
+        showToast('Netzwerkfehler beim TOTP-Setup.');
+        totp2faToggle.checked = false;
+      }
+    } else {
+      // Disable
+      if (confirm('Möchtest du 2FA per Authenticator App wirklich deaktivieren?')) {
+        try {
+          const res = await fetch('/api/settings/2fa/totp/disable', { method: 'POST' });
+          if (res.ok) {
+            showToast('Authenticator-2FA deaktiviert.');
+          } else {
+            showToast('Fehler beim Deaktivieren.');
+            totp2faToggle.checked = true;
+          }
+        } catch (e) {
+          showToast('Netzwerkfehler.');
+          totp2faToggle.checked = true;
+        }
+      } else {
+        totp2faToggle.checked = true;
+      }
+    }
+  };
+}
+
+// Close/Cancel TOTP setup
+const cancelTotpSetup = () => {
+  totpSetupOverlay.style.display = 'none';
+  if (totp2faToggle) totp2faToggle.checked = false;
+};
+
+if (closeTotpBtn) closeTotpBtn.onclick = cancelTotpSetup;
+if (cancelTotpBtn) cancelTotpBtn.onclick = cancelTotpSetup;
+
+if (totpForm) {
+  totpForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const code = document.getElementById('totp-confirm-code').value.trim();
+    
+    try {
+      const res = await fetch('/api/settings/2fa/totp/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        showToast('Authenticator App erfolgreich verknüpft!');
+        totpSetupOverlay.style.display = 'none';
+        if (totp2faToggle) totp2faToggle.checked = true;
+      } else {
+        showToast(data.error || 'Bestätigung fehlgeschlagen. Überprüfe den Code.');
+        totp2faToggle.checked = false;
+      }
+    } catch (e) {
+      showToast('Verbindungsfehler.');
+      totp2faToggle.checked = false;
+    }
+  };
+}

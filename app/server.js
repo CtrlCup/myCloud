@@ -112,9 +112,9 @@ app.get('/api/auth/status', async (req, res) => {
 
 // Standard Register Route
 app.post('/api/auth/register', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
   }
 
   try {
@@ -130,12 +130,58 @@ app.post('/api/auth/register', async (req, res) => {
     const role = userCount === 0 ? 'admin' : 'user';
     const passwordHash = await bcrypt.hash(password, 10);
 
+    // Generate standard username based on email prefix
+    let baseUsername = email.split('@')[0].substring(0, 30);
+    baseUsername = baseUsername.replace(/[^a-zA-Z0-9-_]/g, '');
+    if (!baseUsername) baseUsername = 'user';
+
+    let username = baseUsername;
+    let attempts = 0;
+    while (attempts < 10) {
+      const check = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
+      if (check.rows.length === 0) break;
+      username = `${baseUsername}_${Math.floor(1000 + Math.random() * 9000)}`;
+      attempts++;
+    }
+
+    // Check if SMTP is configured and verified by testing it
+    const smtpHost = await getSetting('email_smtp_host');
+    const smtpTested = await getSetting('email_smtp_tested');
+    const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
+
+    let isVerified = true;
+    let verificationToken = null;
+
+    if (emailConfigured && role !== 'admin') { // Admins are auto-verified
+      isVerified = false;
+      verificationToken = crypto.randomBytes(32).toString('hex');
+    }
+
     const result = await pool.query(
-      'INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role',
-      [username, passwordHash, role]
+      `INSERT INTO users (username, email, password_hash, role, is_verified, verification_token, has_custom_username) 
+       VALUES ($1, $2, $3, $4, $5, $6, false) 
+       RETURNING id, username, email, role, is_verified`,
+      [username, email, passwordHash, role, isVerified, verificationToken]
     );
 
     const newUser = result.rows[0];
+
+    if (!isVerified) {
+      // Send verification email
+      const appUrl = await getSetting('app_url') || process.env.APP_URL || 'http://localhost:3030';
+      const verifyLink = `${appUrl}/api/auth/verify-email?token=${verificationToken}`;
+
+      await sendMail({
+        to: email,
+        subject: 'myCloud - Registrierung bestätigen',
+        text: `Hallo,\n\nBitte bestätige deine Registrierung über den folgenden Link:\n${verifyLink}\n\nErst danach kannst du dich anmelden.`,
+        html: `<p>Hallo,</p><p>Bitte bestätige deine Registrierung über den folgenden Link:</p><p><a href="${verifyLink}">${verifyLink}</a></p><p>Erst danach kannst du dich anmelden.</p>`
+      });
+
+      return res.status(201).json({ success: true, requiresVerification: true, message: 'Registrierung erfolgreich. Bitte bestätige deine E-Mail-Adresse.' });
+    }
+
+    // Log in automatically if no verification is required
     req.session.userId = newUser.id;
     req.session.username = newUser.username;
     req.session.role = newUser.role;
@@ -144,9 +190,34 @@ app.post('/api/auth/register', async (req, res) => {
   } catch (err) {
     console.error('Registration error:', err);
     if (err.code === '23505') {
-      return res.status(409).json({ error: 'Username already exists' });
+      return res.status(409).json({ error: 'Diese E-Mail-Adresse oder dieser Name wird bereits verwendet.' });
     }
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET Route to verify email
+app.get('/api/auth/verify-email', async (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(400).send('Token ist erforderlich.');
+
+  try {
+    const userRes = await pool.query('SELECT * FROM users WHERE verification_token = $1', [token]);
+    if (userRes.rows.length === 0) {
+      return res.status(400).send('Ungültiger oder abgelaufener Verifizierungslink.');
+    }
+
+    const user = userRes.rows[0];
+    await pool.query(
+      'UPDATE users SET is_verified = true, verification_token = null WHERE id = $1',
+      [user.id]
+    );
+
+    const appUrl = await getSetting('app_url') || process.env.APP_URL || 'http://localhost:3030';
+    res.redirect(`${appUrl}/#login?verified=true`);
+  } catch (err) {
+    console.error('Error verifying email:', err);
+    res.status(500).send('Internal server error');
   }
 });
 
@@ -154,32 +225,150 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
+    return res.status(400).json({ error: 'Username/Email and password are required' });
   }
 
   try {
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    const result = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
     if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid username or password' });
+      return res.status(401).json({ error: 'Ungültiger Benutzername oder E-Mail oder Passwort.' });
     }
 
     const user = result.rows[0];
     if (!user.password_hash) {
-      return res.status(400).json({ error: 'This user is registered via SSO or Passkey only. Please use the appropriate login method.' });
+      return res.status(400).json({ error: 'Dieser Account nutzt SSO oder Passkeys. Bitte melde dich über diese an.' });
     }
 
     const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) {
-      return res.status(401).json({ error: 'Invalid username or password' });
+      return res.status(401).json({ error: 'Ungültiger Benutzername oder E-Mail oder Passwort.' });
+    }
+
+    // Check email verification
+    if (!user.is_verified) {
+      return res.status(403).json({ error: 'Bitte bestätige zuerst deine E-Mail-Adresse über den Link, den wir dir gesendet haben.' });
+    }
+
+    // Check 2FA
+    if (user.two_factor_email || user.two_factor_totp) {
+      req.session.tempUserId = user.id;
+      req.session.tempUsername = user.username;
+      req.session.tempUserRole = user.role;
+
+      if (user.two_factor_totp) {
+        return res.json({ success: true, requires2FA: true, type: 'totp' });
+      }
+
+      if (user.two_factor_email) {
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        req.session.twoFactorCode = code;
+        req.session.twoFactorCodeExpires = Date.now() + 5 * 60 * 1000; // 5 min
+
+        await sendMail({
+          to: user.email,
+          subject: 'myCloud - 2FA Login Code',
+          text: `Hallo,\n\ndein 2FA-Code für den Login lautet: ${code}\n\nDieser Code ist 5 Minuten gültig.`,
+          html: `<p>Hallo,</p><p>dein 2FA-Code für den Login lautet: <strong>${code}</strong></p><p>Dieser Code ist 5 Minuten gültig.</p>`
+        });
+
+        return res.json({ success: true, requires2FA: true, type: 'email' });
+      }
     }
 
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
 
-    res.json({ success: true, user: { id: user.id, username: user.username, role: user.role } });
+    res.json({
+      success: true,
+      user: { id: user.id, username: user.username, role: user.role, hasCustomUsername: user.has_custom_username }
+    });
   } catch (err) {
     console.error('Login error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 2FA Verification Route
+app.post('/api/auth/login/verify-2fa', async (req, res) => {
+  const { code } = req.body;
+  const tempUserId = req.session.tempUserId;
+
+  if (!tempUserId || !code) {
+    return res.status(400).json({ error: '2FA-Sitzung abgelaufen oder kein Code eingegeben.' });
+  }
+
+  try {
+    const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [tempUserId]);
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+    }
+
+    const user = userRes.rows[0];
+
+    if (user.two_factor_totp) {
+      const speakeasy = require('speakeasy');
+      const verified = speakeasy.totp.verify({
+        secret: user.totp_secret,
+        encoding: 'base32',
+        token: code,
+        window: 1
+      });
+
+      if (!verified) {
+        return res.status(400).json({ error: 'Ungültiger Authenticator-Code.' });
+      }
+    } else if (user.two_factor_email) {
+      if (!req.session.twoFactorCode || req.session.twoFactorCode !== code || req.session.twoFactorCodeExpires < Date.now()) {
+        return res.status(400).json({ error: 'Ungültiger oder abgelaufener E-Mail-Code.' });
+      }
+    }
+
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.role = user.role;
+
+    delete req.session.tempUserId;
+    delete req.session.tempUsername;
+    delete req.session.tempUserRole;
+    delete req.session.twoFactorCode;
+    delete req.session.twoFactorCodeExpires;
+
+    res.json({
+      success: true,
+      user: { id: user.id, username: user.username, role: user.role, hasCustomUsername: user.has_custom_username }
+    });
+  } catch (err) {
+    console.error('2FA Verification error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Set custom username on first login
+app.post('/api/auth/set-username', requireAuth, async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'Username is required' });
+
+  const cleanUsername = username.trim().replace(/[^a-zA-Z0-9-_]/g, '');
+  if (cleanUsername.length < 3 || cleanUsername.length > 30) {
+    return res.status(400).json({ error: 'Der Name muss 3 bis 30 Zeichen lang sein und darf nur Buchstaben, Zahlen, Bindestriche und Unterstriche enthalten.' });
+  }
+
+  try {
+    const exists = await pool.query('SELECT id FROM users WHERE username = $1 AND id != $2', [cleanUsername, req.session.userId]);
+    if (exists.rows.length > 0) {
+      return res.status(409).json({ error: 'Dieser Name ist bereits vergeben.' });
+    }
+
+    await pool.query(
+      'UPDATE users SET username = $1, has_custom_username = true WHERE id = $2',
+      [cleanUsername, req.session.userId]
+    );
+
+    req.session.username = cleanUsername;
+    res.json({ success: true, username: cleanUsername });
+  } catch (err) {
+    console.error('Error setting custom username:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -478,47 +667,50 @@ app.post('/api/auth/reset-password-request', async (req, res) => {
   }
 
   try {
-    const userRes = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+    const userRes = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
     if (userRes.rows.length === 0) {
       // Do not disclose whether user exists
-      return res.json({ success: true, message: 'If user exists, a reset link will be sent.' });
+      return res.json({ success: true, message: 'Falls der Benutzer existiert, wurde ein Reset-Link gesendet.' });
     }
 
     const user = userRes.rows[0];
     if (user.sso_id) {
-      return res.status(400).json({ error: 'This user is managed via SSO and cannot reset passwords locally.' });
+      return res.status(400).json({ error: 'Dieser Benutzer wird über SSO verwaltet und kann sein Passwort nicht lokal ändern.' });
     }
 
-    // Generate random reset token in session
+    // Determine recipient email
+    let recipient = user.email || '';
+    if (!recipient && user.username.includes('@')) {
+      recipient = user.username;
+    }
+
+    if (!recipient) {
+      return res.status(400).json({ error: 'Für diesen Account ist keine E-Mail-Adresse hinterlegt. Passwort-Reset per E-Mail ist nicht möglich.' });
+    }
+
+    // Generate random reset token
     const resetToken = crypto.randomBytes(32).toString('hex');
     const expires = Date.now() + 3600000; // 1 hour
 
-    // Store in global DB Settings or memory. Storing in user session is easiest for stateless,
-    // but users request this logged out. We will store it in the sessions DB through a temp mechanism,
-    // or just in the DB users table (or just write a quick setting `reset_${resetToken}`: userId).
     await setSetting(`reset_${resetToken}`, JSON.stringify({ userId: user.id, expires }));
 
-    const appUrl = await getSetting('app_url') || process.env.APP_URL || 'http://localhost:3000';
+    const appUrl = await getSetting('app_url') || process.env.APP_URL || 'http://localhost:3030';
     const resetLink = `${appUrl}/#reset-password?token=${resetToken}`;
 
     const mailSent = await sendMail({
-      to: `${username}@placeholder-email.com`, // Since users table doesn't have an email field, we could derive it, or prompt for email.
-      // Wait, let's assume username is an email address, or we could add an email column.
-      // If we use username as SMTP receiver if it looks like email, or if user has configured one.
-      // We will fallback to attempting to send it to username if it's an email, otherwise just return it for testing.
-      subject: 'myCloud - Password Reset Request',
-      text: `Hello,\n\nPlease reset your password using the following link:\n${resetLink}\n\nThis link is valid for 1 hour.`,
-      html: `<p>Hello,</p><p>Please reset your password using the following link:</p><p><a href="${resetLink}">${resetLink}</a></p><p>This link is valid for 1 hour.</p>`
+      to: recipient,
+      subject: 'myCloud - Passwort zurücksetzen',
+      text: `Hallo,\n\nBitte setze dein Passwort über den folgenden Link zurück:\n${resetLink}\n\nDieser Link ist für 1 Stunde gültig.`,
+      html: `<p>Hallo,</p><p>Bitte setze dein Passwort über den folgenden Link zurück:</p><p><a href="${resetLink}">${resetLink}</a></p><p>Dieser Link ist für 1 Stunde gültig.</p>`
     });
 
     if (mailSent) {
-      res.json({ success: true, message: 'Password reset link sent to registered email.' });
+      res.json({ success: true, message: 'Passwort-Reset-Link an die hinterlegte E-Mail-Adresse gesendet.' });
     } else {
-      // If email service is not configured, we return the link for debugging if it is localhost
       if (appUrl.includes('localhost')) {
-        return res.json({ success: true, devLink: resetLink, message: '[DEV ONLY] Mail delivery disabled, here is your link.' });
+        return res.json({ success: true, devLink: resetLink, message: '[DEV ONLY] E-Mail-Versand fehlgeschlagen, hier ist dein Link.' });
       }
-      res.status(500).json({ error: 'Failed to send reset email. Please contact Administrator.' });
+      res.status(500).json({ error: 'Fehler beim Senden der Reset-E-Mail. Bitte wende dich an den Administrator.' });
     }
   } catch (err) {
     console.error('Password reset request error:', err);
@@ -1072,6 +1264,176 @@ app.get('/api/shares', requireAuth, async (req, res) => {
   }
 });
 
+// EuroOffice Temporary Token Store
+const officeTokens = new Map();
+
+// Helper to get Document Type for EuroOffice
+function getOfficeDocType(ext) {
+  if (['docx', 'doc', 'txt', 'odt', 'rtf', 'html'].includes(ext)) return 'word';
+  if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) return 'cell';
+  if (['pptx', 'ppt', 'odp'].includes(ext)) return 'slide';
+  return 'word';
+}
+
+// Get EuroOffice Config for editing
+app.get('/api/eurooffice/config/:id', async (req, res) => {
+  const userId = req.session.userId;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+  const fileId = parseInt(req.params.id);
+
+  try {
+    // Get file info
+    const fileRes = await pool.query(
+      'SELECT * FROM files WHERE id = $1 AND (owner_id = $2 OR is_folder = false)',
+      [fileId, userId]
+    );
+
+    if (fileRes.rows.length === 0) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const file = fileRes.rows[0];
+    if (file.is_folder) {
+      return res.status(400).json({ error: 'Cannot open folder in editor' });
+    }
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    const supportedExts = ['docx', 'xlsx', 'pptx', 'txt', 'odt', 'ods', 'odp'];
+    if (!supportedExts.includes(ext)) {
+      return res.status(400).json({ error: 'Unsupported file format for editing' });
+    }
+
+    // Get current user details
+    const userRes = await pool.query('SELECT username FROM users WHERE id = $1', [userId]);
+    const user = userRes.rows[0];
+
+    // Generate temp download token
+    const crypto = require('crypto');
+    const token = crypto.randomBytes(16).toString('hex');
+    officeTokens.set(token, {
+      fileId: file.id,
+      userId,
+      expires: Date.now() + 10 * 60 * 1000 // 10 minutes
+    });
+
+    const docType = getOfficeDocType(ext);
+    const internalAppUrl = 'http://app:3000'; // App name in Docker Compose network
+    const publicOfficeUrl = process.env.EURO_OFFICE_PUBLIC_URL || 'http://localhost:8080';
+
+    const config = {
+      document: {
+        fileType: ext,
+        key: `file_${file.id}`,
+        title: file.name,
+        url: `${internalAppUrl}/api/eurooffice/download/${file.id}?token=${token}`
+      },
+      documentType: docType,
+      editorConfig: {
+        callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}?userId=${userId}`,
+        user: {
+          id: `${userId}`,
+          name: user.username
+        },
+        mode: 'edit',
+        lang: 'de'
+      }
+    };
+
+    res.json({
+      publicUrl: publicOfficeUrl,
+      config
+    });
+  } catch (err) {
+    console.error('Error generating office config:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Download endpoint for EuroOffice Document Server
+app.get('/api/eurooffice/download/:id', async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const token = req.query.token;
+
+  if (!token || !officeTokens.has(token)) {
+    return res.status(403).json({ error: 'Forbidden: Invalid or expired token' });
+  }
+
+  const tokenData = officeTokens.get(token);
+  if (tokenData.fileId !== fileId || tokenData.expires < Date.now()) {
+    officeTokens.delete(token);
+    return res.status(403).json({ error: 'Forbidden: Expired token' });
+  }
+
+  try {
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    if (fileRes.rows.length === 0) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const file = fileRes.rows[0];
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Physical file not found' });
+    }
+
+    res.sendFile(filePath);
+  } catch (err) {
+    console.error('Office download error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Callback endpoint for EuroOffice Document Server (handles saving)
+app.post('/api/eurooffice/callback/:id', async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const { status, url } = req.body;
+
+  if (status === 2 && url) {
+    try {
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+      if (fileRes.rows.length === 0) {
+        return res.json({ error: 0 });
+      }
+
+      const file = fileRes.rows[0];
+      const filePath = path.join(UPLOADS_DIR, file.path);
+
+      const http = require('http');
+      const https = require('https');
+      const downloadClient = url.startsWith('https') ? https : http;
+
+      downloadClient.get(url, (downloadRes) => {
+        if (downloadRes.statusCode === 200) {
+          const fileStream = fs.createWriteStream(filePath);
+          downloadRes.pipe(fileStream);
+
+          fileStream.on('finish', async () => {
+            fileStream.close();
+            
+            const stats = fs.statSync(filePath);
+            await pool.query(
+              'UPDATE files SET size = $1, updated_at = NOW() WHERE id = $2',
+              [stats.size, fileId]
+            );
+
+            console.log(`Office document ${fileId} successfully saved. New size: ${stats.size} bytes.`);
+          });
+        } else {
+          console.error(`Failed to download edited file from EuroOffice: status ${downloadRes.statusCode}`);
+        }
+      }).on('error', (err) => {
+        console.error('Error downloading file from EuroOffice callback:', err);
+      });
+
+    } catch (err) {
+      console.error('Callback save error:', err);
+    }
+  }
+
+  res.json({ error: 0 });
+});
+
 // Get Branding Config
 app.get('/api/public/branding', async (req, res) => {
   try {
@@ -1079,7 +1441,12 @@ app.get('/api/public/branding', async (req, res) => {
     const tabName = await getSetting('cloud_tab_name') || 'myCloud';
     const hasIcon = await getSetting('cloud_icon_path') ? true : false;
     const appUrl = process.env.APP_URL || '';
-    res.json({ name, tabName, hasIcon, appUrl });
+    
+    const smtpHost = await getSetting('email_smtp_host');
+    const smtpTested = await getSetting('email_smtp_tested');
+    const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
+
+    res.json({ name, tabName, hasIcon, appUrl, emailConfigured });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1552,7 +1919,7 @@ app.get('/api/users/:id/avatar', async (req, res) => {
 app.get('/api/settings', requireAuth, async (req, res) => {
   const userId = req.session.userId;
   try {
-    const userRes = await pool.query('SELECT id, username, role FROM users WHERE id = $1', [userId]);
+    const userRes = await pool.query('SELECT id, username, role, email, two_factor_email, two_factor_totp FROM users WHERE id = $1', [userId]);
     const passkeysRes = await pool.query('SELECT id, created_at FROM passkeys WHERE user_id = $1', [userId]);
     
     const data = {
@@ -1572,6 +1939,114 @@ app.get('/api/settings', requireAuth, async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error('Error fetching settings:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Post settings email
+app.post('/api/settings/email', requireAuth, async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+  try {
+    await pool.query('UPDATE users SET email = $1 WHERE id = $2', [email, req.session.userId]);
+    res.json({ success: true, message: 'E-Mail-Adresse erfolgreich gespeichert.' });
+  } catch (err) {
+    console.error('Error updating email:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Toggle Email 2FA
+app.post('/api/settings/2fa/email', requireAuth, async (req, res) => {
+  const { enabled } = req.body;
+  try {
+    // Check if email is set
+    const userRes = await pool.query('SELECT email FROM users WHERE id = $1', [req.session.userId]);
+    if (!userRes.rows[0].email && enabled) {
+      return res.status(400).json({ error: 'Bitte hinterlege zuerst eine E-Mail-Adresse.' });
+    }
+
+    const smtpHost = await getSetting('email_smtp_host');
+    const smtpTested = await getSetting('email_smtp_tested');
+    const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
+    if (!emailConfigured && enabled) {
+      return res.status(400).json({ error: 'E-Mail-2FA kann erst aktiviert werden, wenn der SMTP-Server eingerichtet und getestet ist.' });
+    }
+
+    await pool.query('UPDATE users SET two_factor_email = $1 WHERE id = $2', [enabled, req.session.userId]);
+    res.json({ success: true, twoFactorEmail: enabled });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Setup TOTP 2FA (returns secret + qr-code url)
+app.post('/api/settings/2fa/totp/setup', requireAuth, async (req, res) => {
+  const speakeasy = require('speakeasy');
+  try {
+    const userRes = await pool.query('SELECT username FROM users WHERE id = $1', [req.session.userId]);
+    const username = userRes.rows[0].username;
+
+    const secret = speakeasy.generateSecret({
+      name: `myCloud (${username})`,
+      length: 20
+    });
+
+    req.session.tempTotpSecret = secret.base32;
+
+    res.json({
+      success: true,
+      secret: secret.base32,
+      qrCodeUrl: `https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=${encodeURIComponent(secret.otpauth_url)}&choe=UTF-8`
+    });
+  } catch (err) {
+    console.error('TOTP setup error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Confirm TOTP 2FA setup
+app.post('/api/settings/2fa/totp/confirm', requireAuth, async (req, res) => {
+  const { code } = req.body;
+  const tempSecret = req.session.tempTotpSecret;
+
+  if (!tempSecret || !code) {
+    return res.status(400).json({ error: 'Setup-Sitzung nicht gefunden oder Code fehlt.' });
+  }
+
+  const speakeasy = require('speakeasy');
+  const verified = speakeasy.totp.verify({
+    secret: tempSecret,
+    encoding: 'base32',
+    token: code,
+    window: 1
+  });
+
+  if (!verified) {
+    return res.status(400).json({ error: 'Ungültiger Code. Bitte versuche es erneut.' });
+  }
+
+  try {
+    await pool.query(
+      'UPDATE users SET two_factor_totp = true, totp_secret = $1 WHERE id = $2',
+      [tempSecret, req.session.userId]
+    );
+    delete req.session.tempTotpSecret;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Disable TOTP 2FA
+app.post('/api/settings/2fa/totp/disable', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE users SET two_factor_totp = false, totp_secret = null WHERE id = $1',
+      [req.session.userId]
+    );
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1625,6 +2100,12 @@ app.delete('/api/settings/passkeys/:id', requireAuth, async (req, res) => {
 app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
   const configs = req.body;
   try {
+    const keysChanged = Object.keys(configs);
+    const smtpKeys = ['email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from'];
+    if (keysChanged.some(k => smtpKeys.includes(k))) {
+      await setSetting('email_smtp_tested', 'false');
+    }
+
     for (const [key, value] of Object.entries(configs)) {
       // Avoid overwriting password with placeholder
       if (key === 'email_smtp_pass' && value === '__placeholder__') {
@@ -1654,6 +2135,7 @@ app.post('/api/settings/admin/test-smtp', requireAdmin, async (req, res) => {
   });
 
   if (sent) {
+    await setSetting('email_smtp_tested', 'true');
     res.json({ success: true, message: `Test email sent to ${to}.` });
   } else {
     res.status(500).json({ error: 'SMTP connection failed. Check your SMTP configurations or logs.' });

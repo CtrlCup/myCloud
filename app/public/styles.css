@@ -319,6 +319,112 @@ header {
   color: var(--color-text-muted);
 }
 
+/* Kachel- vs. Listen-Ansicht */
+/* Layout Switcher */
+.view-toggle {
+  display: flex;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+
+.view-toggle .btn-icon {
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+}
+
+.view-toggle .btn-icon.active {
+  background: var(--color-border);
+  color: var(--color-accent);
+}
+
+.view-toggle .btn-icon:hover:not(.active) {
+  color: var(--color-text);
+}
+
+/* Listen-Ansicht Layout */
+.file-grid.list-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.file-grid.list-view .file-item {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem !important;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.file-grid.list-view .file-item:hover {
+  border-color: var(--color-accent);
+  background: rgba(0, 210, 255, 0.03);
+}
+
+.file-grid.list-view .file-item .file-icon {
+  font-size: 1.5rem;
+  height: auto;
+  margin-bottom: 0;
+  margin-right: 0.75rem;
+}
+
+.file-grid.list-view .file-item .file-name {
+  margin-bottom: 0;
+  text-align: left;
+  font-weight: 500;
+}
+
+.file-grid.list-view .file-item .file-info {
+  margin-left: auto;
+  margin-right: 1.5rem;
+  font-size: 0.85rem;
+}
+
+.file-grid.list-view .file-item .file-item-checkbox {
+  position: static;
+  margin-right: 0.75rem;
+  transform: none;
+  opacity: 1 !important; /* Immer sichtbar in Liste */
+}
+
+.file-grid.list-view .file-item .file-actions {
+  position: static;
+  opacity: 1 !important; /* In Liste immer sichtbar oder per Hover */
+  margin-left: 0.5rem;
+}
+
+/* Schöne, quadratische Kacheln */
+.file-grid:not(.list-view) {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 1rem;
+}
+
+.file-grid:not(.list-view) .file-item {
+  aspect-ratio: 1.1 / 1;
+  justify-content: center;
+  padding: 1.25rem 0.75rem;
+}
+
+.file-grid:not(.list-view) .file-icon {
+  height: 50px;
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+}
+
 .file-actions {
   position: absolute;
   top: 0.5rem;
