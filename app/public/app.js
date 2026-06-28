@@ -1534,10 +1534,12 @@ async function uploadMultipleFiles(filesList) {
   if (trigger) {
     trigger.style.opacity = '1';
     trigger.style.pointerEvents = 'auto';
+    trigger.style.zIndex = '2';
   }
   if (panel) {
     panel.style.opacity = '0';
     panel.style.pointerEvents = 'none';
+    panel.style.zIndex = '1';
   }
 
   updateUploadUI();
@@ -1620,9 +1622,11 @@ function setUploadWidgetState(state) {
     // Morph to maximized details view
     trigger.style.opacity = '0';
     trigger.style.pointerEvents = 'none';
+    trigger.style.zIndex = '1';
     
     panel.style.opacity = '1';
     panel.style.pointerEvents = 'auto';
+    panel.style.zIndex = '2';
     
     // Animate container size and shape
     container.style.borderRadius = '12px';
@@ -1632,9 +1636,11 @@ function setUploadWidgetState(state) {
     // Morph to minimized pill view
     panel.style.opacity = '0';
     panel.style.pointerEvents = 'none';
+    panel.style.zIndex = '1';
     
     trigger.style.opacity = '1';
     trigger.style.pointerEvents = 'auto';
+    trigger.style.zIndex = '2';
     
     // Animate container size and shape
     container.style.borderRadius = '50px';
