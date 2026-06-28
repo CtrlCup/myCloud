@@ -1078,7 +1078,8 @@ app.get('/api/public/branding', async (req, res) => {
     const name = await getSetting('cloud_name') || 'myCloud';
     const tabName = await getSetting('cloud_tab_name') || 'myCloud';
     const hasIcon = await getSetting('cloud_icon_path') ? true : false;
-    res.json({ name, tabName, hasIcon });
+    const appUrl = process.env.APP_URL || '';
+    res.json({ name, tabName, hasIcon, appUrl });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }

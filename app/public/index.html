@@ -520,6 +520,26 @@
     </div>
   </div>
 
+  <!-- INPUT MODAL (Für Ordner- und Dateierstellung im einheitlichen Stil) -->
+  <div class="modal-overlay" id="input-modal-overlay">
+    <div class="card modal" style="max-width: 400px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="input-modal-title">Eingabe erforderlich</h3>
+        <button class="close-btn" id="close-input-modal-btn">&times;</button>
+      </div>
+      <form id="input-modal-form">
+        <div class="form-group" style="margin-top: 1rem;">
+          <label for="input-modal-field" id="input-modal-label">Name eingeben</label>
+          <input type="text" id="input-modal-field" class="form-control" placeholder="..." required autofocus autocomplete="off">
+        </div>
+        <div class="form-actions" style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button type="button" class="btn" id="cancel-input-modal-btn" style="justify-content: center;">Abbrechen</button>
+          <button type="submit" class="btn btn-primary" style="justify-content: center;">Bestätigen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- NOTIFICATION TOAST -->
   <div class="notification" id="toast">
     <span id="toast-message">Meldung</span>

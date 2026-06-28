@@ -29,6 +29,61 @@ function showToast(message) {
   }, 3500);
 }
 
+// Global variable for Domain URL configuration
+let appBrandingUrl = '';
+
+// Custom input dialog helper using the web modal
+function showInputPrompt(title, label, defaultValue = '', placeholder = '') {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('input-modal-overlay');
+    const form = document.getElementById('input-modal-form');
+    const input = document.getElementById('input-modal-field');
+    const titleEl = document.getElementById('input-modal-title');
+    const labelEl = document.getElementById('input-modal-label');
+    const cancelBtn = document.getElementById('cancel-input-modal-btn');
+    const closeBtn = document.getElementById('close-input-modal-btn');
+
+    titleEl.textContent = title;
+    labelEl.textContent = label;
+    input.value = defaultValue;
+    input.placeholder = placeholder;
+
+    // Handle password field styling / type change for safety if title contains password
+    if (title.toLowerCase().includes('passwort') || label.toLowerCase().includes('passwort')) {
+      input.type = 'password';
+    } else {
+      input.type = 'text';
+    }
+
+    overlay.classList.add('active');
+    input.focus();
+
+    const cleanup = () => {
+      overlay.classList.remove('active');
+      form.onsubmit = null;
+      cancelBtn.onclick = null;
+      closeBtn.onclick = null;
+    };
+
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const val = input.value.trim();
+      cleanup();
+      resolve(val);
+    };
+
+    cancelBtn.onclick = () => {
+      cleanup();
+      resolve(null);
+    };
+
+    closeBtn.onclick = () => {
+      cleanup();
+      resolve(null);
+    };
+  });
+}
+
 function formatBytes(bytes) {
   if (bytes === 0 || !bytes) return '0 Bytes';
   const k = 1024;
@@ -207,7 +262,7 @@ forgotPasswordBtn.onclick = async () => {
 };
 
 async function handleResetPasswordFlow(token) {
-  const newPassword = prompt('Bitte gib dein neues Passwort ein:');
+  const newPassword = await showInputPrompt('Passwort zurücksetzen', 'Bitte gib dein neues Passwort ein:', '', 'Neues Passwort');
   if (!newPassword) return;
 
   try {
@@ -593,15 +648,8 @@ function showFileContextMenu(file, x, y) {
 
   const menu = document.createElement('div');
   menu.className = 'card context-menu';
-  menu.style.position = 'fixed';
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
-  menu.style.zIndex = '999';
-  menu.style.padding = '0.5rem';
-  menu.style.display = 'flex';
-  menu.style.flexDirection = 'column';
-  menu.style.gap = '0.25rem';
-  menu.style.minWidth = '180px';
 
   const actions = [];
 
@@ -656,15 +704,11 @@ function showFileContextMenu(file, x, y) {
 
   actions.forEach(act => {
     const btn = document.createElement('button');
-    btn.className = 'btn';
-    btn.style.border = 'none';
-    btn.style.justifyContent = 'flex-start';
-    btn.style.padding = '0.5rem 1rem';
-    btn.style.width = '100%';
-    btn.innerHTML = `<i data-lucide="${act.icon}" style="width: 16px; height: 16px;"></i> ${act.label}`;
+    btn.className = 'btn-menu-item';
+    btn.innerHTML = `<i data-lucide="${act.icon}"></i> ${act.label}`;
     
     if (act.label.includes('löschen') || act.label === 'Löschen') {
-      btn.style.color = '#ff5555';
+      btn.classList.add('delete-action');
     }
 
     btn.onclick = () => {
@@ -699,15 +743,8 @@ document.getElementById('dashboard-view').oncontextmenu = (e) => {
 
   const menu = document.createElement('div');
   menu.className = 'card context-menu';
-  menu.style.position = 'fixed';
   menu.style.left = `${e.clientX}px`;
   menu.style.top = `${e.clientY}px`;
-  menu.style.zIndex = '999';
-  menu.style.padding = '0.5rem';
-  menu.style.display = 'flex';
-  menu.style.flexDirection = 'column';
-  menu.style.gap = '0.25rem';
-  menu.style.minWidth = '180px';
 
   const actions = [
     {
@@ -737,12 +774,8 @@ document.getElementById('dashboard-view').oncontextmenu = (e) => {
 
   actions.forEach(act => {
     const btn = document.createElement('button');
-    btn.className = 'btn';
-    btn.style.border = 'none';
-    btn.style.justifyContent = 'flex-start';
-    btn.style.padding = '0.5rem 1rem';
-    btn.style.width = '100%';
-    btn.innerHTML = `<i data-lucide="${act.icon}" style="width: 16px; height: 16px;"></i> ${act.label}`;
+    btn.className = 'btn-menu-item';
+    btn.innerHTML = `<i data-lucide="${act.icon}"></i> ${act.label}`;
 
     btn.onclick = () => {
       act.action();
@@ -767,7 +800,7 @@ document.getElementById('dashboard-view').oncontextmenu = (e) => {
 document.getElementById('new-folder-btn').onclick = () => createNewFolder();
 
 async function createNewFolder() {
-  const name = prompt('Bitte gib einen Namen für den neuen Ordner ein:');
+  const name = await showInputPrompt('Neuer Ordner', 'Bitte gib einen Namen für den neuen Ordner ein:', '', 'Ordnername');
   if (!name) return;
 
   try {
@@ -791,7 +824,7 @@ async function createNewFolder() {
 
 // Action: Create Empty File
 async function createNewEmptyFile() {
-  const name = prompt('Bitte gib einen Dateinamen ein (z. B. notizen.txt):');
+  const name = await showInputPrompt('Neue Datei erstellen', 'Bitte gib einen Dateinamen ein (z. B. notizen.txt):', '', 'notizen.txt');
   if (!name) return;
 
   try {
@@ -965,7 +998,8 @@ const shareResultInput = document.getElementById('share-result-input');
 
 async function openShareModal(file) {
   document.getElementById('share-file-id').value = file.id;
-  document.getElementById('share-url-prefix').textContent = `${window.location.origin}/s/`;
+  const prefix = appBrandingUrl || window.location.origin;
+  document.getElementById('share-url-prefix').textContent = prefix.endsWith('/') ? `${prefix}s/` : `${prefix}/s/`;
   
   // Set defaults
   shareSlugInput.value = '';
@@ -1034,7 +1068,9 @@ async function openShareModal(file) {
 }
 
 function displayGeneratedLink(slug) {
-  const fullUrl = `${window.location.origin}/s/${slug}`;
+  const prefix = appBrandingUrl || window.location.origin;
+  const base = prefix.endsWith('/') ? prefix : `${prefix}/`;
+  const fullUrl = `${base}s/${slug}`;
   shareResultInput.value = fullUrl;
   shareResultSection.style.display = 'block';
 }
@@ -1585,6 +1621,8 @@ async function loadBranding() {
     const res = await fetch('/api/public/branding');
     const data = await res.json();
     
+    appBrandingUrl = data.appUrl || '';
+
     // Update Document Title
     document.title = data.tabName || 'myCloud';
 
