@@ -93,6 +93,72 @@
     <span id="public-toast-message">Meldung</span>
   </div>
 
+  <!-- CODE EDITOR MODAL -->
+  <div class="modal-overlay" id="code-editor-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
+    <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
+        <div style="display: flex; align-items: center; gap: 1rem;">
+          <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="code-editor-title">
+            <i data-lucide="file-code"></i> Code Editor
+          </div>
+          <div id="collab-users-container" style="display: flex; align-items: center; gap: 0.5rem; background: rgba(255,255,255,0.05); padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.85rem; border: 1px solid var(--color-border);">
+            <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #50fa7b; box-shadow: 0 0 8px #50fa7b;"></span>
+            <span id="collab-users-list" style="font-weight: 500;">Nur du bist online</span>
+          </div>
+        </div>
+        <div style="display: flex; gap: 0.75rem;">
+          <button class="btn btn-primary" id="save-code-editor-btn" style="justify-content: center;">
+            <i data-lucide="save"></i> Speichern
+          </button>
+          <button class="btn" id="close-code-editor-btn" style="justify-content: center;">
+            <i data-lucide="x"></i> Schließen
+          </button>
+        </div>
+      </div>
+      <div id="monaco-editor-container" style="flex: 1; width: 100%; height: 100%; background: #1e1e1e;"></div>
+    </div>
+  </div>
+
+  <!-- IMAGE VIEWER MODAL -->
+  <div class="modal-overlay" id="image-viewer-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+    <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
+        <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="image-viewer-title">
+          <i data-lucide="image"></i> Bild-Vorschau
+        </div>
+        <button class="btn btn-icon close-btn" id="close-image-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden; position: relative;">
+        <div id="image-viewer-container" style="width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; background: transparent; overflow: hidden; padding: 0.5rem;">
+          <img id="image-viewer-img" style="max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: none;">
+          <div id="image-viewer-loading" style="color: var(--color-accent); font-weight: bold; display: flex; flex-direction: column; align-items: center; gap: 1rem;">
+            <div class="spinner" style="width: 40px; height: 40px; border: 4px solid rgba(0,210,255,0.1); border-left-color: var(--color-accent); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+            <span>Lade Bild...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIDEO VIEWER MODAL -->
+  <div class="modal-overlay" id="video-viewer-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+    <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
+        <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="video-viewer-title">
+          <i data-lucide="video"></i> Video-Vorschau
+        </div>
+        <button class="btn btn-icon close-btn" id="close-video-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden;">
+        <video id="video-viewer-player" controls autoplay style="max-width: 90%; max-height: 90%; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
+      </div>
+    </div>
+  </div>
+
   <!-- Client-side Logic Script for public share page -->
   <script>
     // Config und State
@@ -206,6 +272,23 @@
           updateBreadcrumbs(data.baseFile, currentFolderId);
           // Render Files
           renderFiles(data.files);
+
+          // Auto-open single file shares (e.g., Einmalnotizen)
+          if (!data.baseFile.is_folder && data.files.length > 0) {
+            const file = data.files[0];
+            const ext = file.name.split('.').pop().toLowerCase();
+            const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+            const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+            const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+
+            if (imageExts.includes(ext)) {
+              openImageViewer(file.id, file.name, true, slug);
+            } else if (videoExts.includes(ext)) {
+              openVideoViewer(file.id, file.name, true, slug);
+            } else if (codeExts.includes(ext)) {
+              openCodeEditor(file.id, file.name, true, slug);
+            }
+          }
         }
         
         lucide.createIcons();
@@ -290,10 +373,39 @@
         const item = document.createElement('div');
         item.className = 'file-item';
 
-        const iconName = file.is_folder ? 'folder' : 'file';
-        
+        let iconName = 'file';
+        if (file.is_folder) {
+          iconName = 'folder';
+        } else {
+          const ext = file.name.split('.').pop().toLowerCase();
+          if (['docx', 'doc', 'odt', 'rtf', 'pdf'].includes(ext)) {
+            iconName = 'file-text';
+          } else if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) {
+            iconName = 'file-spreadsheet';
+          } else if (['pptx', 'ppt', 'odp'].includes(ext)) {
+            iconName = 'presentation';
+          } else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) {
+            iconName = 'file-image';
+          } else if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext)) {
+            iconName = 'file-video';
+          } else if (['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'].includes(ext)) {
+            iconName = 'file-code';
+          }
+        }
+
+        const ext = file.is_folder ? '' : file.name.split('.').pop().toLowerCase();
+        const isImg = !file.is_folder && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext);
+        const isVid = !file.is_folder && ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext);
+
+        let iconHTML = `<i data-lucide="${iconName}"></i>`;
+        if (isImg || isVid) {
+          const thumbUrl = `/api/public/shares/${slug}/thumbnail/${file.id}`;
+          iconHTML = `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                      <i data-lucide="${iconName}" style="display: none;"></i>`;
+        }
+
         item.innerHTML = `
-          <div class="file-icon"><i data-lucide="${iconName}"></i></div>
+          <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
           <div class="file-name" title="${file.name}">${file.name}</div>
           <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
         `;
@@ -306,16 +418,33 @@
             }
             loadShareData(file.id);
           } else {
-            if (shareConfig.can_download) {
-              window.location.href = `/api/public/shares/${slug}/download/${file.id}`;
+            const ext = file.name.split('.').pop().toLowerCase();
+            
+            const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+            const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+            const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+
+            if (imageExts.includes(ext)) {
+              openImageViewer(file.id, file.name, true, slug);
+            } else if (videoExts.includes(ext)) {
+              openVideoViewer(file.id, file.name, true, slug);
+            } else if (codeExts.includes(ext)) {
+              openCodeEditor(file.id, file.name, true, slug);
             } else {
-              showToast('Download für diese Freigabe deaktiviert.');
+              if (shareConfig.can_download) {
+                window.location.href = `/api/public/shares/${slug}/download/${file.id}`;
+              } else {
+                showToast('Download für diese Freigabe deaktiviert.');
+              }
             }
           }
         };
 
         grid.appendChild(item);
       });
+      
+      // Update newly appended Lucide icons
+      lucide.createIcons();
     }
 
     // Datei-Upload per Input
@@ -390,8 +519,636 @@
       }
     });
 
+    async function loadBranding() {
+      try {
+        const res = await fetch('/api/public/branding');
+        const data = await res.json();
+
+        // Apply custom colors
+        if (data.customColorBg) {
+          document.documentElement.style.setProperty('--color-bg', data.customColorBg);
+        }
+        if (data.customColorAccent) {
+          document.documentElement.style.setProperty('--color-accent', data.customColorAccent);
+          
+          const hexToRgbA = (hex, alpha) => {
+            let c;
+            if (/^#([A-Fa-f0-9]{3}){1,2}$/.test(hex)) {
+              c = hex.substring(1).split('');
+              if (c.length === 3) {
+                c = [c[0], c[0], c[1], c[1], c[2], c[2]];
+              }
+              c = '0x' + c.join('');
+              return 'rgba(' + [(c >> 16) & 255, (c >> 8) & 255, c & 255].join(',') + ',' + alpha + ')';
+            }
+            return hex;
+          };
+          
+          document.documentElement.style.setProperty('--color-border', hexToRgbA(data.customColorAccent, 0.2));
+          document.documentElement.style.setProperty('--color-border-active', hexToRgbA(data.customColorAccent, 0.8));
+        }
+
+        // Apply background
+        if (data.hasDashboardBg) {
+          document.body.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
+          document.body.style.backgroundSize = 'cover';
+          document.body.style.backgroundPosition = 'center';
+          document.body.style.backgroundAttachment = 'fixed';
+          document.body.style.backgroundRepeat = 'no-repeat';
+        }
+
+        // Update Favicon
+        let favicon = document.querySelector('link[rel="icon"]');
+        if (!favicon) {
+          favicon = document.createElement('link');
+          favicon.rel = 'icon';
+          document.head.appendChild(favicon);
+        }
+        if (data.hasIcon) {
+          favicon.href = `/api/public/branding/icon?t=${Date.now()}`;
+        } else {
+          favicon.href = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="%2300d2ff"><path d="M75,45 C75,32 64,22 50,22 C40,22 31,28 27,37 C25,36 23,36 21,36 C10,36 2,44 2,55 C2,66 10,74 21,74 L75,74 C85,74 93,66 93,55 C93,45 85,37 75,37 C75,37 75,45 75,45 Z"/></svg>';
+        }
+
+        // Update logo
+        const logo = document.querySelector('.logo');
+        if (logo) {
+          const name = data.name || 'myCloud';
+          const prefix = name.length > 2 ? name.slice(0, 2) : name;
+          const suffix = name.length > 2 ? name.slice(2) : '';
+          
+          let iconHTML = `<i data-lucide="cloud"></i>`;
+          if (data.hasIcon) {
+            iconHTML = `<img src="/api/public/branding/icon?t=${Date.now()}" style="width: 32px; height: 32px; object-fit: contain; border-radius: 4px; margin-right: 0.5rem;" alt="Logo">`;
+          }
+          logo.innerHTML = `${iconHTML} ${prefix}<span>${suffix}</span> Shared`;
+        }
+        lucide.createIcons();
+      } catch (err) {
+        console.error('Error loading branding:', err);
+      }
+    }
+
     // Start
-    window.onload = () => loadShareData();
+    window.onload = () => {
+      loadBranding();
+      loadShareData();
+    };
+
+    // ESC Key to close overlays in share view
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        const codeEditor = document.getElementById('code-editor-overlay');
+        if (codeEditor && codeEditor.style.display !== 'none') {
+          document.getElementById('close-code-editor-btn').click();
+          return;
+        }
+        const imageViewer = document.getElementById('image-viewer-overlay');
+        if (imageViewer && imageViewer.style.display !== 'none') {
+          document.getElementById('close-image-viewer-btn').click();
+          return;
+        }
+        const videoViewer = document.getElementById('video-viewer-overlay');
+        if (videoViewer && videoViewer.style.display !== 'none') {
+          document.getElementById('close-video-viewer-btn').click();
+          return;
+        }
+      }
+    });
+
+    // Backdrop click close for share overlays
+    ['code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay'].forEach(id => {
+      const overlay = document.getElementById(id);
+      if (overlay) {
+        overlay.addEventListener('click', (e) => {
+          if (e.target === overlay) {
+            if (id === 'code-editor-overlay') {
+              // Do not close code editor on background click
+            } else if (id === 'image-viewer-overlay') {
+              document.getElementById('close-image-viewer-btn').click();
+            } else if (id === 'video-viewer-overlay') {
+              document.getElementById('close-video-viewer-btn').click();
+            }
+          }
+        });
+      }
+    });
+
+    // Monaco Editor and Viewers logic
+    let monacoLoaded = false;
+    let monacoEditorInstance = null;
+
+    // Real-time collaboration state
+    let collabSocket = null;
+    let collabUserColor = null;
+    let collabUserDecorations = {}; // userId -> decoration IDs
+    let isApplyingRemoteEdit = false;
+    let autoSaveDebounceTimeout = null;
+
+    function loadMonaco() {
+      return new Promise((resolve, reject) => {
+        if (monacoLoaded) return resolve();
+        if (typeof require === 'undefined') {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs/loader.min.js';
+          script.onload = () => {
+            require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' }});
+            require(['vs/editor/editor.main'], () => {
+              monacoLoaded = true;
+              resolve();
+            });
+          };
+          script.onerror = () => reject(new Error('Monaco editor could not be loaded.'));
+          document.head.appendChild(script);
+        } else {
+          require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' }});
+          require(['vs/editor/editor.main'], () => {
+            monacoLoaded = true;
+            resolve();
+          });
+        }
+      });
+    }
+
+    function getMonacoLanguage(fileName) {
+      const ext = fileName.split('.').pop().toLowerCase();
+      const mapping = {
+        'txt': 'plaintext',
+        'js': 'javascript', 'mjs': 'javascript', 'cjs': 'javascript', 'jsx': 'javascript',
+        'ts': 'typescript', 'tsx': 'typescript',
+        'html': 'html', 'xml': 'xml', 'svg': 'xml',
+        'css': 'css', 'scss': 'scss', 'less': 'less',
+        'py': 'python',
+        'json': 'json',
+        'yaml': 'yaml', 'yml': 'yaml',
+        'c': 'c',
+        'cpp': 'cpp', 'h': 'cpp', 'hpp': 'cpp',
+        'cs': 'csharp',
+        'go': 'go',
+        'rs': 'rust',
+        'java': 'java',
+        'sh': 'shell', 'bash': 'shell',
+        'md': 'markdown',
+        'php': 'php',
+        'rb': 'ruby',
+        'sql': 'sql'
+      };
+      return mapping[ext] || 'plaintext';
+    }
+
+    function addCollabUserStyles(userId, color, username) {
+      const styleId = `collab-styles-${userId}`;
+      let styleEl = document.getElementById(styleId);
+      if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = styleId;
+        document.head.appendChild(styleEl);
+      }
+      styleEl.innerHTML = `
+        .collab-selection-${userId} {
+          background-color: ${color}33 !important;
+        }
+        .collab-cursor-${userId} {
+          border-left: 2px solid ${color} !important;
+          margin-left: -1px;
+          position: relative;
+        }
+        .collab-cursor-tooltip-${userId}::after {
+          content: "${username}";
+          position: absolute;
+          top: -14px;
+          left: 2px;
+          background: ${color};
+          color: #0b0f19;
+          font-size: 9px;
+          font-weight: bold;
+          padding: 1px 3px;
+          border-radius: 2px;
+          white-space: nowrap;
+          pointer-events: none;
+          opacity: 0.8;
+          z-index: 10;
+        }
+      `;
+    }
+
+    function removeCollabUserStyles(userId) {
+      const styleEl = document.getElementById(`collab-styles-${userId}`);
+      if (styleEl) styleEl.remove();
+    }
+
+    function initCollabSocket(fileId, username, userId, isPublic = false, slug = '') {
+      if (collabSocket) {
+        collabSocket.close();
+        collabSocket = null;
+      }
+
+      collabUserDecorations = {};
+
+      const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsHost = window.location.host;
+      
+      let wsUrl = `${wsProto}//${wsHost}/api/collab?fileId=${fileId}&username=${encodeURIComponent(username)}&userId=${userId}`;
+      if (isPublic) {
+        wsUrl += `&slug=${slug}`;
+      }
+
+      collabSocket = new WebSocket(wsUrl);
+
+      collabSocket.onopen = () => {
+        console.log('Collaboration WebSocket connected.');
+      };
+
+      collabSocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'init') {
+            collabUserColor = data.color;
+            updateCollabUsersListUI(data.users);
+          } else if (data.type === 'user_joined') {
+            updateCollabUsersListUI(data.users);
+            showToast(`${data.username} hat den Editor betreten.`);
+          } else if (data.type === 'user_left') {
+            updateCollabUsersListUI(data.users);
+            showToast(`${data.username} hat den Editor verlassen.`);
+            if (collabUserDecorations[data.userId]) {
+              if (monacoEditorInstance) {
+                monacoEditorInstance.deltaDecorations(collabUserDecorations[data.userId], []);
+              }
+              delete collabUserDecorations[data.userId];
+            }
+            removeCollabUserStyles(data.userId);
+          } else if (data.type === 'edit') {
+            if (!monacoEditorInstance) return;
+            isApplyingRemoteEdit = true;
+            const model = monacoEditorInstance.getModel();
+            const edits = data.changes.map(change => ({
+              range: new monaco.Range(
+                change.range.startLineNumber,
+                change.range.startColumn,
+                change.range.endLineNumber,
+                change.range.endColumn
+              ),
+              text: change.text,
+              forceMoveMarkers: true
+            }));
+            model.applyEdits(edits);
+            isApplyingRemoteEdit = false;
+          } else if (data.type === 'cursor') {
+            if (!monacoEditorInstance) return;
+            
+            const targetUserId = data.userId;
+            const targetUsername = data.username;
+            const position = data.position;
+            const selection = data.selection;
+
+            let color = '#00d2ff';
+            const clientStyle = document.getElementById(`collab-styles-${targetUserId}`);
+            if (clientStyle) {
+              const match = clientStyle.innerHTML.match(/border-left: 2px solid (#[a-fA-F0-9]+)/);
+              if (match) color = match[1];
+            } else {
+              const colors = ['#00d2ff', '#ff5555', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c', '#8be9fd'];
+              let hash = 0;
+              for (let i = 0; i < targetUserId.length; i++) {
+                hash = targetUserId.charCodeAt(i) + ((hash << 5) - hash);
+              }
+              color = colors[Math.abs(hash) % colors.length];
+            }
+
+            addCollabUserStyles(targetUserId, color, targetUsername);
+
+            const decorations = [];
+            if (selection && (selection.startLineNumber !== selection.endLineNumber || selection.startColumn !== selection.endColumn)) {
+              decorations.push({
+                range: new monaco.Range(selection.startLineNumber, selection.startColumn, selection.endLineNumber, selection.endColumn),
+                options: {
+                  className: `collab-selection-${targetUserId}`,
+                  hoverMessage: { value: targetUsername }
+                }
+              });
+            }
+
+            if (position) {
+              decorations.push({
+                range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
+                options: {
+                  className: `collab-cursor-${targetUserId}`,
+                  afterContentClassName: `collab-cursor-tooltip-${targetUserId}`,
+                  hoverMessage: { value: targetUsername }
+                }
+              });
+            }
+
+            const oldDecs = collabUserDecorations[targetUserId] || [];
+            collabUserDecorations[targetUserId] = monacoEditorInstance.deltaDecorations(oldDecs, decorations);
+          }
+        } catch (err) {
+          console.error('Error handling collaborative WS message:', err);
+        }
+      };
+
+      collabSocket.onclose = () => {
+        console.log('Collaboration WebSocket disconnected.');
+      };
+    }
+
+    function updateCollabUsersListUI(users) {
+      const container = document.getElementById('collab-users-container');
+      const listEl = document.getElementById('collab-users-list');
+      if (!container || !listEl) return;
+
+      if (!users || users.length <= 1) {
+        container.style.display = 'none';
+        return;
+      }
+
+      container.style.display = 'flex';
+      const currentUsername = 'Visitor';
+      const otherUsers = users.filter(u => u.username !== currentUsername);
+      const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${u.username}</span>`);
+      listEl.innerHTML = `Andere online: ${names.join(', ')}`;
+    }
+
+    let currentEditingFileId = null;
+
+    async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
+      showToast('Lade Code-Editor...');
+      currentEditingFileId = fileId;
+
+      try {
+        const url = isPublic 
+          ? `/api/public/shares/${slug}/content/${fileId}`
+          : `/api/files/content/${fileId}`;
+          
+        const res = await fetch(url);
+        if (!res.ok) {
+          const err = await res.json();
+          showToast(err.error || 'Fehler beim Laden des Datei-Inhalts.');
+          return;
+        }
+        const textContent = await res.text();
+
+        await loadMonaco();
+
+        document.getElementById('code-editor-title').innerHTML = `<i data-lucide="file-code"></i> ${fileName}`;
+        lucide.createIcons();
+
+        document.getElementById('code-editor-overlay').style.display = 'block';
+        const collabContainer = document.getElementById('collab-users-container');
+        if (collabContainer) {
+          collabContainer.style.display = 'none';
+        }
+
+        let readOnly = false;
+        if (isPublic && shareConfig && !shareConfig.can_write) {
+          readOnly = true;
+        }
+        
+        const saveBtn = document.getElementById('save-code-editor-btn');
+        if (saveBtn) {
+          saveBtn.style.display = readOnly ? 'none' : 'block';
+        }
+
+        const container = document.getElementById('monaco-editor-container');
+        container.innerHTML = ''; // Clear previous
+
+        const language = getMonacoLanguage(fileName);
+        
+        monacoEditorInstance = monaco.editor.create(container, {
+          value: textContent,
+          language: language,
+          theme: 'vs-dark',
+          automaticLayout: true,
+          readOnly: readOnly,
+          fontSize: 14,
+          minimap: { enabled: true },
+          bracketPairColorization: {
+            enabled: true
+          },
+          'semanticHighlighting.enabled': true,
+          colorDecorators: true
+        });
+
+        // Start Collaboration WebSocket
+        const collabUsername = 'Besucher_' + Math.floor(Math.random() * 900 + 100);
+        const collabUserId = `guest_${Math.random().toString(36).substring(2, 11)}`;
+        initCollabSocket(fileId, collabUsername, collabUserId, isPublic, slug);
+
+        // Send edits to other collaborators in real-time on keypress/change
+        monacoEditorInstance.onDidChangeModelContent((event) => {
+          if (isApplyingRemoteEdit) return;
+          if (collabSocket && collabSocket.readyState === WebSocket.OPEN) {
+            collabSocket.send(JSON.stringify({
+              type: 'edit',
+              changes: event.changes
+            }));
+          }
+
+          // 1.5s Debounced Auto-save to the database
+          if (autoSaveDebounceTimeout) {
+            clearTimeout(autoSaveDebounceTimeout);
+          }
+          autoSaveDebounceTimeout = setTimeout(async () => {
+            if (!monacoEditorInstance || readOnly) return;
+            const currentContent = monacoEditorInstance.getValue();
+            try {
+              const saveUrl = isPublic 
+                ? `/api/public/shares/${slug}/content/${fileId}`
+                : `/api/files/content/${fileId}`;
+              await fetch(saveUrl, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: currentContent })
+              });
+            } catch (e) {
+              console.error('Autosave error:', e);
+            }
+          }, 1500);
+        });
+
+        // Send cursor position & selection to other collaborators in real-time
+        const sendCursorUpdate = () => {
+          if (isApplyingRemoteEdit) return;
+          if (collabSocket && collabSocket.readyState === WebSocket.OPEN) {
+            collabSocket.send(JSON.stringify({
+              type: 'cursor',
+              position: monacoEditorInstance.getPosition(),
+              selection: monacoEditorInstance.getSelection()
+            }));
+          }
+        };
+
+        monacoEditorInstance.onDidChangeCursorPosition(sendCursorUpdate);
+        monacoEditorInstance.onDidChangeCursorSelection(sendCursorUpdate);
+
+        if (!readOnly) {
+          document.getElementById('save-code-editor-btn').onclick = async () => {
+            const updatedContent = monacoEditorInstance.getValue();
+            showToast('Speichere Datei...');
+            
+            try {
+              const saveUrl = isPublic 
+                ? `/api/public/shares/${slug}/content/${fileId}`
+                : `/api/files/content/${fileId}`;
+                
+              const saveRes = await fetch(saveUrl, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: updatedContent })
+              });
+
+              if (saveRes.ok) {
+                showToast('Datei erfolgreich gespeichert.');
+              } else {
+                const err = await saveRes.json();
+                showToast(err.error || 'Fehler beim Speichern.');
+              }
+            } catch (err) {
+              showToast('Verbindungsfehler beim Speichern.');
+            }
+          };
+        }
+      } catch (err) {
+        console.error('Error opening code editor:', err);
+        showToast('Code-Editor konnte nicht geladen werden.');
+      }
+    }
+
+    document.getElementById('close-code-editor-btn').onclick = () => {
+      if (collabSocket) {
+        collabSocket.close();
+        collabSocket = null;
+      }
+      if (autoSaveDebounceTimeout) {
+        clearTimeout(autoSaveDebounceTimeout);
+        autoSaveDebounceTimeout = null;
+      }
+      document.querySelectorAll('[id^="collab-styles-"]').forEach(el => el.remove());
+
+      if (monacoEditorInstance) {
+        monacoEditorInstance.dispose();
+        monacoEditorInstance = null;
+      }
+      document.getElementById('code-editor-overlay').style.display = 'none';
+      loadShareData(currentFolderId);
+    };
+
+    let heicLibLoaded = false;
+    function loadHeicLib() {
+      return new Promise((resolve, reject) => {
+        if (heicLibLoaded) return resolve();
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/heic2any/0.0.4/heic2any.min.js';
+        script.onload = () => {
+          heicLibLoaded = true;
+          resolve();
+        };
+        script.onerror = () => reject(new Error('heic2any failed to load.'));
+        document.head.appendChild(script);
+      });
+    }
+
+    let currentImageObjectUrl = null;
+
+    async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
+      const overlay = document.getElementById('image-viewer-overlay');
+      const img = document.getElementById('image-viewer-img');
+      const loading = document.getElementById('image-viewer-loading');
+      const title = document.getElementById('image-viewer-title');
+
+      title.innerHTML = `<i data-lucide="image"></i> ${fileName}`;
+      lucide.createIcons();
+      
+      img.style.display = 'none';
+      loading.style.display = 'flex';
+      overlay.style.display = 'block';
+
+      if (currentImageObjectUrl) {
+        URL.revokeObjectURL(currentImageObjectUrl);
+        currentImageObjectUrl = null;
+      }
+
+      const downloadUrl = isPublic 
+        ? `/api/public/shares/${slug}/download/${fileId}`
+        : `/api/files/download/${fileId}`;
+
+      const ext = fileName.split('.').pop().toLowerCase();
+      
+      try {
+        if (['heic', 'heif'].includes(ext)) {
+          const response = await fetch(downloadUrl);
+          if (!response.ok) throw new Error('Failed to fetch image file.');
+          const blob = await response.blob();
+          
+          await loadHeicLib();
+          const convertedBlob = await heic2any({
+            blob,
+            toType: 'image/jpeg',
+            quality: 0.8
+          });
+          
+          currentImageObjectUrl = URL.createObjectURL(convertedBlob);
+          img.src = currentImageObjectUrl;
+        } else if (['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) {
+          const thumbUrl = isPublic
+            ? `/api/public/shares/${slug}/thumbnail/${fileId}`
+            : `/api/files/thumbnail/${fileId}`;
+          img.src = thumbUrl;
+        } else {
+          img.src = downloadUrl;
+        }
+
+        img.onload = () => {
+          loading.style.display = 'none';
+          img.style.display = 'block';
+        };
+        img.onerror = () => {
+          loading.style.display = 'none';
+          title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
+          lucide.createIcons();
+        };
+      } catch (err) {
+        console.error('Image viewer error:', err);
+        loading.style.display = 'none';
+        title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
+        lucide.createIcons();
+      }
+    }
+
+    document.getElementById('close-image-viewer-btn').onclick = () => {
+      document.getElementById('image-viewer-overlay').style.display = 'none';
+      const img = document.getElementById('image-viewer-img');
+      img.src = '';
+      if (currentImageObjectUrl) {
+        URL.revokeObjectURL(currentImageObjectUrl);
+        currentImageObjectUrl = null;
+      }
+    };
+
+    function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
+      const overlay = document.getElementById('video-viewer-overlay');
+      const player = document.getElementById('video-viewer-player');
+      const title = document.getElementById('video-viewer-title');
+
+      title.innerHTML = `<i data-lucide="video"></i> ${fileName}`;
+      lucide.createIcons();
+
+      const sourceUrl = isPublic 
+        ? `/api/public/shares/${slug}/download/${fileId}`
+        : `/api/files/download/${fileId}`;
+
+      player.src = sourceUrl;
+      overlay.style.display = 'block';
+    }
+
+    document.getElementById('close-video-viewer-btn').onclick = () => {
+      document.getElementById('video-viewer-overlay').style.display = 'none';
+      const player = document.getElementById('video-viewer-player');
+      player.pause();
+      player.src = '';
+    };
   </script>
 </body>
 </html>

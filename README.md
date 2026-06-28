@@ -22,4 +22,36 @@ Eine moderne, schlichte und sichere Cloud-Lösung, die über Docker Compose orch
    ```bash
    docker compose up --build
    ```
-3. Öffne `http://localhost:3000` im Browser.
+3. Öffne `http://localhost:3030` (oder den konfigurierten Port) im Browser.
+
+## Umgebungsvariablen (Configuration Variables)
+
+Die folgenden Variablen können in der `.env`-Datei definiert werden:
+
+### Standardkonfigurationen (Empfohlen)
+- `PORT`: Der Port, auf dem die App gehostet wird (Standard: `3030`).
+- `APP_URL`: Die öffentliche URL der myCloud-Instanz (Standard: `http://localhost:3030`).
+- `SESSION_SECRET`: Ein zufälliger, sicherer String zur Absicherung von Sessions.
+- `DB_USER` / `DB_PASSWORD` / `DB_NAME`: PostgreSQL Zugangsdaten.
+
+### Mailserver / SMTP (Optional)
+- `EMAIL_SMTP_HOST`: Hostname des SMTP-Servers (z. B. `smtp.gmail.com`).
+- `EMAIL_SMTP_PORT`: SMTP-Port (z. B. `587` oder `465`).
+- `EMAIL_SMTP_USER`: SMTP-Benutzername.
+- `EMAIL_SMTP_PASS`: SMTP-Passwort.
+- `EMAIL_FROM`: Absender-Adresse (Standard: `noreply@mycloud.local`).
+
+### SSO / OIDC (Optional)
+- `SSO_ENABLED`: SSO Login aktivieren (`true` / `false`).
+- `SSO_CLIENT_ID`: Client ID deines OIDC-Providers (z. B. Authentik).
+- `SSO_CLIENT_SECRET`: Client Secret deines OIDC-Providers.
+- `SSO_ISSUER_URL`: Issuer-URL des Providers.
+- `SSO_REDIRECT_URI`: Weiterleitungs-URI (Standard: `http://localhost:3030/auth/sso/callback`).
+
+### Sicherheit & System (Optional)
+- `REGISTRATION_ENABLED`: Registrierung neuer Benutzer über die Anmeldeseite erlauben (`true` / `false`, Standard: `true`).
+
+> [!NOTE]
+> **Synchronisierung:** Wird eine optionale Variable nicht gesetzt, lässt sich die entsprechende Funktion bequem über die Weboberfläche in den **Admin-Einstellungen** konfigurieren.
+> Nimmst du Änderungen in den Admin-Einstellungen der Weboberfläche vor, werden diese Werte **automatisch** zurück in die `.env`-Datei geschrieben.
+

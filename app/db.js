@@ -34,6 +34,10 @@ async function initDb() {
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_totp BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret VARCHAR(255)');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS has_custom_username BOOLEAN DEFAULT FALSE');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(100)');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(100)');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS display_real_name BOOLEAN DEFAULT FALSE');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE');
 
     // Passkeys Table
     await client.query(`
@@ -46,6 +50,8 @@ async function initDb() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    await client.query('ALTER TABLE passkeys ADD COLUMN IF NOT EXISTS name VARCHAR(255)');
 
     // Files Table
     await client.query(`
@@ -82,6 +88,7 @@ async function initDb() {
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS max_downloads INTEGER');
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS download_count INTEGER DEFAULT 0');
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS only_upload BOOLEAN DEFAULT FALSE');
+    await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS is_one_time_note BOOLEAN DEFAULT FALSE');
 
     // Settings Table
     await client.query(`
@@ -91,29 +98,71 @@ async function initDb() {
       )
     `);
 
-    // Seed default settings if not exists
+    // Seed/sync settings from environment variables if set, otherwise seed defaults
+    const getEnvOrSeed = (key, envVal, seedVal) => {
+      return envVal !== undefined && envVal !== '' ? envVal : seedVal;
+    };
+
+    const registrationSeed = process.env.REGISTRATION_ENABLED !== undefined ? process.env.REGISTRATION_ENABLED : 'true';
+
     const settingsSeeds = [
-      { key: 'registration_enabled', value: 'true' },
-      { key: 'sso_enabled', value: 'false' },
-      { key: 'sso_client_id', value: '' },
-      { key: 'sso_client_secret', value: '' },
-      { key: 'sso_issuer_url', value: '' },
-      { key: 'email_smtp_host', value: '' },
-      { key: 'email_smtp_port', value: '587' },
-      { key: 'email_smtp_user', value: '' },
-      { key: 'email_smtp_pass', value: '' },
-      { key: 'email_from', value: 'noreply@mycloud.local' },
+      { key: 'registration_enabled', value: registrationSeed },
+      { key: 'sso_enabled', value: getEnvOrSeed('sso_enabled', process.env.SSO_ENABLED, 'false') },
+      { key: 'sso_client_id', value: getEnvOrSeed('sso_client_id', process.env.SSO_CLIENT_ID, '') },
+      { key: 'sso_client_secret', value: getEnvOrSeed('sso_client_secret', process.env.SSO_CLIENT_SECRET, '') },
+      { key: 'sso_issuer_url', value: getEnvOrSeed('sso_issuer_url', process.env.SSO_ISSUER_URL, '') },
+      { key: 'email_smtp_host', value: getEnvOrSeed('email_smtp_host', process.env.EMAIL_SMTP_HOST, '') },
+      { key: 'email_smtp_port', value: getEnvOrSeed('email_smtp_port', process.env.EMAIL_SMTP_PORT, '587') },
+      { key: 'email_smtp_user', value: getEnvOrSeed('email_smtp_user', process.env.EMAIL_SMTP_USER, '') },
+      { key: 'email_smtp_pass', value: getEnvOrSeed('email_smtp_pass', process.env.EMAIL_SMTP_PASS, '') },
+      { key: 'email_from', value: getEnvOrSeed('email_from', process.env.EMAIL_FROM, 'noreply@mycloud.local') },
       { key: 'cloud_name', value: 'myCloud' },
       { key: 'cloud_tab_name', value: 'myCloud' },
-      { key: 'cloud_icon_path', value: '' }
+      { key: 'cloud_icon_path', value: '' },
+      { key: 'custom_color_bg', value: '#0b0f19' },
+      { key: 'custom_color_accent', value: '#00d2ff' },
+      { key: 'dashboard_bg_image', value: '' },
+      { key: 'login_bg_image', value: '' }
     ];
 
+    // If SMTP host is configured via env, set email_smtp_tested to true automatically
+    if (process.env.EMAIL_SMTP_HOST) {
+      settingsSeeds.push({ key: 'email_smtp_tested', value: 'true' });
+    }
+
     for (const seed of settingsSeeds) {
-      await client.query(`
-        INSERT INTO settings (key, value)
-        VALUES ($1, $2)
-        ON CONFLICT (key) DO NOTHING
-      `, [seed.key, seed.value]);
+      const envKeys = [
+        'registration_enabled', 'sso_enabled', 'sso_client_id', 'sso_client_secret', 'sso_issuer_url',
+        'email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from'
+      ];
+      
+      const isEnvKey = envKeys.includes(seed.key);
+      const isEnvValueProvided = isEnvKey && (
+        (seed.key === 'registration_enabled' && process.env.REGISTRATION_ENABLED !== undefined) ||
+        (seed.key === 'sso_enabled' && process.env.SSO_ENABLED !== undefined) ||
+        (seed.key === 'sso_client_id' && process.env.SSO_CLIENT_ID) ||
+        (seed.key === 'sso_client_secret' && process.env.SSO_CLIENT_SECRET) ||
+        (seed.key === 'sso_issuer_url' && process.env.SSO_ISSUER_URL) ||
+        (seed.key === 'email_smtp_host' && process.env.EMAIL_SMTP_HOST) ||
+        (seed.key === 'email_smtp_port' && process.env.EMAIL_SMTP_PORT) ||
+        (seed.key === 'email_smtp_user' && process.env.EMAIL_SMTP_USER) ||
+        (seed.key === 'email_smtp_pass' && process.env.EMAIL_SMTP_PASS) ||
+        (seed.key === 'email_from' && process.env.EMAIL_FROM)
+      );
+
+      if (isEnvValueProvided) {
+        await client.query(`
+          INSERT INTO settings (key, value)
+          VALUES ($1, $2)
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        `, [seed.key, seed.value]);
+      } else {
+        await client.query(`
+          INSERT INTO settings (key, value)
+          VALUES ($1, $2)
+          ON CONFLICT (key) DO NOTHING
+        `, [seed.key, seed.value]);
+      }
     }
 
     await client.query('COMMIT');

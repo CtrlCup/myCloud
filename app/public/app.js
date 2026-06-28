@@ -9,6 +9,15 @@ let renderedFilesList = [];
 let lastSelectedId = null; // Für Shift-Auswahl
 let viewMode = localStorage.getItem('viewMode') || 'grid';
 let isEmailConfigured = false;
+let clickTimeout = null;
+let clickTimeoutFileId = null;
+
+// Real-time collaboration state
+let collabSocket = null;
+let collabUserColor = null;
+let collabUserDecorations = {}; // userId -> decoration IDs
+let isApplyingRemoteEdit = false;
+let autoSaveDebounceTimeout = null;
 
 
 // DOM Elements
@@ -86,6 +95,34 @@ function showInputPrompt(title, label, defaultValue = '', placeholder = '') {
   });
 }
 
+function showConfirmDialog(title, message) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('custom-confirm-modal-overlay');
+    const titleEl = document.getElementById('custom-confirm-title');
+    const messageEl = document.getElementById('custom-confirm-message');
+    const cancelBtn = document.getElementById('cancel-custom-confirm-btn');
+    const submitBtn = document.getElementById('submit-custom-confirm-btn');
+    const closeBtn = document.getElementById('close-custom-confirm-btn');
+
+    titleEl.textContent = title || 'Bestätigung erforderlich';
+    messageEl.textContent = message || '';
+
+    overlay.classList.add('active');
+
+    const cleanup = (result) => {
+      overlay.classList.remove('active');
+      cancelBtn.onclick = null;
+      submitBtn.onclick = null;
+      closeBtn.onclick = null;
+      resolve(result);
+    };
+
+    cancelBtn.onclick = () => cleanup(false);
+    closeBtn.onclick = () => cleanup(false);
+    submitBtn.onclick = () => cleanup(true);
+  });
+}
+
 function formatBytes(bytes) {
   if (bytes === 0 || !bytes) return '0 Bytes';
   const k = 1024;
@@ -112,7 +149,7 @@ async function checkAuthStatus() {
 
     if (data.loggedIn) {
       currentUser = data.user;
-      document.getElementById('nav-username').textContent = currentUser.username;
+      updateDisplayNameUI();
       
       // Set nav avatar
       document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${Date.now()}`;
@@ -129,6 +166,8 @@ async function checkAuthStatus() {
       const hash = window.location.hash;
       if (hash === '#settings') {
         showView('settings');
+      } else if (hash === '#admin') {
+        showView('admin');
       } else {
         window.location.hash = '#dashboard';
         showView('dashboard');
@@ -155,22 +194,54 @@ async function checkAuthStatus() {
 const adminView = document.getElementById('admin-view');
 
 function showView(viewName) {
-  authView.style.display = 'none';
-  dashboardView.style.display = 'none';
-  settingsView.style.display = 'none';
-  if (adminView) adminView.style.display = 'none';
-
+  currentViewName = viewName;
+  applyBackgrounds(viewName);
   if (viewName === 'auth') {
     authView.style.display = 'flex';
+    dashboardView.style.display = 'none';
+    settingsView.style.display = 'none';
+    settingsView.classList.remove('active');
+    if (adminView) {
+      adminView.style.display = 'none';
+      adminView.classList.remove('active');
+    }
   } else if (viewName === 'dashboard') {
+    authView.style.display = 'none';
     dashboardView.style.display = 'flex';
+    settingsView.style.display = 'none';
+    settingsView.classList.remove('active');
+    if (adminView) {
+      adminView.style.display = 'none';
+      adminView.classList.remove('active');
+    }
     loadFiles(currentFolderId);
   } else if (viewName === 'settings') {
-    settingsView.style.display = 'block';
+    authView.style.display = 'none';
+    dashboardView.style.display = 'flex';
+    settingsView.style.display = 'flex';
+    settingsView.classList.add('active');
+    if (adminView) {
+      adminView.style.display = 'none';
+      adminView.classList.remove('active');
+    }
     loadSettings();
   } else if (viewName === 'admin') {
     if (currentUser && currentUser.role === 'admin') {
-      if (adminView) adminView.style.display = 'block';
+      authView.style.display = 'none';
+      dashboardView.style.display = 'flex';
+      settingsView.style.display = 'none';
+      settingsView.classList.remove('active');
+      if (adminView) {
+        adminView.style.display = 'flex';
+        adminView.classList.add('active');
+        // Reset to "Design & Branding" tab as default
+        document.querySelectorAll('#admin-nav .settings-nav-item').forEach(i => i.classList.remove('active'));
+        document.querySelectorAll('#admin-view .settings-section').forEach(s => s.classList.remove('active'));
+        const defaultNavItem = document.querySelector('#admin-nav .settings-nav-item[data-section="admin-branding"]');
+        const defaultSection = document.getElementById('admin-branding');
+        if (defaultNavItem) defaultNavItem.classList.add('active');
+        if (defaultSection) defaultSection.classList.add('active');
+      }
       loadAdminSettings();
     } else {
       window.location.hash = '#dashboard';
@@ -460,15 +531,15 @@ if (dropdownSettingsBtn) {
     userDropdownMenu.classList.remove('show');
     window.location.hash = '#settings';
     
-    // Switch to profile section inside settings layout
+    // Switch to account settings section inside settings layout
     document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
     document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
     
-    const profileTab = document.querySelector('[data-section="profile-settings"]');
-    const profileSection = document.getElementById('profile-settings');
-    if (profileTab && profileSection) {
-      profileTab.classList.add('active');
-      profileSection.classList.add('active');
+    const accountTab = document.querySelector('[data-section="account-settings"]');
+    const accountSection = document.getElementById('account-settings');
+    if (accountTab && accountSection) {
+      accountTab.classList.add('active');
+      accountSection.classList.add('active');
     }
   };
 }
@@ -478,18 +549,7 @@ if (dropdownAdminBtn) {
   dropdownAdminBtn.onclick = (e) => {
     e.preventDefault();
     userDropdownMenu.classList.remove('show');
-    window.location.hash = '#settings';
-    
-    // Switch to admin section inside settings layout
-    document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
-    document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
-    
-    const adminTab = document.querySelector('[data-section="admin-settings"]');
-    const adminSection = document.getElementById('admin-settings');
-    if (adminTab && adminSection) {
-      adminTab.classList.add('active');
-      adminSection.classList.add('active');
-    }
+    window.location.hash = '#admin';
   };
 }
 
@@ -597,11 +657,40 @@ function renderFiles(files) {
       item.classList.add('selected');
     }
     
-    const iconName = file.is_folder ? 'folder' : 'file';
+    let iconName = 'file';
+    if (file.is_folder) {
+      iconName = 'folder';
+    } else {
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (['docx', 'doc', 'odt', 'rtf', 'pdf'].includes(ext)) {
+        iconName = 'file-text';
+      } else if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) {
+        iconName = 'file-spreadsheet';
+      } else if (['pptx', 'ppt', 'odp'].includes(ext)) {
+        iconName = 'presentation';
+      } else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) {
+        iconName = 'file-image';
+      } else if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext)) {
+        iconName = 'file-video';
+      } else if (['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'].includes(ext)) {
+        iconName = 'file-code';
+      }
+    }
+
+    const ext = file.is_folder ? '' : file.name.split('.').pop().toLowerCase();
+    const isImg = !file.is_folder && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext);
+    const isVid = !file.is_folder && ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext);
+
+    let iconHTML = `<i data-lucide="${iconName}"></i>`;
+    if (isImg || isVid) {
+      const thumbUrl = `/api/files/thumbnail/${file.id}`;
+      iconHTML = `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                  <i data-lucide="${iconName}" style="display: none;"></i>`;
+    }
 
     item.innerHTML = `
       <div class="file-item-checkbox"></div>
-      <div class="file-icon"><i data-lucide="${iconName}"></i></div>
+      <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
       <div class="file-name" title="${file.name}">${file.name}</div>
       <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
       <div class="file-actions">
@@ -617,53 +706,96 @@ function renderFiles(files) {
         return;
       }
       
-      const isCheckbox = e.target.closest('.file-item-checkbox');
-      const isMultiSelectActive = selectedFileIds.length > 0;
-      
-      if (isCheckbox || e.ctrlKey || e.metaKey || isMultiSelectActive) {
-        e.preventDefault();
+      const ext = file.name.split('.').pop().toLowerCase();
+      const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
+
+      if (clickTimeout) {
+        clearTimeout(clickTimeout);
+        clickTimeout = null;
+      }
+
+      const runSelection = () => {
+        const isCheckbox = e.target.closest('.file-item-checkbox');
+        const isMultiSelectActive = selectedFileIds.length > 0;
         
-        if (e.shiftKey && lastSelectedId !== null) {
-          // Range selection
-          const startIdx = renderedFilesList.findIndex(f => f.id === lastSelectedId);
-          const endIdx = renderedFilesList.findIndex(f => f.id === file.id);
-          if (startIdx !== -1 && endIdx !== -1) {
-            const min = Math.min(startIdx, endIdx);
-            const max = Math.max(startIdx, endIdx);
-            
-            // clear selections between first
-            selectedFileIds = [];
-            for (let i = min; i <= max; i++) {
-              selectedFileIds.push(renderedFilesList[i].id);
+        if (isCheckbox || e.ctrlKey || e.metaKey || isMultiSelectActive) {
+          e.preventDefault();
+          
+          if (e.shiftKey && lastSelectedId !== null) {
+            // Range selection
+            const startIdx = renderedFilesList.findIndex(f => f.id === lastSelectedId);
+            const endIdx = renderedFilesList.findIndex(f => f.id === file.id);
+            if (startIdx !== -1 && endIdx !== -1) {
+              const min = Math.min(startIdx, endIdx);
+              const max = Math.max(startIdx, endIdx);
+              
+              selectedFileIds = [];
+              for (let i = min; i <= max; i++) {
+                selectedFileIds.push(renderedFilesList[i].id);
+              }
             }
-          }
-        } else {
-          // Toggle selection
-          const idx = selectedFileIds.indexOf(file.id);
-          if (idx === -1) {
-            selectedFileIds.push(file.id);
-            lastSelectedId = file.id;
           } else {
-            selectedFileIds.splice(idx, 1);
-            if (lastSelectedId === file.id) {
-              lastSelectedId = selectedFileIds[selectedFileIds.length - 1] || null;
+            // Toggle selection
+            const idx = selectedFileIds.indexOf(file.id);
+            if (idx === -1) {
+              selectedFileIds.push(file.id);
+              lastSelectedId = file.id;
+            } else {
+              selectedFileIds.splice(idx, 1);
+              if (lastSelectedId === file.id) {
+                lastSelectedId = selectedFileIds[selectedFileIds.length - 1] || null;
+              }
             }
           }
+          updateMultiSelectUI();
+        } else {
+          // Single click: select only this file (and clear other selections)
+          selectedFileIds = [file.id];
+          lastSelectedId = file.id;
+          updateMultiSelectUI();
         }
-        updateMultiSelectUI();
+      };
+
+      clickTimeoutFileId = file.id;
+      clickTimeout = setTimeout(() => {
+        runSelection();
+        clickTimeout = null;
+        clickTimeoutFileId = null;
+      }, 200);
+    };
+
+    // Double Click handler for Navigation / Opening file
+    item.ondblclick = (e) => {
+      if (clickTimeout) {
+        clearTimeout(clickTimeout);
+        clickTimeout = null;
+      }
+      if (e.target.closest('.btn-action-more') || e.target.closest('.file-actions')) {
+        return;
+      }
+
+      if (file.is_folder) {
+        breadcrumbsHistory.push({ id: file.id, name: file.name });
+        loadFiles(file.id);
       } else {
-        // Normal Action (Navigation/Download)
-        if (file.is_folder) {
-          breadcrumbsHistory.push({ id: file.id, name: file.name });
-          loadFiles(file.id);
+        const ext = file.name.split('.').pop().toLowerCase();
+        
+        // Define groupings
+        const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+        const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+        const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+        const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
+
+        if (imageExts.includes(ext)) {
+          openImageViewer(file.id, file.name);
+        } else if (videoExts.includes(ext)) {
+          openVideoViewer(file.id, file.name);
+        } else if (codeExts.includes(ext)) {
+          openCodeEditor(file.id, file.name);
+        } else if (officeExts.includes(ext)) {
+          openOfficeEditor(file.id, file.name);
         } else {
-          const ext = file.name.split('.').pop().toLowerCase();
-          const supportedExts = ['docx', 'xlsx', 'pptx', 'txt', 'odt', 'ods', 'odp'];
-          if (supportedExts.includes(ext)) {
-            openOfficeEditor(file.id, file.name);
-          } else {
-            window.location.href = `/api/files/download/${file.id}`;
-          }
+          window.location.href = `/api/files/download/${file.id}`;
         }
       }
     };
@@ -892,6 +1024,18 @@ document.getElementById('dashboard-view').oncontextmenu = (e) => {
 
 // Action: Create Folder
 document.getElementById('new-folder-btn').onclick = () => createNewFolder();
+if (document.getElementById('new-file-btn')) {
+  document.getElementById('new-file-btn').onclick = () => createNewEmptyFile();
+}
+
+// Clear selections on empty dashboard background click
+if (dashboardView) {
+  dashboardView.addEventListener('click', (e) => {
+    if (!e.target.closest('.file-item') && !e.target.closest('.toolbar') && !e.target.closest('#multi-actions-bar') && !e.target.closest('.context-menu') && !e.target.closest('.modal')) {
+      clearSelection();
+    }
+  });
+}
 
 async function createNewFolder() {
   const name = await showInputPrompt('Neuer Ordner', 'Bitte gib einen Namen für den neuen Ordner ein:', '', 'Ordnername');
@@ -916,21 +1060,128 @@ async function createNewFolder() {
   }
 }
 
-// Action: Create Empty File
+// Custom file creation dialog helper using the select-type modal
+function showCreateFilePrompt() {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('create-file-modal-overlay');
+    const form = document.getElementById('create-file-modal-form');
+    const nameInput = document.getElementById('create-file-modal-name');
+    const typeSelect = document.getElementById('create-file-modal-type');
+    const cancelBtn = document.getElementById('cancel-create-file-modal-btn');
+    const closeBtn = document.getElementById('close-create-file-modal-btn');
+
+    nameInput.value = '';
+    
+    const selectTemplate = (value) => {
+      typeSelect.value = value;
+      document.querySelectorAll('.template-tile').forEach(tile => {
+        if (tile.getAttribute('data-value') === value) {
+          tile.classList.add('active');
+        } else {
+          tile.classList.remove('active');
+        }
+      });
+    };
+
+    // Default selection
+    selectTemplate('txt');
+
+    // Add click listeners to tiles
+    const tiles = document.querySelectorAll('.template-tile');
+    tiles.forEach(tile => {
+      tile.onclick = () => {
+        selectTemplate(tile.getAttribute('data-value'));
+      };
+    });
+
+    const knownCodeExts = ['.txt', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.html', '.xml', '.css', '.scss', '.less', '.py', '.json', '.yaml', '.yml', '.c', '.cpp', '.h', '.hpp', '.cs', '.go', '.rs', '.java', '.sh', '.bash', '.md', '.php', '.rb', '.sql'];
+
+    // Auto-detection of extension on typing
+    nameInput.oninput = () => {
+      const name = nameInput.value.trim();
+      const parts = name.split('.');
+      if (parts.length > 1) {
+        const ext = '.' + parts.pop().toLowerCase();
+        if (ext === '.txt') {
+          selectTemplate('txt');
+        } else if (ext === '.docx') {
+          selectTemplate('docx');
+        } else if (ext === '.xlsx') {
+          selectTemplate('xlsx');
+        } else if (ext === '.pptx') {
+          selectTemplate('pptx');
+        } else if (knownCodeExts.includes(ext)) {
+          selectTemplate('codex');
+        } else {
+          // Extension is not recognized as any of the primary templates -> "Andere" (other)
+          selectTemplate('other');
+        }
+      }
+    };
+
+    overlay.classList.add('active');
+    nameInput.focus();
+
+    const cleanup = () => {
+      overlay.classList.remove('active');
+      form.onsubmit = null;
+      cancelBtn.onclick = null;
+      closeBtn.onclick = null;
+      nameInput.oninput = null;
+      tiles.forEach(t => t.onclick = null);
+    };
+
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const name = nameInput.value.trim();
+      const type = typeSelect.value;
+      cleanup();
+      resolve({ name, type });
+    };
+
+    cancelBtn.onclick = () => {
+      cleanup();
+      resolve(null);
+    };
+
+    closeBtn.onclick = () => {
+      cleanup();
+      resolve(null);
+    };
+  });
+}
+
 async function createNewEmptyFile() {
-  const name = await showInputPrompt('Neue Datei erstellen', 'Bitte gib einen Dateinamen ein (z. B. notizen.txt):', '', 'notizen.txt');
-  if (!name) return;
+  const result = await showCreateFilePrompt();
+  if (!result) return;
+  const { name, type } = result;
+
+  if (type === 'note') {
+    await showCreateNoteModal(name);
+    return;
+  }
 
   try {
     const res = await fetch('/api/files/create-empty', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, parentId: currentFolderId }),
+      body: JSON.stringify({ name, type, parentId: currentFolderId }),
     });
 
     if (res.ok) {
-      showToast('Leere Datei erfolgreich erstellt.');
+      showToast('Datei erfolgreich erstellt.');
+      const newFile = await res.json();
       loadFiles(currentFolderId);
+      
+      const ext = newFile.name.split('.').pop().toLowerCase();
+      const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+      const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
+      
+      if (codeExts.includes(ext) || type === 'codex' || type === 'txt') {
+        openCodeEditor(newFile.id, newFile.name);
+      } else if (officeExts.includes(ext)) {
+        openOfficeEditor(newFile.id, newFile.name);
+      }
     } else {
       const err = await res.json();
       showToast(err.error);
@@ -942,37 +1193,495 @@ async function createNewEmptyFile() {
 
 // Action: Upload File via Click
 document.getElementById('file-upload-input').onchange = async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+  const files = e.target.files;
+  if (files.length === 0) return;
 
-  await uploadFile(file);
+  await uploadMultipleFiles(files);
 };
 
-async function uploadFile(file) {
-  const formData = new FormData();
-  formData.append('file', file);
-  if (currentFolderId) {
-    formData.append('parentId', currentFolderId);
-  }
+const folderUploadInput = document.getElementById('folder-upload-input');
+if (folderUploadInput) {
+  folderUploadInput.onchange = async (e) => {
+    const files = e.target.files;
+    if (files.length === 0) return;
+    await uploadMultipleFiles(files);
+  };
+}
 
-  showToast('Lade Datei hoch...');
+// Global Upload Queue State
+let currentUploadQueue = [];
+let uploadActive = false;
+let uploadStartTime = 0;
 
-  try {
-    const res = await fetch('/api/files/upload', {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (res.ok) {
-      showToast(`Datei "${file.name}" erfolgreich hochgeladen!`);
-      loadFiles(currentFolderId);
-    } else {
-      const err = await res.json();
-      showToast(err.error);
+function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, onCreatedXHR) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    if (onCreatedXHR) {
+      onCreatedXHR(xhr);
     }
-  } catch (err) {
-    showToast('Fehler beim Datei-Upload.');
+    const formData = new FormData();
+    formData.append('file', file);
+    if (parentId) {
+      formData.append('parentId', parentId);
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress(event.loaded, event.total);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        let response = {};
+        try { response = JSON.parse(xhr.responseText); } catch(e){}
+        onDone(response);
+        resolve(response);
+      } else {
+        let errorMsg = 'Fehler beim Hochladen.';
+        try {
+          const err = JSON.parse(xhr.responseText);
+          errorMsg = err.error || errorMsg;
+        } catch(e){}
+        onError(errorMsg);
+        reject(new Error(errorMsg));
+      }
+    };
+
+    xhr.onabort = () => {
+      onError('Upload abgebrochen.');
+      reject(new Error('Upload abgebrochen.'));
+    };
+
+    xhr.onerror = () => {
+      onError('Netzwerkfehler.');
+      reject(new Error('Netzwerkfehler.'));
+    };
+
+    xhr.open('POST', '/api/files/upload');
+    xhr.send(formData);
+  });
+}
+
+function formatTime(sec) {
+  if (sec === Infinity || isNaN(sec) || sec < 0) return '--';
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const remainingSec = sec % 60;
+  return `${min}m ${remainingSec}s`;
+}
+
+function updateUploadUI() {
+  const listContainer = document.getElementById('upload-panel-list');
+  if (!listContainer) return;
+
+  listContainer.innerHTML = '';
+
+  let totalQueueSize = 0;
+  let totalUploaded = 0;
+  let doneCount = 0;
+
+  currentUploadQueue.forEach((item, index) => {
+    totalQueueSize += item.size;
+    if (item.status === 'done') {
+      totalUploaded += item.size;
+      doneCount++;
+    } else if (item.status === 'uploading') {
+      totalUploaded += item.uploaded;
+    }
+
+    // Create item row
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.flexDirection = 'column';
+    row.style.gap = '0.25rem';
+    row.style.padding = '0.5rem 0';
+    row.style.borderBottom = '1px solid var(--color-border)';
+
+    let statusText = 'Wartend...';
+    let statusColor = 'var(--color-text-muted)';
+    let progressPercent = 0;
+
+    if (item.status === 'uploading') {
+      progressPercent = item.size > 0 ? Math.round((item.uploaded / item.size) * 100) : 0;
+      statusText = `Lädt hoch... ${progressPercent}%`;
+      statusColor = 'var(--color-primary)';
+    } else if (item.status === 'done') {
+      statusText = 'Hochgeladen';
+      statusColor = '#00e676';
+    } else if (item.status === 'error') {
+      statusText = item.error || 'Fehler';
+      statusColor = '#ff5555';
+    }
+
+    row.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; gap: 0.5rem;">
+        <span style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 200px;" title="${item.name}">${item.name}</span>
+        <div style="display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0;">
+          <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 500;">${statusText}</span>
+          <button class="delete-upload-item-btn" data-index="${index}" style="border: none; background: transparent; cursor: pointer; padding: 0.1rem; display: flex; align-items: center; justify-content: center; opacity: 0.6; transition: opacity 0.2s;" title="Aus Liste entfernen">
+            <i data-lucide="x" style="width: 14px; height: 14px; color: var(--color-text);"></i>
+          </button>
+        </div>
+      </div>
+      ${item.status === 'uploading' ? `
+        <div style="width: 100%; height: 4px; background: var(--color-border); border-radius: 2px; overflow: hidden; margin-top: 0.25rem;">
+          <div style="width: ${progressPercent}%; height: 100%; background: var(--color-primary); border-radius: 2px;"></div>
+        </div>
+      ` : ''}
+    `;
+
+    const deleteBtn = row.querySelector('.delete-upload-item-btn');
+    if (deleteBtn) {
+      deleteBtn.onclick = (e) => {
+        e.stopPropagation();
+        const idx = parseInt(deleteBtn.getAttribute('data-index'));
+        const item = currentUploadQueue[idx];
+        if (item) {
+          if (item.status === 'uploading' && item.xhr) {
+            item.status = 'cancelled';
+            try {
+              item.xhr.abort();
+            } catch (err) {
+              console.error('Error aborting upload:', err);
+            }
+          }
+          currentUploadQueue.splice(idx, 1);
+        }
+        updateUploadUI();
+        if (currentUploadQueue.length === 0) {
+          const container = document.getElementById('upload-container');
+          if (container) container.style.display = 'none';
+        } else {
+          checkAndTriggerAutoHide();
+        }
+      };
+    }
+
+    listContainer.appendChild(row);
+  });
+
+  // Summary counts
+  document.getElementById('upload-panel-summary').textContent = `${doneCount} von ${currentUploadQueue.length} Datei(en) fertig`;
+
+  // Total percentage
+  const totalPercent = totalQueueSize > 0 ? Math.round((totalUploaded / totalQueueSize) * 100) : 0;
+  document.getElementById('upload-panel-percent').textContent = `${totalPercent}%`;
+  document.getElementById('upload-panel-progress-bar').style.width = `${totalPercent}%`;
+
+  // Calculate speed and ETA
+  const elapsedSeconds = (Date.now() - uploadStartTime) / 1000;
+  let speed = 0;
+  if (elapsedSeconds > 0) {
+    speed = totalUploaded / elapsedSeconds;
   }
+
+  const speedText = document.getElementById('upload-panel-speed');
+  if (speedText) {
+    speedText.textContent = `${formatBytes(speed)}/s`;
+  }
+
+  const etaText = document.getElementById('upload-panel-eta');
+  if (etaText) {
+    if (totalPercent >= 100) {
+      etaText.textContent = 'Abgeschlossen';
+    } else if (speed > 0) {
+      const remainingBytes = totalQueueSize - totalUploaded;
+      const etaSeconds = Math.round(remainingBytes / speed);
+      etaText.textContent = `verbleibend: ${formatTime(etaSeconds)}`;
+    } else {
+      etaText.textContent = 'verbleibend: berechne...';
+    }
+  }
+
+  // Update Trigger Button
+  const text = document.getElementById('upload-status-text');
+  const circle = document.getElementById('upload-status-circle');
+  const icon = document.getElementById('upload-status-icon');
+
+  if (text && circle && icon) {
+    if (uploadActive) {
+      text.textContent = `Hochladen... ${totalPercent}%`;
+      text.style.color = 'var(--color-text)';
+      circle.style.border = '3px solid var(--color-border)';
+      circle.style.borderTopColor = 'var(--color-primary)';
+      icon.setAttribute('data-lucide', 'upload-cloud');
+    } else {
+      const errorItems = currentUploadQueue.filter(item => item.status === 'error');
+      if (errorItems.length > 0) {
+        circle.style.border = '3px solid #ff5555';
+        circle.style.borderTopColor = '#ff5555';
+        icon.setAttribute('data-lucide', 'alert-circle');
+        text.textContent = `${errorItems.length} Fehler`;
+        text.style.color = '#ff5555';
+      } else {
+        circle.style.border = '3px solid #00e676';
+        circle.style.borderTopColor = '#00e676';
+        icon.setAttribute('data-lucide', 'check');
+        text.textContent = 'Fertig';
+        text.style.color = '#00e676';
+      }
+    }
+  }
+
+  lucide.createIcons();
+}
+
+const resolvedFolderCache = {};
+
+async function resolveFolderSegments(segments, rootParentId) {
+  const cacheKey = `${rootParentId}:${segments.join('/')}`;
+  if (resolvedFolderCache[cacheKey]) {
+    return resolvedFolderCache[cacheKey];
+  }
+
+  let currentParentId = rootParentId;
+  const currentPathSegments = [];
+
+  for (const segment of segments) {
+    currentPathSegments.push(segment);
+    const stepKey = `${rootParentId}:${currentPathSegments.join('/')}`;
+    
+    if (resolvedFolderCache[stepKey]) {
+      currentParentId = resolvedFolderCache[stepKey];
+      continue;
+    }
+
+    // Check if folder already exists in the current directory
+    let foundId = null;
+    try {
+      const checkRes = await fetch(`/api/files/list` + (currentParentId ? `?parentId=${currentParentId}` : ''));
+      if (checkRes.ok) {
+        const list = await checkRes.json();
+        const found = list.find(f => f.is_folder && f.name === segment);
+        if (found) {
+          foundId = found.id;
+        }
+      }
+    } catch(e) {
+      console.error('Error listing directory during segment resolution:', e);
+    }
+
+    if (foundId) {
+      currentParentId = foundId;
+    } else {
+      // Create the folder
+      try {
+        const createRes = await fetch('/api/files/folder', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: segment, parentId: currentParentId })
+        });
+        if (createRes.ok) {
+          const newFolder = await createRes.json();
+          currentParentId = newFolder.id;
+        } else {
+          throw new Error('Failed to create folder segment.');
+        }
+      } catch(e) {
+        console.error('Error creating folder segment:', e);
+        break;
+      }
+    }
+
+    resolvedFolderCache[stepKey] = currentParentId;
+  }
+
+  resolvedFolderCache[cacheKey] = currentParentId;
+  return currentParentId;
+}
+
+async function uploadMultipleFiles(filesList) {
+  const trigger = document.getElementById('upload-status-trigger');
+  const panel = document.getElementById('upload-details-panel');
+  const circle = document.getElementById('upload-status-circle');
+  const icon = document.getElementById('upload-status-icon');
+  const text = document.getElementById('upload-status-text');
+
+  // Reset trigger state if we're starting a new batch
+  if (!uploadActive) {
+    currentUploadQueue = [];
+    if (circle && icon && text) {
+      circle.style.border = '3px solid var(--color-border)';
+      circle.style.borderTopColor = 'var(--color-primary)';
+      icon.setAttribute('data-lucide', 'upload-cloud');
+      text.textContent = 'Hochladen...';
+      text.style.color = 'var(--color-text)';
+    }
+  }
+
+  const newUploads = Array.from(filesList).map(file => ({
+    name: file.name,
+    size: file.size,
+    uploaded: 0,
+    status: 'pending',
+    error: null,
+    fileObj: file
+  }));
+
+  currentUploadQueue = currentUploadQueue.concat(newUploads);
+
+  const container = document.getElementById('upload-container');
+  if (container) {
+    container.style.display = 'block';
+    container.style.opacity = '1';
+    container.style.transform = 'scale(1)';
+    // Start minimized/pill state at bottom right
+    container.style.borderRadius = '50px';
+    container.style.width = '200px';
+    container.style.height = '44px';
+  }
+  if (trigger) {
+    trigger.style.opacity = '1';
+    trigger.style.pointerEvents = 'auto';
+  }
+  if (panel) {
+    panel.style.opacity = '0';
+    panel.style.pointerEvents = 'none';
+  }
+
+  updateUploadUI();
+
+  if (uploadActive) {
+    return;
+  }
+
+  uploadActive = true;
+  uploadStartTime = Date.now();
+
+  while (uploadActive) {
+    const uploadItem = currentUploadQueue.find(item => item.status === 'pending');
+    if (!uploadItem) break;
+
+    uploadItem.status = 'uploading';
+    updateUploadUI();
+
+    try {
+      let uploadParentId = currentFolderId;
+      if (uploadItem.fileObj.webkitRelativePath) {
+        const pathParts = uploadItem.fileObj.webkitRelativePath.split('/');
+        if (pathParts.length > 1) {
+          pathParts.pop(); // Remove filename
+          uploadParentId = await resolveFolderSegments(pathParts, currentFolderId);
+        }
+      }
+
+      await uploadSingleFileWithXHR(
+        uploadItem.fileObj,
+        uploadParentId,
+        (loaded, total) => {
+          uploadItem.uploaded = loaded;
+          updateUploadUI();
+        },
+        (res) => {
+          uploadItem.status = 'done';
+          uploadItem.uploaded = uploadItem.size;
+          uploadItem.xhr = null;
+          updateUploadUI();
+        },
+        (errMsg) => {
+          if (uploadItem.status !== 'cancelled') {
+            uploadItem.status = 'error';
+            uploadItem.error = errMsg;
+          }
+          uploadItem.xhr = null;
+          updateUploadUI();
+        },
+        (xhrRef) => {
+          uploadItem.xhr = xhrRef;
+        }
+      );
+    } catch (e) {
+      if (uploadItem.status !== 'cancelled') {
+        uploadItem.status = 'error';
+        uploadItem.error = e.message;
+      }
+      uploadItem.xhr = null;
+      updateUploadUI();
+    }
+  }
+
+  uploadActive = false;
+  
+  updateUploadUI();
+  loadFiles(currentFolderId);
+  showToast('Alle Datei-Uploads abgeschlossen!');
+
+  checkAndTriggerAutoHide();
+}
+
+function setUploadWidgetState(state) {
+  const container = document.getElementById('upload-container');
+  const trigger = document.getElementById('upload-status-trigger');
+  const panel = document.getElementById('upload-details-panel');
+  if (!container || !trigger || !panel) return;
+
+  if (state === 'maximized') {
+    // Morph to maximized details view
+    trigger.style.opacity = '0';
+    trigger.style.pointerEvents = 'none';
+    
+    panel.style.opacity = '1';
+    panel.style.pointerEvents = 'auto';
+    
+    // Animate container size and shape
+    container.style.borderRadius = '12px';
+    container.style.width = '360px';
+    container.style.height = '360px';
+  } else {
+    // Morph to minimized pill view
+    panel.style.opacity = '0';
+    panel.style.pointerEvents = 'none';
+    
+    trigger.style.opacity = '1';
+    trigger.style.pointerEvents = 'auto';
+    
+    // Animate container size and shape
+    container.style.borderRadius = '50px';
+    container.style.width = '200px';
+    container.style.height = '44px';
+  }
+}
+
+function checkAndTriggerAutoHide() {
+  if (uploadActive) return;
+
+  const hasErrors = currentUploadQueue.some(item => item.status === 'error');
+  if (hasErrors) {
+    // Keep widget open if there is any error
+    return;
+  }
+
+  // Delay of 3 seconds then hide widget
+  setTimeout(() => {
+    if (!uploadActive && !currentUploadQueue.some(item => item.status === 'error')) {
+      const container = document.getElementById('upload-container');
+      if (container) {
+        container.style.opacity = '0';
+        container.style.transform = 'scale(0.8)';
+        setTimeout(() => {
+          container.style.display = 'none';
+        }, 300);
+      }
+    }
+  }, 3000);
+}
+
+// Upload Panel Toggle Event Listeners
+const uploadTrigger = document.getElementById('upload-status-trigger');
+const closeUploadPanelBtn = document.getElementById('close-upload-panel-btn');
+
+if (uploadTrigger) {
+  uploadTrigger.onclick = () => {
+    setUploadWidgetState('maximized');
+  };
+}
+
+if (closeUploadPanelBtn) {
+  closeUploadPanelBtn.onclick = (e) => {
+    e.stopPropagation();
+    setUploadWidgetState('minimized');
+  };
 }
 
 // Action: Delete Single File
@@ -981,7 +1690,7 @@ async function deleteFile(file) {
     ? `Möchtest du den Ordner "${file.name}" und alle darin enthaltenen Dateien wirklich löschen?`
     : `Möchtest du die Datei "${file.name}" wirklich löschen?`;
     
-  if (!confirm(confirmMsg)) return;
+  if (!await showConfirmDialog('Element löschen', confirmMsg)) return;
 
   try {
     const res = await fetch(`/api/files/${file.id}`, {
@@ -1003,7 +1712,7 @@ async function deleteFile(file) {
 // Action: Delete Multiple Selected Files
 async function deleteSelectedFiles() {
   if (selectedFileIds.length === 0) return;
-  if (!confirm(`Möchtest du die ${selectedFileIds.length} ausgewählten Elemente wirklich löschen?`)) return;
+  if (!await showConfirmDialog('Elemente löschen', `Möchtest du die ${selectedFileIds.length} ausgewählten Elemente wirklich löschen?`)) return;
 
   try {
     const res = await fetch('/api/files/delete-multiple', {
@@ -1067,12 +1776,7 @@ dashboard.addEventListener('drop', async (e) => {
   const files = e.dataTransfer.files;
   if (files.length === 0) return;
 
-  showToast(`Lade ${files.length} Datei(en) hoch...`);
-  
-  // Sequential Upload
-  for (let i = 0; i < files.length; i++) {
-    await uploadFile(files[i]);
-  }
+  await uploadMultipleFiles(files);
 });
 
 
@@ -1239,7 +1943,7 @@ deleteShareBtn.onclick = async () => {
   const existingId = document.getElementById('share-existing-id').value;
   if (!existingId) return;
 
-  if (!confirm('Möchtest du diese Freigabe wirklich aufheben? Der Link wird ungültig.')) return;
+  if (!await showConfirmDialog('Freigabe aufheben', 'Möchtest du diese Freigabe wirklich aufheben? Der Link wird ungültig.')) return;
 
   try {
     const res = await fetch(`/api/shares/${existingId}`, {
@@ -1291,10 +1995,28 @@ async function loadSettings() {
     const res = await fetch('/api/settings');
     const data = await res.json();
 
-    // Set email input
-    const emailInput = document.getElementById('settings-email-input');
-    if (emailInput && data.user) {
-      emailInput.value = data.user.email || '';
+    // Set profile inputs
+    if (data.user) {
+      const emailInput = document.getElementById('settings-email-input');
+      if (emailInput) emailInput.value = data.user.email || '';
+      
+      const firstnameInput = document.getElementById('settings-firstname-input');
+      if (firstnameInput) firstnameInput.value = data.user.first_name || '';
+
+      const lastnameInput = document.getElementById('settings-lastname-input');
+      if (lastnameInput) lastnameInput.value = data.user.last_name || '';
+
+      const usernameInput = document.getElementById('settings-username-input');
+      if (usernameInput) usernameInput.value = data.user.username || '';
+
+      const realnameToggle = document.getElementById('settings-display-realname-toggle');
+      if (realnameToggle) realnameToggle.checked = data.user.display_real_name || false;
+    }
+
+    // Show/hide 2FA email container based on SMTP config status
+    const email2faContainer = document.getElementById('2fa-email-container');
+    if (email2faContainer) {
+      email2faContainer.style.display = data.emailConfigured ? 'flex' : 'none';
     }
 
     // Set 2FA checkboxes
@@ -1345,7 +2067,7 @@ function renderPasskeyList(passkeys) {
 
     row.innerHTML = `
       <td>${date}</td>
-      <td style="font-family: monospace;">${pk.id.slice(0, 15)}...</td>
+      <td style="font-weight: 500;">${pk.name || 'Passkey'} <span style="font-family: monospace; font-size: 0.8rem; color: var(--color-text-muted); font-weight: normal; margin-left: 0.5rem;">(${pk.id.slice(0, 10)}...)</span></td>
       <td>
         <button class="btn btn-action-delete-passkey" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 10px;">
           Löschen
@@ -1354,7 +2076,7 @@ function renderPasskeyList(passkeys) {
     `;
 
     row.querySelector('.btn-action-delete-passkey').onclick = async () => {
-      if (!confirm('Diesen Passkey wirklich löschen?')) return;
+      if (!await showConfirmDialog('Passkey löschen', 'Diesen Passkey wirklich löschen?')) return;
       try {
         const res = await fetch(`/api/settings/passkeys/${pk.id}`, { method: 'DELETE' });
         if (res.ok) {
@@ -1379,10 +2101,13 @@ document.getElementById('register-passkey-btn').onclick = async () => {
 
     const credential = await SimpleWebAuthnBrowser.startRegistration(options);
 
+    const keyName = await showInputPrompt('Passkey benennen', 'Gib einen Namen für diesen Passkey ein (z.B. iPhone, Arbeits-PC):', '', 'Mein Passkey');
+    const finalName = (keyName && keyName.trim()) ? keyName.trim() : 'Passkey';
+
     const verifyRes = await fetch('/api/auth/passkey/register-verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(credential),
+      body: JSON.stringify({ credential, name: finalName }),
     });
 
     const verifyData = await verifyRes.json();
@@ -1463,6 +2188,40 @@ async function loadAdminSettings() {
       document.getElementById('admin-cloud-tab-name').value = conf.cloud_tab_name || 'myCloud';
       document.getElementById('admin-icon-preview').src = `/api/public/branding/icon?t=${Date.now()}`;
 
+      // Colors
+      const colorBgVal = conf.custom_color_bg || '#0d0e12';
+      const colorAccentVal = conf.custom_color_accent || '#00d2ff';
+      document.getElementById('admin-color-bg').value = colorBgVal;
+      document.getElementById('admin-color-bg-val').textContent = colorBgVal.toUpperCase();
+      document.getElementById('admin-color-accent').value = colorAccentVal;
+      document.getElementById('admin-color-accent-val').textContent = colorAccentVal.toUpperCase();
+
+      // Dashboard BG Preview
+      const dbBgPreview = document.getElementById('admin-db-bg-preview');
+      const dbBgRemove = document.getElementById('admin-db-bg-remove');
+      if (conf.dashboard_bg_image) {
+        dbBgPreview.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
+        dbBgPreview.textContent = '';
+        dbBgRemove.style.display = 'inline-flex';
+      } else {
+        dbBgPreview.style.backgroundImage = '';
+        dbBgPreview.textContent = 'Kein Bild';
+        dbBgRemove.style.display = 'none';
+      }
+
+      // Login BG Preview
+      const loginBgPreview = document.getElementById('admin-login-bg-preview');
+      const loginBgRemove = document.getElementById('admin-login-bg-remove');
+      if (conf.login_bg_image) {
+        loginBgPreview.style.backgroundImage = `url('/api/public/branding/login-bg?t=${Date.now()}')`;
+        loginBgPreview.textContent = '';
+        loginBgRemove.style.display = 'inline-flex';
+      } else {
+        loginBgPreview.style.backgroundImage = '';
+        loginBgPreview.textContent = 'Kein Bild';
+        loginBgRemove.style.display = 'none';
+      }
+
       // Systemeinstellungen befüllen
       document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
       document.getElementById('admin-sso-enabled').checked = conf.sso_enabled === 'true';
@@ -1513,11 +2272,131 @@ document.getElementById('admin-branding-form').onsubmit = async (e) => {
   e.preventDefault();
   const payload = {
     cloud_name: document.getElementById('admin-cloud-name').value.trim(),
-    cloud_tab_name: document.getElementById('admin-cloud-tab-name').value.trim()
+    cloud_tab_name: document.getElementById('admin-cloud-tab-name').value.trim(),
+    custom_color_bg: document.getElementById('admin-color-bg').value,
+    custom_color_accent: document.getElementById('admin-color-accent').value
   };
   await saveAdminConfig(payload);
   loadBranding(); // Reload headers & document title instantly
 };
+
+// Color pickers value listeners
+const colorBgPicker = document.getElementById('admin-color-bg');
+const colorAccentPicker = document.getElementById('admin-color-accent');
+if (colorBgPicker) {
+  colorBgPicker.oninput = (e) => {
+    document.getElementById('admin-color-bg-val').textContent = e.target.value.toUpperCase();
+  };
+}
+if (colorAccentPicker) {
+  colorAccentPicker.oninput = (e) => {
+    document.getElementById('admin-color-accent-val').textContent = e.target.value.toUpperCase();
+  };
+}
+
+// Dashboard Background Image Upload
+const dbBgUpload = document.getElementById('admin-db-bg-upload');
+if (dbBgUpload) {
+  dbBgUpload.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('image', file);
+
+    showToast('Lade Dashboard-Hintergrundbild hoch...');
+    try {
+      const res = await fetch('/api/settings/admin/dashboard-bg', {
+        method: 'POST',
+        body: formData
+      });
+      if (res.ok) {
+        showToast('Dashboard-Hintergrund erfolgreich hochgeladen.');
+        await loadBranding();
+        await loadAdminSettings();
+      } else {
+        const err = await res.json();
+        showToast(err.error || 'Fehler beim Hochladen.');
+      }
+    } catch (err) {
+      showToast('Netzwerkfehler beim Upload.');
+    }
+  };
+}
+
+// Dashboard Background Image Remove
+const dbBgRemove = document.getElementById('admin-db-bg-remove');
+if (dbBgRemove) {
+  dbBgRemove.onclick = async () => {
+    showToast('Entferne Dashboard-Hintergrundbild...');
+    try {
+      const res = await fetch('/api/settings/admin/dashboard-bg', {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        showToast('Dashboard-Hintergrund erfolgreich entfernt.');
+        await loadBranding();
+        await loadAdminSettings();
+      } else {
+        showToast('Fehler beim Entfernen.');
+      }
+    } catch (err) {
+      showToast('Netzwerkfehler.');
+    }
+  };
+}
+
+// Login Background Image Upload
+const loginBgUpload = document.getElementById('admin-login-bg-upload');
+if (loginBgUpload) {
+  loginBgUpload.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('image', file);
+
+    showToast('Lade Login-Hintergrundbild hoch...');
+    try {
+      const res = await fetch('/api/settings/admin/login-bg', {
+        method: 'POST',
+        body: formData
+      });
+      if (res.ok) {
+        showToast('Login-Hintergrund erfolgreich hochgeladen.');
+        await loadBranding();
+        await loadAdminSettings();
+      } else {
+        const err = await res.json();
+        showToast(err.error || 'Fehler beim Hochladen.');
+      }
+    } catch (err) {
+      showToast('Netzwerkfehler beim Upload.');
+    }
+  };
+}
+
+// Login Background Image Remove
+const loginBgRemove = document.getElementById('admin-login-bg-remove');
+if (loginBgRemove) {
+  loginBgRemove.onclick = async () => {
+    showToast('Entferne Login-Hintergrundbild...');
+    try {
+      const res = await fetch('/api/settings/admin/login-bg', {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        showToast('Login-Hintergrund erfolgreich entfernt.');
+        await loadBranding();
+        await loadAdminSettings();
+      } else {
+        showToast('Fehler beim Entfernen.');
+      }
+    } catch (err) {
+      showToast('Netzwerkfehler.');
+    }
+  };
+}
 
 document.getElementById('admin-system-form').onsubmit = async (e) => {
   e.preventDefault();
@@ -1616,23 +2495,46 @@ async function loadAdminUsers() {
 
     users.forEach(user => {
       const row = document.createElement('tr');
+      row.style.borderBottom = '1px solid var(--color-border)';
+      
       const ssoText = user.sso_provider ? `Authentik (${user.sso_provider})` : 'Nein';
+      const realName = (user.first_name || user.last_name) ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : '';
+      const emailText = user.email || 'Keine E-Mail';
+      
+      const statusBadge = user.is_active ? '' : ' <span class="badge" style="background: rgba(255, 85, 85, 0.2); color: #ff5555; font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; margin-left: 0.5rem; font-weight: 500;">Gesperrt</span>';
+      
+      // Determine lock button text/style
+      const lockText = user.is_active ? 'Sperren' : 'Entsperren';
+      const lockColor = user.is_active ? '#ffaa00' : '#00d2ff';
+      const lockBorder = user.is_active ? 'rgba(255,170,0,0.2)' : 'rgba(0,210,255,0.2)';
       
       row.innerHTML = `
-        <td>${user.username}</td>
-        <td>
-          <select class="form-control select-role" style="padding: 2px 6px; font-size: 0.85rem; width: auto; background: var(--color-surface);">
+        <td style="padding: 1rem 0.5rem;">
+          <div style="font-weight: 600; display: flex; align-items: center;">${user.username}${statusBadge}</div>
+          ${realName ? `<div style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.15rem;">${realName}</div>` : ''}
+          <div style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.15rem;">${emailText}</div>
+        </td>
+        <td style="padding: 1rem 0.5rem;">
+          <select class="form-control select-role" style="padding: 4px 8px; font-size: 0.85rem; width: auto; background: var(--color-surface); cursor: pointer;">
             <option value="user" ${user.role === 'user' ? 'selected' : ''}>User</option>
             <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin</option>
           </select>
         </td>
-        <td>${ssoText}</td>
-        <td>${user.file_count}</td>
-        <td>${formatBytes(user.storage_used)}</td>
-        <td>
-          <button class="btn btn-action-delete-user" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 10px;">
-            Löschen
-          </button>
+        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${ssoText}</td>
+        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${user.file_count}</td>
+        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${formatBytes(user.storage_used)}</td>
+        <td style="padding: 1rem 0.5rem; text-align: right;">
+          <div style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center;">
+            <button class="btn btn-action-lock-user" style="color: ${lockColor}; border-color: ${lockBorder}; padding: 4px 8px; font-size: 0.8rem;" title="${lockText}">
+              ${lockText}
+            </button>
+            <button class="btn btn-action-reset-user" style="color: #00d2ff; border-color: rgba(0,210,255,0.2); padding: 4px 8px; font-size: 0.8rem;" title="Passwort per Mail zurücksetzen" ${isEmailConfigured ? '' : 'disabled style="opacity: 0.4;"'}>
+              Reset PW
+            </button>
+            <button class="btn btn-action-delete-user" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 8px; font-size: 0.8rem;" title="Benutzer löschen">
+              Löschen
+            </button>
+          </div>
         </td>
       `;
 
@@ -1647,19 +2549,61 @@ async function loadAdminUsers() {
           });
           if (r.ok) {
             showToast('Benutzerrolle geändert.');
+            loadAdminSettings();
           } else {
             const err = await r.json();
             showToast(err.error);
-            loadSettings(); // Rollback UI state
+            loadAdminSettings();
           }
         } catch (err) {
           showToast('Fehler beim Ändern der Rolle.');
         }
       };
 
+      // Handle lock/unlock user status
+      row.querySelector('.btn-action-lock-user').onclick = async () => {
+        try {
+          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'toggle-status' }),
+          });
+          const data = await r.json();
+          if (r.ok) {
+            showToast(data.message || 'Benutzerstatus geändert.');
+            loadAdminSettings();
+          } else {
+            showToast(data.error || 'Fehler beim Ändern des Status.');
+          }
+        } catch (err) {
+          showToast('Verbindungsfehler.');
+        }
+      };
+
+      // Handle password reset
+      row.querySelector('.btn-action-reset-user').onclick = async () => {
+        if (!await showConfirmDialog('Passwort zurücksetzen', `Möchtest du das Passwort für "${user.username}" wirklich zurücksetzen? Dem Benutzer wird ein temporäres Passwort per E-Mail gesendet.`)) return;
+        showToast('Setze Passwort zurück...');
+        try {
+          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'reset-password' }),
+          });
+          const data = await r.json();
+          if (r.ok) {
+            showToast('Passwort erfolgreich zurückgesetzt und E-Mail versendet.');
+          } else {
+            showToast(data.error || 'Fehler beim Zurücksetzen des Passworts.');
+          }
+        } catch (err) {
+          showToast('Verbindungsfehler.');
+        }
+      };
+
       // Handle delete user
       row.querySelector('.btn-action-delete-user').onclick = async () => {
-        if (!confirm(`Möchtest du den Benutzer "${user.username}" und alle seine Dateien wirklich unwiderruflich löschen?`)) return;
+        if (!await showConfirmDialog('Benutzer löschen', `Möchtest du den Benutzer "${user.username}" und alle seine Dateien wirklich unwiderruflich löschen?`)) return;
         try {
           const r = await fetch(`/api/settings/admin/users/${user.id}`, {
             method: 'POST',
@@ -1668,7 +2612,7 @@ async function loadAdminUsers() {
           });
           if (r.ok) {
             showToast('Benutzer gelöscht.');
-            loadSettings();
+            loadAdminSettings();
           } else {
             const err = await r.json();
             showToast(err.error);
@@ -1678,10 +2622,14 @@ async function loadAdminUsers() {
         }
       };
 
-      // Disable delete on current user
+      // Disable actions on current user
       if (user.id === currentUser.id) {
         row.querySelector('.btn-action-delete-user').disabled = true;
-        row.querySelector('.btn-action-delete-user').style.opacity = '0.5';
+        row.querySelector('.btn-action-delete-user').style.opacity = '0.4';
+        row.querySelector('.btn-action-lock-user').disabled = true;
+        row.querySelector('.btn-action-lock-user').style.opacity = '0.4';
+        row.querySelector('.btn-action-reset-user').disabled = true;
+        row.querySelector('.btn-action-reset-user').style.opacity = '0.4';
         row.querySelector('.select-role').disabled = true;
       }
 
@@ -1733,7 +2681,7 @@ async function loadUserShares() {
       `;
 
       row.querySelector('.btn-action-delete-share').onclick = async () => {
-        if (!confirm('Diesen Freigabelink wirklich löschen?')) return;
+        if (!await showConfirmDialog('Freigabe löschen', 'Diesen Freigabelink wirklich löschen?')) return;
         try {
           const r = await fetch(`/api/shares/${share.id}`, { method: 'DELETE' });
           if (r.ok) {
@@ -1752,13 +2700,64 @@ async function loadUserShares() {
   }
 }
 
+let brandingCache = null;
+let currentViewName = 'auth';
+
+function applyBackgrounds(viewName) {
+  if (!brandingCache) return;
+  
+  // Clean default body background style properties
+  document.body.style.backgroundImage = '';
+  document.body.style.backgroundSize = 'cover';
+  document.body.style.backgroundPosition = 'center';
+  document.body.style.backgroundAttachment = 'fixed';
+  document.body.style.backgroundRepeat = 'no-repeat';
+
+  if (viewName === 'auth') {
+    if (brandingCache.hasLoginBg) {
+      document.body.style.backgroundImage = `url('/api/public/branding/login-bg?t=${Date.now()}')`;
+    }
+  } else {
+    if (brandingCache.hasDashboardBg) {
+      document.body.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
+    }
+  }
+}
+
 // Load Branding configurations dynamically
 async function loadBranding() {
   try {
     const res = await fetch('/api/public/branding');
     const data = await res.json();
     
+    brandingCache = data;
     appBrandingUrl = data.appUrl || '';
+
+    // Apply custom colors
+    if (data.customColorBg) {
+      document.documentElement.style.setProperty('--color-bg', data.customColorBg);
+    }
+    if (data.customColorAccent) {
+      document.documentElement.style.setProperty('--color-accent', data.customColorAccent);
+      
+      const hexToRgbA = (hex, alpha) => {
+        let c;
+        if (/^#([A-Fa-f0-9]{3}){1,2}$/.test(hex)) {
+          c = hex.substring(1).split('');
+          if (c.length === 3) {
+            c = [c[0], c[0], c[1], c[1], c[2], c[2]];
+          }
+          c = '0x' + c.join('');
+          return 'rgba(' + [(c >> 16) & 255, (c >> 8) & 255, c & 255].join(',') + ',' + alpha + ')';
+        }
+        return hex;
+      };
+      
+      document.documentElement.style.setProperty('--color-border', hexToRgbA(data.customColorAccent, 0.2));
+      document.documentElement.style.setProperty('--color-border-active', hexToRgbA(data.customColorAccent, 0.8));
+    }
+
+    applyBackgrounds(currentViewName);
 
     // Update Document Title
     document.title = data.tabName || 'myCloud';
@@ -1776,7 +2775,12 @@ async function loadBranding() {
       const name = data.name || 'myCloud';
       const prefix = name.length > 2 ? name.slice(0, 2) : name;
       const suffix = name.length > 2 ? name.slice(2) : '';
-      logo.innerHTML = `<i data-lucide="cloud"></i> ${prefix}<span>${suffix}</span>`;
+      
+      let iconHTML = `<i data-lucide="cloud"></i>`;
+      if (data.hasIcon) {
+        iconHTML = `<img src="/api/public/branding/icon?t=${Date.now()}" style="width: 32px; height: 32px; object-fit: contain; border-radius: 4px; margin-right: 0.5rem;" alt="Logo">`;
+      }
+      logo.innerHTML = `${iconHTML} ${prefix}<span>${suffix}</span>`;
     });
     lucide.createIcons();
 
@@ -1912,14 +2916,30 @@ async function openOfficeEditor(fileId, fileName) {
       return;
     }
 
-    const { publicUrl, config } = await res.json();
+    let { publicUrl, config } = await res.json();
+
+    // Dynamically adjust publicUrl hostname to match the current browser location hostname
+    // to prevent cross-origin blocks and network resolution failures (e.g. localhost vs 127.0.0.1 vs IP)
+    try {
+      const parsedPublicUrl = new URL(publicUrl);
+      if (parsedPublicUrl.hostname === 'localhost' || parsedPublicUrl.hostname === '127.0.0.1') {
+        const browserUrl = new URL(window.location.href);
+        parsedPublicUrl.hostname = browserUrl.hostname;
+        publicUrl = parsedPublicUrl.toString().replace(/\/$/, '');
+      }
+    } catch(e) {
+      console.error('Error adjusting EuroOffice publicUrl hostname:', e);
+    }
 
     // Dynamically load EuroOffice Javascript API
     await loadOfficeScript(publicUrl);
 
     // Title update
-    document.getElementById('office-editor-title').innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
-    lucide.createIcons();
+    const titleEl = document.getElementById('office-editor-title');
+    if (titleEl) {
+      titleEl.innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
+      lucide.createIcons();
+    }
 
     // Clear previous editor
     const container = document.getElementById('office-iframe-container');
@@ -1989,10 +3009,17 @@ if (totp2faToggle) {
         const res = await fetch('/api/settings/2fa/totp/setup', { method: 'POST' });
         const data = await res.json();
         if (res.ok) {
-          document.getElementById('totp-qr-image').src = data.qrCodeUrl;
+          QRCode.toDataURL(data.otpauthUrl, { width: 200, margin: 1 }, function (err, url) {
+            if (err) {
+              console.error(err);
+              document.getElementById('totp-qr-image').src = '';
+            } else {
+              document.getElementById('totp-qr-image').src = url;
+            }
+          });
           document.getElementById('totp-secret-text').textContent = data.secret;
           document.getElementById('totp-confirm-code').value = '';
-          totpSetupOverlay.style.display = 'block';
+          totpSetupOverlay.classList.add('active');
         } else {
           showToast(data.error || 'Fehler beim Setup.');
           totp2faToggle.checked = false;
@@ -2003,7 +3030,7 @@ if (totp2faToggle) {
       }
     } else {
       // Disable
-      if (confirm('Möchtest du 2FA per Authenticator App wirklich deaktivieren?')) {
+      if (await showConfirmDialog('2FA deaktivieren', 'Möchtest du 2FA per Authenticator App wirklich deaktivieren?')) {
         try {
           const res = await fetch('/api/settings/2fa/totp/disable', { method: 'POST' });
           if (res.ok) {
@@ -2025,7 +3052,7 @@ if (totp2faToggle) {
 
 // Close/Cancel TOTP setup
 const cancelTotpSetup = () => {
-  totpSetupOverlay.style.display = 'none';
+  totpSetupOverlay.classList.remove('active');
   if (totp2faToggle) totp2faToggle.checked = false;
 };
 
@@ -2047,7 +3074,7 @@ if (totpForm) {
       const data = await res.json();
       if (res.ok) {
         showToast('Authenticator App erfolgreich verknüpft!');
-        totpSetupOverlay.style.display = 'none';
+        totpSetupOverlay.classList.remove('active');
         if (totp2faToggle) totp2faToggle.checked = true;
       } else {
         showToast(data.error || 'Bestätigung fehlgeschlagen. Überprüfe den Code.');
@@ -2058,4 +3085,831 @@ if (totpForm) {
       totp2faToggle.checked = false;
     }
   };
+}
+
+// Keyboard ESC listener & Modal overlay backdrop click listener & Admin toggle auto-save
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    // 1. Close Office Editor
+    const officeEditor = document.getElementById('office-editor-overlay');
+    if (officeEditor && officeEditor.style.display !== 'none') {
+      if (docEditorInstance) {
+        docEditorInstance.destroyEditor();
+        docEditorInstance = null;
+      }
+      officeEditor.style.display = 'none';
+      loadFiles(currentFolderId);
+      return;
+    }
+
+    // 1b. Close Code Editor, Image Viewer, Video Viewer
+    const codeEditor = document.getElementById('code-editor-overlay');
+    if (codeEditor && codeEditor.style.display !== 'none') {
+      document.getElementById('close-code-editor-btn').click();
+      return;
+    }
+    const imageViewer = document.getElementById('image-viewer-overlay');
+    if (imageViewer && imageViewer.style.display !== 'none') {
+      document.getElementById('close-image-viewer-btn').click();
+      return;
+    }
+    const videoViewer = document.getElementById('video-viewer-overlay');
+    if (videoViewer && videoViewer.style.display !== 'none') {
+      document.getElementById('close-video-viewer-btn').click();
+      return;
+    }
+
+    // 2. Close other overlays (except the main settings/admin views themselves)
+    const activeOverlays = Array.from(document.querySelectorAll('.modal-overlay.active'))
+      .filter(o => o.id !== 'settings-view' && o.id !== 'admin-view');
+      
+    if (activeOverlays.length > 0) {
+      activeOverlays.forEach(overlay => {
+        overlay.classList.remove('active');
+        if (overlay.id === 'totp-setup-overlay') {
+          cancelTotpSetup();
+        }
+      });
+      return;
+    }
+
+    // 3. Close settings or admin (go back to dashboard)
+    if (window.location.hash === '#settings' || window.location.hash === '#admin') {
+      window.location.hash = '#dashboard';
+      return;
+    }
+  }
+});
+
+// Close modals when clicking on the blurred backdrop
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      if (overlay.id === 'settings-view' || overlay.id === 'admin-view') {
+        window.location.hash = '#dashboard';
+      } else if (overlay.id === 'office-editor-overlay') {
+        // Do not close office editor on backdrop click
+      } else {
+        overlay.classList.remove('active');
+        if (overlay.id === 'totp-setup-overlay') {
+          cancelTotpSetup();
+        }
+      }
+    }
+  });
+});
+
+// Auto-save admin configuration toggles on change
+const adminRegToggle = document.getElementById('admin-reg-enabled');
+if (adminRegToggle) {
+  adminRegToggle.onchange = async () => {
+    const payload = {
+      registration_enabled: adminRegToggle.checked ? 'true' : 'false'
+    };
+    await saveAdminConfig(payload);
+  };
+}
+
+const adminSsoToggle = document.getElementById('admin-sso-enabled');
+if (adminSsoToggle) {
+  adminSsoToggle.onchange = async () => {
+    const payload = {
+      sso_enabled: adminSsoToggle.checked ? 'true' : 'false'
+    };
+    await saveAdminConfig(payload);
+  };
+}
+
+// ==========================================================================
+// CODE EDITOR, IMAGE VIEWER, AND VIDEO VIEWER LOGIC
+// ==========================================================================
+
+let monacoLoaded = false;
+
+function loadMonaco() {
+  return new Promise((resolve, reject) => {
+    if (monacoLoaded) return resolve();
+    if (typeof require === 'undefined') {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs/loader.min.js';
+      script.onload = () => {
+        require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' }});
+        require(['vs/editor/editor.main'], () => {
+          monacoLoaded = true;
+          resolve();
+        });
+      };
+      script.onerror = () => reject(new Error('Monaco editor could not be loaded.'));
+      document.head.appendChild(script);
+    } else {
+      require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' }});
+      require(['vs/editor/editor.main'], () => {
+        monacoLoaded = true;
+        resolve();
+      });
+    }
+  });
+}
+
+function getMonacoLanguage(fileName) {
+  const ext = fileName.split('.').pop().toLowerCase();
+  const mapping = {
+    'txt': 'plaintext',
+    'js': 'javascript', 'mjs': 'javascript', 'cjs': 'javascript', 'jsx': 'javascript',
+    'ts': 'typescript', 'tsx': 'typescript',
+    'html': 'html', 'xml': 'xml', 'svg': 'xml',
+    'css': 'css', 'scss': 'scss', 'less': 'less',
+    'py': 'python',
+    'json': 'json',
+    'yaml': 'yaml', 'yml': 'yaml',
+    'c': 'c',
+    'cpp': 'cpp', 'h': 'cpp', 'hpp': 'cpp',
+    'cs': 'csharp',
+    'go': 'go',
+    'rs': 'rust',
+    'java': 'java',
+    'sh': 'shell', 'bash': 'shell',
+    'md': 'markdown',
+    'php': 'php',
+    'rb': 'ruby',
+    'sql': 'sql'
+  };
+  return mapping[ext] || 'plaintext';
+}
+
+function addCollabUserStyles(userId, color, username) {
+  const styleId = `collab-styles-${userId}`;
+  let styleEl = document.getElementById(styleId);
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = styleId;
+    document.head.appendChild(styleEl);
+  }
+  styleEl.innerHTML = `
+    .collab-selection-${userId} {
+      background-color: ${color}33 !important;
+    }
+    .collab-cursor-${userId} {
+      border-left: 2px solid ${color} !important;
+      margin-left: -1px;
+      position: relative;
+    }
+    .collab-cursor-tooltip-${userId}::after {
+      content: "${username}";
+      position: absolute;
+      top: -14px;
+      left: 2px;
+      background: ${color};
+      color: #fff;
+      font-size: 9px;
+      font-weight: bold;
+      padding: 1px 3px;
+      border-radius: 2px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0.8;
+      z-index: 10;
+    }
+  `;
+}
+
+function removeCollabUserStyles(userId) {
+  const styleEl = document.getElementById(`collab-styles-${userId}`);
+  if (styleEl) styleEl.remove();
+}
+
+function initCollabSocket(fileId, username, userId, isPublic = false, slug = '') {
+  if (collabSocket) {
+    collabSocket.close();
+    collabSocket = null;
+  }
+
+  collabUserDecorations = {};
+
+  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsHost = window.location.host;
+  
+  let wsUrl = `${wsProto}//${wsHost}/api/collab?fileId=${fileId}&username=${encodeURIComponent(username)}&userId=${userId}`;
+  if (isPublic) {
+    wsUrl += `&slug=${slug}`;
+  }
+
+  collabSocket = new WebSocket(wsUrl);
+
+  collabSocket.onopen = () => {
+    console.log('Collaboration WebSocket connected.');
+  };
+
+  collabSocket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+
+      if (data.type === 'init') {
+        collabUserColor = data.color;
+        updateCollabUsersListUI(data.users);
+      } else if (data.type === 'user_joined') {
+        updateCollabUsersListUI(data.users);
+        showToast(`${data.username} hat den Editor betreten.`);
+      } else if (data.type === 'user_left') {
+        updateCollabUsersListUI(data.users);
+        showToast(`${data.username} hat den Editor verlassen.`);
+        if (collabUserDecorations[data.userId]) {
+          if (monacoEditorInstance) {
+            monacoEditorInstance.deltaDecorations(collabUserDecorations[data.userId], []);
+          }
+          delete collabUserDecorations[data.userId];
+        }
+        removeCollabUserStyles(data.userId);
+      } else if (data.type === 'edit') {
+        if (!monacoEditorInstance) return;
+        isApplyingRemoteEdit = true;
+        const model = monacoEditorInstance.getModel();
+        const edits = data.changes.map(change => ({
+          range: new monaco.Range(
+            change.range.startLineNumber,
+            change.range.startColumn,
+            change.range.endLineNumber,
+            change.range.endColumn
+          ),
+          text: change.text,
+          forceMoveMarkers: true
+        }));
+        model.applyEdits(edits);
+        isApplyingRemoteEdit = false;
+      } else if (data.type === 'cursor') {
+        if (!monacoEditorInstance) return;
+        
+        const targetUserId = data.userId;
+        const targetUsername = data.username;
+        const position = data.position;
+        const selection = data.selection;
+
+        let color = '#00d2ff';
+        const clientStyle = document.getElementById(`collab-styles-${targetUserId}`);
+        if (clientStyle) {
+          const match = clientStyle.innerHTML.match(/border-left: 2px solid (#[a-fA-F0-9]+)/);
+          if (match) color = match[1];
+        } else {
+          // Find matching user from room to fetch color
+          // We'll hash color just like server if style is new
+          const colors = ['#00d2ff', '#ff5555', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c', '#8be9fd'];
+          let hash = 0;
+          for (let i = 0; i < targetUserId.length; i++) {
+            hash = targetUserId.charCodeAt(i) + ((hash << 5) - hash);
+          }
+          color = colors[Math.abs(hash) % colors.length];
+        }
+
+        addCollabUserStyles(targetUserId, color, targetUsername);
+
+        const decorations = [];
+        if (selection && (selection.startLineNumber !== selection.endLineNumber || selection.startColumn !== selection.endColumn)) {
+          decorations.push({
+            range: new monaco.Range(selection.startLineNumber, selection.startColumn, selection.endLineNumber, selection.endColumn),
+            options: {
+              className: `collab-selection-${targetUserId}`,
+              hoverMessage: { value: targetUsername }
+            }
+          });
+        }
+
+        if (position) {
+          decorations.push({
+            range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
+            options: {
+              className: `collab-cursor-${targetUserId}`,
+              afterContentClassName: `collab-cursor-tooltip-${targetUserId}`,
+              hoverMessage: { value: targetUsername }
+            }
+          });
+        }
+
+        const oldDecs = collabUserDecorations[targetUserId] || [];
+        collabUserDecorations[targetUserId] = monacoEditorInstance.deltaDecorations(oldDecs, decorations);
+      }
+    } catch (err) {
+      console.error('Error handling collaborative WS message:', err);
+    }
+  };
+
+  collabSocket.onclose = () => {
+    console.log('Collaboration WebSocket disconnected.');
+  };
+}
+
+function updateCollabUsersListUI(users) {
+  const container = document.getElementById('collab-users-container');
+  const listEl = document.getElementById('collab-users-list');
+  if (!container || !listEl) return;
+
+  if (!users || users.length <= 1) {
+    container.style.display = 'none';
+    return;
+  }
+
+  container.style.display = 'flex';
+  const currentUsername = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.username : 'Visitor';
+  const otherUsers = users.filter(u => u.username !== currentUsername);
+  const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${u.username}</span>`);
+  listEl.innerHTML = `Andere online: ${names.join(', ')}`;
+}
+
+let currentEditingFileId = null;
+
+async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
+  showToast('Lade Code-Editor...');
+  currentEditingFileId = fileId;
+
+  try {
+    const url = isPublic 
+      ? `/api/public/shares/${slug}/content/${fileId}`
+      : `/api/files/content/${fileId}`;
+      
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(err.error || 'Fehler beim Laden des Datei-Inhalts.');
+      return;
+    }
+    const textContent = await res.text();
+
+    await loadMonaco();
+
+    document.getElementById('code-editor-title').innerHTML = `<i data-lucide="file-code"></i> ${fileName}`;
+    lucide.createIcons();
+
+    document.getElementById('code-editor-overlay').style.display = 'block';
+    const collabContainer = document.getElementById('collab-users-container');
+    if (collabContainer) {
+      collabContainer.style.display = 'none';
+    }
+
+    let readOnly = false;
+    if (isPublic && shareConfig && !shareConfig.can_write) {
+      readOnly = true;
+    }
+    
+    const saveBtn = document.getElementById('save-code-editor-btn');
+    if (saveBtn) {
+      saveBtn.style.display = readOnly ? 'none' : 'block';
+    }
+
+    const container = document.getElementById('monaco-editor-container');
+    container.innerHTML = ''; // Clear previous
+
+    const language = getMonacoLanguage(fileName);
+    
+    monacoEditorInstance = monaco.editor.create(container, {
+      value: textContent,
+      language: language,
+      theme: 'vs-dark',
+      automaticLayout: true,
+      readOnly: readOnly,
+      fontSize: 14,
+      minimap: { enabled: true },
+      bracketPairColorization: {
+        enabled: true
+      },
+      'semanticHighlighting.enabled': true,
+      colorDecorators: true
+    });
+
+    // Start Collaboration WebSocket
+    const collabUsername = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.username : ('Gast_' + Math.floor(Math.random() * 900 + 100));
+    const collabUserId = (typeof currentUser !== 'undefined' && currentUser) ? `${currentUser.id}` : `guest_${Math.random().toString(36).substring(2, 11)}`;
+    initCollabSocket(fileId, collabUsername, collabUserId, isPublic, slug);
+
+    // Send edits to other collaborators in real-time on keypress/change
+    monacoEditorInstance.onDidChangeModelContent((event) => {
+      if (isApplyingRemoteEdit) return;
+      if (collabSocket && collabSocket.readyState === WebSocket.OPEN) {
+        collabSocket.send(JSON.stringify({
+          type: 'edit',
+          changes: event.changes
+        }));
+      }
+
+      // 1.5s Debounced Auto-save to the database (so users don't have to keep clicking save!)
+      if (autoSaveDebounceTimeout) {
+        clearTimeout(autoSaveDebounceTimeout);
+      }
+      autoSaveDebounceTimeout = setTimeout(async () => {
+        if (!monacoEditorInstance || readOnly) return;
+        const currentContent = monacoEditorInstance.getValue();
+        try {
+          const saveUrl = isPublic 
+            ? `/api/public/shares/${slug}/content/${fileId}`
+            : `/api/files/content/${fileId}`;
+          await fetch(saveUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: currentContent })
+          });
+        } catch (e) {
+          console.error('Autosave error:', e);
+        }
+      }, 1500);
+    });
+
+    // Send cursor position & selection to other collaborators in real-time
+    const sendCursorUpdate = () => {
+      if (isApplyingRemoteEdit) return;
+      if (collabSocket && collabSocket.readyState === WebSocket.OPEN) {
+        collabSocket.send(JSON.stringify({
+          type: 'cursor',
+          position: monacoEditorInstance.getPosition(),
+          selection: monacoEditorInstance.getSelection()
+        }));
+      }
+    };
+
+    monacoEditorInstance.onDidChangeCursorPosition(sendCursorUpdate);
+    monacoEditorInstance.onDidChangeCursorSelection(sendCursorUpdate);
+
+    if (!readOnly) {
+      document.getElementById('save-code-editor-btn').onclick = async () => {
+        const updatedContent = monacoEditorInstance.getValue();
+        showToast('Speichere Datei...');
+        
+        try {
+          const saveUrl = isPublic 
+            ? `/api/public/shares/${slug}/content/${fileId}`
+            : `/api/files/content/${fileId}`;
+            
+          const saveRes = await fetch(saveUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: updatedContent })
+          });
+
+          if (saveRes.ok) {
+            showToast('Datei erfolgreich gespeichert.');
+          } else {
+            const err = await saveRes.json();
+            showToast(err.error || 'Fehler beim Speichern.');
+          }
+        } catch (err) {
+          showToast('Verbindungsfehler beim Speichern.');
+        }
+      };
+    }
+  } catch (err) {
+    console.error('Error opening code editor:', err);
+    showToast('Code-Editor konnte nicht geladen werden.');
+  }
+}
+
+document.getElementById('close-code-editor-btn').onclick = () => {
+  if (collabSocket) {
+    collabSocket.close();
+    collabSocket = null;
+  }
+  if (autoSaveDebounceTimeout) {
+    clearTimeout(autoSaveDebounceTimeout);
+    autoSaveDebounceTimeout = null;
+  }
+  document.querySelectorAll('[id^="collab-styles-"]').forEach(el => el.remove());
+
+  if (monacoEditorInstance) {
+    monacoEditorInstance.dispose();
+    monacoEditorInstance = null;
+  }
+  document.getElementById('code-editor-overlay').style.display = 'none';
+  if (typeof loadFiles === 'function') {
+    loadFiles(currentFolderId);
+  } else {
+    loadShareData(currentFolderId);
+  }
+};
+
+let heicLibLoaded = false;
+function loadHeicLib() {
+  return new Promise((resolve, reject) => {
+    if (heicLibLoaded) return resolve();
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/heic2any/0.0.4/heic2any.min.js';
+    script.onload = () => {
+      heicLibLoaded = true;
+      resolve();
+    };
+    script.onerror = () => reject(new Error('heic2any failed to load.'));
+    document.head.appendChild(script);
+  });
+}
+
+let currentImageObjectUrl = null;
+
+async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
+  const overlay = document.getElementById('image-viewer-overlay');
+  const img = document.getElementById('image-viewer-img');
+  const loading = document.getElementById('image-viewer-loading');
+  const title = document.getElementById('image-viewer-title');
+
+  title.innerHTML = `<i data-lucide="image"></i> ${fileName}`;
+  lucide.createIcons();
+  
+  img.style.display = 'none';
+  loading.style.display = 'flex';
+  overlay.style.display = 'block';
+
+  if (currentImageObjectUrl) {
+    URL.revokeObjectURL(currentImageObjectUrl);
+    currentImageObjectUrl = null;
+  }
+
+  const downloadUrl = isPublic 
+    ? `/api/public/shares/${slug}/download/${fileId}`
+    : `/api/files/download/${fileId}`;
+
+  const ext = fileName.split('.').pop().toLowerCase();
+  
+  try {
+    if (['heic', 'heif'].includes(ext)) {
+      const response = await fetch(downloadUrl);
+      if (!response.ok) throw new Error('Failed to fetch image file.');
+      const blob = await response.blob();
+      
+      await loadHeicLib();
+      const convertedBlob = await heic2any({
+        blob,
+        toType: 'image/jpeg',
+        quality: 0.8
+      });
+      
+      currentImageObjectUrl = URL.createObjectURL(convertedBlob);
+      img.src = currentImageObjectUrl;
+    } else if (['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) {
+      const thumbUrl = isPublic
+        ? `/api/public/shares/${slug}/thumbnail/${fileId}`
+        : `/api/files/thumbnail/${fileId}`;
+      img.src = thumbUrl;
+    } else {
+      img.src = downloadUrl;
+    }
+
+    img.onload = () => {
+      loading.style.display = 'none';
+      img.style.display = 'block';
+    };
+    img.onerror = () => {
+      loading.style.display = 'none';
+      title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
+      lucide.createIcons();
+    };
+  } catch (err) {
+    console.error('Image viewer error:', err);
+    loading.style.display = 'none';
+    title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
+    lucide.createIcons();
+  }
+}
+
+document.getElementById('close-image-viewer-btn').onclick = () => {
+  document.getElementById('image-viewer-overlay').style.display = 'none';
+  const img = document.getElementById('image-viewer-img');
+  img.src = '';
+  if (currentImageObjectUrl) {
+    URL.revokeObjectURL(currentImageObjectUrl);
+    currentImageObjectUrl = null;
+  }
+};
+
+function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
+  const overlay = document.getElementById('video-viewer-overlay');
+  const player = document.getElementById('video-viewer-player');
+  const title = document.getElementById('video-viewer-title');
+
+  title.innerHTML = `<i data-lucide="video"></i> ${fileName}`;
+  lucide.createIcons();
+
+  const sourceUrl = isPublic 
+    ? `/api/public/shares/${slug}/download/${fileId}`
+    : `/api/files/download/${fileId}`;
+
+  player.src = sourceUrl;
+  overlay.style.display = 'block';
+}
+
+document.getElementById('close-video-viewer-btn').onclick = () => {
+  document.getElementById('video-viewer-overlay').style.display = 'none';
+  const player = document.getElementById('video-viewer-player');
+  player.pause();
+  player.src = '';
+};
+
+// Backdrop click close for new overlays
+['code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay'].forEach(id => {
+  const overlay = document.getElementById(id);
+  if (overlay) {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) {
+        if (id === 'code-editor-overlay') {
+          // Do not close code editor on background click
+        } else if (id === 'image-viewer-overlay') {
+          document.getElementById('close-image-viewer-btn').click();
+        } else if (id === 'video-viewer-overlay') {
+          document.getElementById('close-video-viewer-btn').click();
+        }
+      }
+    });
+  }
+});
+
+// Unified display name helper
+function updateDisplayNameUI() {
+  if (currentUser) {
+    const displayName = (currentUser.display_real_name && (currentUser.first_name || currentUser.last_name)) 
+      ? `${currentUser.first_name || ''} ${currentUser.last_name || ''}`.trim() 
+      : currentUser.username;
+    const navUsername = document.getElementById('nav-username');
+    if (navUsername) {
+      navUsername.textContent = displayName;
+    }
+  }
+}
+
+// User Profile form submission handler
+const editProfileForm = document.getElementById('edit-profile-form');
+if (editProfileForm) {
+  editProfileForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const payload = {
+      first_name: document.getElementById('settings-firstname-input').value.trim(),
+      last_name: document.getElementById('settings-lastname-input').value.trim(),
+      username: document.getElementById('settings-username-input').value.trim(),
+      email: document.getElementById('settings-email-input').value.trim(),
+      display_real_name: document.getElementById('settings-display-realname-toggle').checked
+    };
+    
+    try {
+      const res = await fetch('/api/settings/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast('Profil erfolgreich aktualisiert.');
+        currentUser = data.user;
+        updateDisplayNameUI();
+      } else {
+        showToast(data.error || 'Fehler beim Aktualisieren des Profils.');
+      }
+    } catch (e) {
+      showToast('Netzwerkfehler.');
+    }
+  };
+}
+
+// Auto-save display realname toggle on change
+const displayRealnameToggle = document.getElementById('settings-display-realname-toggle');
+if (displayRealnameToggle) {
+  displayRealnameToggle.onchange = async () => {
+    const editProfileForm = document.getElementById('edit-profile-form');
+    if (editProfileForm && typeof editProfileForm.onsubmit === 'function') {
+      const fakeEvent = { preventDefault: () => {} };
+      await editProfileForm.onsubmit(fakeEvent);
+    }
+  };
+}
+
+// Admin form submission for new user creation
+const adminCreateUserForm = document.getElementById('admin-create-user-form');
+if (adminCreateUserForm) {
+  adminCreateUserForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const username = document.getElementById('admin-new-username').value.trim();
+    const email = document.getElementById('admin-new-email').value.trim();
+    const password = document.getElementById('admin-new-password').value.trim();
+    const role = document.getElementById('admin-new-role').value;
+
+    try {
+      const res = await fetch('/api/settings/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, email, password, role })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(`Benutzer "${username}" erfolgreich erstellt.`);
+        document.getElementById('admin-new-username').value = '';
+        document.getElementById('admin-new-email').value = '';
+        document.getElementById('admin-new-password').value = '';
+        loadAdminSettings(); // Refresh list
+      } else {
+        showToast(data.error || 'Fehler beim Erstellen des Benutzers.');
+      }
+    } catch (e) {
+      showToast('Netzwerkfehler.');
+    }
+  };
+}
+
+function showCreateNoteModal(defaultName) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('create-note-modal-overlay');
+    const form = document.getElementById('create-note-form');
+    const nameInput = document.getElementById('create-note-name');
+    const contentInput = document.getElementById('create-note-content');
+    const maxViewsInput = document.getElementById('create-note-max-views');
+    const expiresSelect = document.getElementById('create-note-expires');
+    const cancelBtn = document.getElementById('cancel-create-note-btn');
+    const closeBtn = document.getElementById('close-create-note-btn');
+
+    nameInput.value = defaultName ? (defaultName.endsWith('.txt') ? defaultName : defaultName + '.txt') : 'Einmalnotiz.txt';
+    contentInput.value = '';
+    maxViewsInput.value = 1;
+    expiresSelect.value = '24'; // 24 hours default
+
+    overlay.classList.add('active');
+    contentInput.focus();
+
+    const cleanup = () => {
+      overlay.classList.remove('active');
+      form.onsubmit = null;
+      cancelBtn.onclick = null;
+      closeBtn.onclick = null;
+    };
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const payload = {
+        name: nameInput.value.trim(),
+        content: contentInput.value,
+        maxViews: parseInt(maxViewsInput.value) || 1,
+        expiresHours: parseInt(expiresSelect.value) || 24,
+        parentId: currentFolderId
+      };
+
+      showToast('Erstelle Einmalnotiz...');
+      cleanup();
+
+      try {
+        const res = await fetch('/api/files/create-note', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+          showToast('Einmalnotiz erfolgreich erstellt.');
+          loadFiles(currentFolderId);
+          showNoteResultModal(data.shareLink);
+        } else {
+          showToast(data.error || 'Fehler beim Erstellen der Notiz.');
+        }
+      } catch (err) {
+        showToast('Netzwerkfehler beim Erstellen der Notiz.');
+      }
+      resolve();
+    };
+
+    cancelBtn.onclick = () => { cleanup(); resolve(); };
+    closeBtn.onclick = () => { cleanup(); resolve(); };
+  });
+}
+
+function showNoteResultModal(link) {
+  const overlay = document.getElementById('note-result-modal-overlay');
+  const linkInput = document.getElementById('note-result-link-input');
+  const copyBtn = document.getElementById('copy-note-link-btn');
+  const closeBtn = document.getElementById('close-note-result-btn');
+  const confirmBtn = document.getElementById('confirm-note-result-btn');
+
+  linkInput.value = link;
+  overlay.classList.add('active');
+
+  const cleanup = () => {
+    overlay.classList.remove('active');
+    copyBtn.onclick = null;
+    closeBtn.onclick = null;
+    confirmBtn.onclick = null;
+  };
+
+  copyBtn.onclick = () => {
+    linkInput.select();
+    document.execCommand('copy');
+    showToast('Link in Zwischenablage kopiert!');
+  };
+
+  closeBtn.onclick = cleanup;
+  confirmBtn.onclick = cleanup;
+}
+
+// Plus dropdown menu toggler
+const plusMenuBtn = document.getElementById('plus-menu-btn');
+const plusDropdownMenu = document.getElementById('plus-dropdown-menu');
+if (plusMenuBtn && plusDropdownMenu) {
+  plusMenuBtn.onclick = (e) => {
+    e.stopPropagation();
+    const isVisible = plusDropdownMenu.style.display === 'block';
+    plusDropdownMenu.style.display = isVisible ? 'none' : 'block';
+  };
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#plus-dropdown-menu') && e.target !== plusMenuBtn) {
+      plusDropdownMenu.style.display = 'none';
+    }
+  });
 }

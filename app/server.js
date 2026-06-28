@@ -20,6 +20,7 @@ const { sendMail } = require('./email');
 require('dotenv').config();
 
 const app = express();
+app.set('trust proxy', true);
 const PORT = process.env.PORT || 3000;
 
 // Setup directories
@@ -78,8 +79,19 @@ function requireAdmin(req, res, next) {
 
 // WebAuthn configuration variables
 const RP_NAME = 'myCloud';
-const RP_ID = process.env.APP_URL ? new URL(process.env.APP_URL).hostname : 'localhost';
-const EXPECTED_ORIGIN = process.env.APP_URL || 'http://localhost:3000';
+const EXPECTED_ORIGIN = process.env.APP_URL || 'http://localhost:3030';
+const getRpId = (req) => {
+  const host = req.get('host') || 'localhost';
+  return host.split(':')[0];
+};
+const getExpectedOrigin = (req) => {
+  if (req.headers.origin) {
+    return req.headers.origin;
+  }
+  const host = req.get('host') || 'localhost';
+  const proto = req.protocol || 'http';
+  return `${proto}://${host}`;
+};
 
 /* ==========================================================================
    AUTHENTICATION ROUTES
@@ -88,14 +100,17 @@ const EXPECTED_ORIGIN = process.env.APP_URL || 'http://localhost:3000';
 // Check current user status
 app.get('/api/auth/status', async (req, res) => {
   if (req.session.userId) {
-    return res.json({
-      loggedIn: true,
-      user: {
-        id: req.session.userId,
-        username: req.session.username,
-        role: req.session.role,
+    try {
+      const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name FROM users WHERE id = $1', [req.session.userId]);
+      if (userRes.rows.length > 0) {
+        return res.json({
+          loggedIn: true,
+          user: userRes.rows[0]
+        });
       }
-    });
+    } catch (e) {
+      console.error('Error fetching user auth status:', e);
+    }
   }
   
   // Also check if any users exist to determine if registration should be open
@@ -235,6 +250,10 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const user = result.rows[0];
+    if (user.is_active === false) {
+      return res.status(403).json({ error: 'Ihr Account wurde gesperrt. Bitte wenden Sie sich an einen Administrator.' });
+    }
+
     if (!user.password_hash) {
       return res.status(400).json({ error: 'Dieser Account nutzt SSO oder Passkeys. Bitte melde dich über diese an.' });
     }
@@ -404,7 +423,7 @@ app.post('/api/auth/passkey/register-options', requireAuth, async (req, res) => 
 
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
-      rpID: RP_ID,
+      rpID: getRpId(req),
       userID: String(user.id),
       userName: user.username,
       userDisplayName: user.username,
@@ -426,7 +445,7 @@ app.post('/api/auth/passkey/register-options', requireAuth, async (req, res) => 
 
 // 2. Verify Registration
 app.post('/api/auth/passkey/register-verify', requireAuth, async (req, res) => {
-  const { body } = req;
+  const { credential, name } = req.body;
   const userId = req.session.userId;
   const expectedChallenge = req.session.currentChallenge;
 
@@ -436,10 +455,10 @@ app.post('/api/auth/passkey/register-verify', requireAuth, async (req, res) => {
 
   try {
     const verification = await verifyRegistrationResponse({
-      response: body,
+      response: credential,
       expectedChallenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: getExpectedOrigin(req),
+      expectedRPID: getRpId(req),
     });
 
     if (verification.verified && verification.registrationInfo) {
@@ -447,11 +466,11 @@ app.post('/api/auth/passkey/register-verify', requireAuth, async (req, res) => {
 
       const credentialPublicKeyBase64 = Buffer.from(credentialPublicKey).toString('base64url');
       const credentialIDBase64 = Buffer.from(credentialID).toString('base64url');
-      const transports = body.response.transports ? body.response.transports.join(',') : '';
+      const transports = credential.response.transports ? credential.response.transports.join(',') : '';
 
       await pool.query(
-        'INSERT INTO passkeys (id, public_key, counter, user_id, transports) VALUES ($1, $2, $3, $4, $5)',
-        [credentialIDBase64, credentialPublicKeyBase64, counter, userId, transports]
+        'INSERT INTO passkeys (id, public_key, counter, user_id, transports, name) VALUES ($1, $2, $3, $4, $5, $6)',
+        [credentialIDBase64, credentialPublicKeyBase64, counter, userId, transports, name || 'Passkey']
       );
 
       delete req.session.currentChallenge;
@@ -469,7 +488,7 @@ app.post('/api/auth/passkey/register-verify', requireAuth, async (req, res) => {
 app.post('/api/auth/passkey/login-options', async (req, res) => {
   try {
     const options = await generateAuthenticationOptions({
-      rpID: RP_ID,
+      rpID: getRpId(req),
       userVerification: 'preferred',
     });
 
@@ -505,8 +524,8 @@ app.post('/api/auth/passkey/login-verify', async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: body,
       expectedChallenge,
-      expectedOrigin: EXPECTED_ORIGIN,
-      expectedRPID: RP_ID,
+      expectedOrigin: getExpectedOrigin(req),
+      expectedRPID: getRpId(req),
       authenticator: {
         credentialID: Buffer.from(passkey.id, 'base64url'),
         credentialPublicKey: Buffer.from(passkey.public_key, 'base64url'),
@@ -1069,7 +1088,7 @@ app.get('/api/files/download-zip-multiple', requireAuth, async (req, res) => {
 
 // Create new empty file
 app.post('/api/files/create-empty', requireAuth, async (req, res) => {
-  const { name, parentId } = req.body;
+  const { name, parentId, type } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId ? parseInt(parentId) : null;
 
@@ -1083,21 +1102,276 @@ app.post('/api/files/create-empty', requireAuth, async (req, res) => {
       if (!isOwner) return res.status(403).json({ error: 'Access denied' });
     }
 
-    const uniqueFilename = crypto.randomUUID() + '.txt';
+    let ext = '.txt';
+    let mimeType = 'text/plain';
+    let templateFile = null;
+
+    switch (type) {
+      case 'docx':
+        ext = '.docx';
+        mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        templateFile = path.join(__dirname, 'templates', 'new.docx');
+        break;
+      case 'xlsx':
+        ext = '.xlsx';
+        mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        templateFile = path.join(__dirname, 'templates', 'new.xlsx');
+        break;
+      case 'pptx':
+        ext = '.pptx';
+        mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+        templateFile = path.join(__dirname, 'templates', 'new.pptx');
+        break;
+      case 'txt':
+      default:
+        ext = '.txt';
+        mimeType = 'text/plain';
+        break;
+    }
+
+    let finalName = name.trim();
+    if (type === 'txt' || type === 'codex' || type === 'other') {
+      const parts = finalName.split('.');
+      if (parts.length > 1) {
+        const detectedExt = '.' + parts.pop().toLowerCase();
+        ext = detectedExt;
+        if (ext === '.js' || ext === '.mjs' || ext === '.cjs') mimeType = 'application/javascript';
+        else if (ext === '.json') mimeType = 'application/json';
+        else if (ext === '.html') mimeType = 'text/html';
+        else if (ext === '.css') mimeType = 'text/css';
+        else mimeType = 'text/plain';
+      } else {
+        if (type === 'codex') {
+          ext = '.js';
+          mimeType = 'application/javascript';
+        } else if (type === 'other') {
+          ext = '.bin';
+          mimeType = 'application/octet-stream';
+        } else {
+          ext = '.txt';
+          mimeType = 'text/plain';
+        }
+      }
+    }
+
+    if (!finalName.toLowerCase().endsWith(ext)) {
+      finalName += ext;
+    }
+
+    const uniqueFilename = crypto.randomUUID() + ext;
     const physicalPath = path.join(UPLOADS_DIR, uniqueFilename);
     
-    // Create empty file on disk
-    fs.writeFileSync(physicalPath, '');
+    let fileSize = 0;
+    if (templateFile && fs.existsSync(templateFile)) {
+      fs.copyFileSync(templateFile, physicalPath);
+      fileSize = fs.statSync(physicalPath).size;
+    } else {
+      fs.writeFileSync(physicalPath, '');
+    }
 
     const result = await pool.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id) 
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [name, uniqueFilename, 'text/plain', 0, false, parsedParentId, userId]
+      [finalName, uniqueFilename, mimeType, fileSize, false, parsedParentId, userId]
     );
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Error creating empty file:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Create a self-destructing one-time note file and automatic share link
+app.post('/api/files/create-note', requireAuth, async (req, res) => {
+  const { name, content, maxViews, expiresHours, parentId } = req.body;
+  const userId = req.session.userId;
+  const parsedParentId = parentId ? parseInt(parentId) : null;
+
+  if (!name || content === undefined) {
+    return res.status(400).json({ error: 'Benutzername und Inhalt sind erforderlich.' });
+  }
+
+  try {
+    if (parsedParentId !== null) {
+      const isOwner = await verifyFileOwner(parsedParentId, userId);
+      if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const cleanName = name.trim().endsWith('.txt') ? name.trim() : name.trim() + '.txt';
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + (parseInt(expiresHours) || 24));
+
+    // Generate unique physical filename
+    const uniqueFilename = crypto.randomUUID() + '.txt';
+    const physicalPath = path.join(UPLOADS_DIR, uniqueFilename);
+    
+    // Write note text to physical file
+    fs.writeFileSync(physicalPath, content, 'utf8');
+    const size = Buffer.byteLength(content, 'utf8');
+
+    // Insert file record
+    const fileRes = await pool.query(
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note)
+       VALUES ($1, $2, $3, $4, false, $5, $6, true) RETURNING id`,
+      [cleanName, uniqueFilename, 'text/plain', size, parsedParentId, userId]
+    );
+    const fileId = fileRes.rows[0].id;
+
+    // Generate unique slug
+    const slug = crypto.randomBytes(8).toString('hex');
+
+    // Create share record
+    await pool.query(
+      `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, max_downloads, download_count)
+       VALUES ($1, $2, true, false, true, false, $3, $4, 0)`,
+      [slug, fileId, expiresAt, parseInt(maxViews) || 1]
+    );
+
+    const shareLink = `${EXPECTED_ORIGIN}/s/${slug}`;
+    res.json({ success: true, shareLink });
+  } catch (err) {
+    console.error('Error creating one-time note:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+// Get text file content
+app.get('/api/files/content/:id', requireAuth, async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+
+  try {
+    const isOwner = await verifyFileOwner(fileId, userId);
+    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    const file = fileRes.rows[0];
+    if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
+
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    res.type('text/plain').send(content);
+  } catch (err) {
+    console.error('Error reading file content:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Save text file content
+app.put('/api/files/content/:id', requireAuth, async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+  const { content } = req.body;
+
+  if (content === undefined) return res.status(400).json({ error: 'Content is required' });
+
+  try {
+    const isOwner = await verifyFileOwner(fileId, userId);
+    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    const file = fileRes.rows[0];
+    if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
+
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    fs.writeFileSync(filePath, content);
+    const stats = fs.statSync(filePath);
+
+    await pool.query('UPDATE files SET size = $1 WHERE id = $2', [stats.size, fileId]);
+
+    res.json({ success: true, size: stats.size });
+  } catch (err) {
+    console.error('Error saving file content:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const THUMBNAILS_DIR = path.join(UPLOADS_DIR, 'thumbnails');
+if (!fs.existsSync(THUMBNAILS_DIR)) {
+  fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
+}
+
+// Helper to generate a thumbnail using ffmpeg or dcraw/exiftool
+function generateThumbnail(physicalFilename, extension) {
+  return new Promise((resolve) => {
+    const inputPath = path.join(UPLOADS_DIR, physicalFilename);
+    const outputPath = path.join(THUMBNAILS_DIR, physicalFilename + '.jpg');
+
+    if (fs.existsSync(outputPath)) {
+      return resolve(outputPath);
+    }
+
+    const lowerExt = extension.toLowerCase();
+    
+    // Check if it's a video
+    const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+    // Check if it's a RAW image
+    const rawExts = ['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+
+    if (videoExts.includes(lowerExt)) {
+      // Generate video thumbnail using ffmpeg
+      const { exec } = require('child_process');
+      const cmd = `ffmpeg -y -i "${inputPath}" -ss 00:00:01 -vframes 1 -f image2 -vcodec mjpeg "${outputPath}"`;
+      exec(cmd, (err) => {
+        if (err) {
+          console.error(`ffmpeg failed for ${physicalFilename}:`, err);
+          return resolve(null);
+        }
+        resolve(outputPath);
+      });
+    } else if (rawExts.includes(lowerExt)) {
+      // Extract RAW embedded preview using exiftool (supports all raw formats)
+      const { exec } = require('child_process');
+      const cmd = `exiftool -b -PreviewImage "${inputPath}" > "${outputPath}" || exiftool -b -ThumbnailImage "${inputPath}" > "${outputPath}" || exiftool -b -JpgFromRaw "${inputPath}" > "${outputPath}"`;
+      exec(cmd, (err) => {
+        if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+          return resolve(outputPath);
+        }
+        console.error(`exiftool failed for ${physicalFilename}:`, err);
+        resolve(null);
+      });
+    } else {
+      resolve(null);
+    }
+  });
+}
+
+// Get file thumbnail
+app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+
+  try {
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    if (fileRes.rows.length === 0) return res.status(404).json({ error: 'File not found' });
+
+    const file = fileRes.rows[0];
+    if (file.owner_id !== userId) return res.status(403).json({ error: 'Access denied' });
+    if (file.is_folder) return res.status(400).json({ error: 'Cannot generate folder thumbnail' });
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
+
+    // Standard web images are served directly
+    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+    if (webImageExts.includes(ext)) {
+      return res.sendFile(filePath);
+    }
+
+    // Try to generate/serve thumbnail for video or RAW
+    const thumbPath = await generateThumbnail(file.path, ext);
+    if (thumbPath && fs.existsSync(thumbPath)) {
+      return res.sendFile(thumbPath);
+    }
+
+    res.status(404).json({ error: 'Thumbnail not available' });
+  } catch (err) {
+    console.error('Thumbnail endpoint error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1440,13 +1714,17 @@ app.get('/api/public/branding', async (req, res) => {
     const name = await getSetting('cloud_name') || 'myCloud';
     const tabName = await getSetting('cloud_tab_name') || 'myCloud';
     const hasIcon = await getSetting('cloud_icon_path') ? true : false;
+    const customColorBg = await getSetting('custom_color_bg') || '#0b0f19';
+    const customColorAccent = await getSetting('custom_color_accent') || '#00d2ff';
+    const hasDashboardBg = await getSetting('dashboard_bg_image') ? true : false;
+    const hasLoginBg = await getSetting('login_bg_image') ? true : false;
     const appUrl = process.env.APP_URL || '';
     
     const smtpHost = await getSetting('email_smtp_host');
     const smtpTested = await getSetting('email_smtp_tested');
     const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
 
-    res.json({ name, tabName, hasIcon, appUrl, emailConfigured });
+    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, appUrl, emailConfigured });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1463,6 +1741,38 @@ app.get('/api/public/branding/icon', async (req, res) => {
       }
     }
     res.status(404).send('Icon not found');
+  } catch (err) {
+    res.status(500).send('Internal server error');
+  }
+});
+
+// Get Dashboard Background
+app.get('/api/public/branding/dashboard-bg', async (req, res) => {
+  try {
+    const bgPath = await getSetting('dashboard_bg_image');
+    if (bgPath) {
+      const filePath = path.join(UPLOADS_DIR, bgPath);
+      if (fs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+    }
+    res.status(404).send('Background not found');
+  } catch (err) {
+    res.status(500).send('Internal server error');
+  }
+});
+
+// Get Login Background
+app.get('/api/public/branding/login-bg', async (req, res) => {
+  try {
+    const bgPath = await getSetting('login_bg_image');
+    if (bgPath) {
+      const filePath = path.join(UPLOADS_DIR, bgPath);
+      if (fs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+    }
+    res.status(404).send('Background not found');
   } catch (err) {
     res.status(500).send('Internal server error');
   }
@@ -1491,6 +1801,88 @@ app.post('/api/settings/admin/icon', requireAdmin, upload.single('icon'), async 
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Upload Dashboard Background (Admin only)
+app.post('/api/settings/admin/dashboard-bg', requireAdmin, upload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No image provided.' });
+  }
+  try {
+    const oldBg = await getSetting('dashboard_bg_image');
+    await setSetting('dashboard_bg_image', req.file.filename);
+
+    if (oldBg) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldBg);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    res.json({ success: true, bgUrl: `/api/public/branding/dashboard-bg?t=${Date.now()}` });
+  } catch (err) {
+    console.error('Error saving dashboard bg:', err);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/api/settings/admin/dashboard-bg', requireAdmin, async (req, res) => {
+  try {
+    const oldBg = await getSetting('dashboard_bg_image');
+    await setSetting('dashboard_bg_image', '');
+    if (oldBg) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldBg);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Upload Login Background (Admin only)
+app.post('/api/settings/admin/login-bg', requireAdmin, upload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No image provided.' });
+  }
+  try {
+    const oldBg = await getSetting('login_bg_image');
+    await setSetting('login_bg_image', req.file.filename);
+
+    if (oldBg) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldBg);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    res.json({ success: true, bgUrl: `/api/public/branding/login-bg?t=${Date.now()}` });
+  } catch (err) {
+    console.error('Error saving login bg:', err);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/api/settings/admin/login-bg', requireAdmin, async (req, res) => {
+  try {
+    const oldBg = await getSetting('login_bg_image');
+    await setSetting('login_bg_image', '');
+    if (oldBg) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldBg);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1634,6 +2026,166 @@ app.post('/api/public/shares/:slug/unlock', async (req, res) => {
 });
 
 
+// Helper to increment download count and check if a file/share should self-destruct
+async function incrementDownloadCountAndCheckSelfDestruct(shareId) {
+  try {
+    const shareRes = await pool.query('SELECT * FROM shares WHERE id = $1', [shareId]);
+    if (shareRes.rows.length === 0) return;
+    const share = shareRes.rows[0];
+
+    const newCount = share.download_count + 1;
+    await pool.query('UPDATE shares SET download_count = $1 WHERE id = $2', [newCount, shareId]);
+
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [share.file_id]);
+    if (fileRes.rows.length === 0) return;
+    const file = fileRes.rows[0];
+
+    const limitReached = share.max_downloads !== null && newCount >= share.max_downloads;
+    if (file.is_one_time_note || limitReached) {
+      if (!file.is_folder) {
+        const filePath = path.join(UPLOADS_DIR, file.path);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }
+      // Cascades automatically to delete corresponding share record
+      await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+      console.log(`Self-destructed one-time note or limit-reached file ${file.name} (ID: ${file.id})`);
+    }
+  } catch (err) {
+    console.error('Self-destruct check error:', err);
+  }
+}
+
+// Helper for public share validation
+async function verifyPublicShareAccess(slug, fileId, req) {
+  const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
+  if (shareRes.rows.length === 0) return { error: 'Share link not found.', status: 404 };
+
+  const share = shareRes.rows[0];
+  if (share.expires_at && new Date(share.expires_at) < new Date()) {
+    return { error: 'Share has expired.', status: 410 };
+  }
+
+  // Check password protection
+  const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
+  if (share.password_hash && !isUnlocked) {
+    return { error: 'Password required.', status: 401 };
+  }
+
+  // Verify fileId is either the shared file/folder or a descendant
+  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [parseInt(fileId)]);
+  if (fileRes.rows.length === 0) return { error: 'File not found.', status: 404 };
+
+  const file = fileRes.rows[0];
+  let checkId = file.id;
+  let isValid = false;
+
+  while (checkId !== null) {
+    if (checkId === share.file_id) {
+      isValid = true;
+      break;
+    }
+    const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
+    if (checkRes.rows.length === 0) break;
+    checkId = checkRes.rows[0].parent_id;
+  }
+
+  if (!isValid) return { error: 'Access denied.', status: 403 };
+
+  return { file, share };
+}
+
+// Get public share text file content
+app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
+  const { slug, fileId } = req.params;
+
+  try {
+    const access = await verifyPublicShareAccess(slug, fileId, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+
+    const { file, share } = access;
+    if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
+
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
+
+    const content = fs.readFileSync(filePath, 'utf8');
+    res.type('text/plain').send(content);
+
+    // Increment and check self-destruction after content is fully sent
+    res.on('finish', async () => {
+      await incrementDownloadCountAndCheckSelfDestruct(share.id);
+    });
+  } catch (err) {
+    console.error('Public content fetch error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Save public share text file content
+app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
+  const { slug, fileId } = req.params;
+  const { content } = req.body;
+
+  if (content === undefined) return res.status(400).json({ error: 'Content is required' });
+
+  try {
+    const access = await verifyPublicShareAccess(slug, fileId, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+
+    const { file, share } = access;
+    if (!share.can_write) return res.status(403).json({ error: 'Write permission denied.' });
+    if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
+
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    fs.writeFileSync(filePath, content);
+    const stats = fs.statSync(filePath);
+
+    await pool.query('UPDATE files SET size = $1 WHERE id = $2', [stats.size, file.id]);
+
+    res.json({ success: true, size: stats.size });
+  } catch (err) {
+    console.error('Public content save error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Get public share file thumbnail
+app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
+  const { slug, fileId } = req.params;
+
+  try {
+    const access = await verifyPublicShareAccess(slug, fileId, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+
+    const { file } = access;
+    if (file.is_folder) return res.status(400).json({ error: 'Cannot generate folder thumbnail' });
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
+
+    // Standard web images are served directly
+    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+    if (webImageExts.includes(ext)) {
+      return res.sendFile(filePath);
+    }
+
+    // Try to generate/serve thumbnail for video or RAW
+    const thumbPath = await generateThumbnail(file.path, ext);
+    if (thumbPath && fs.existsSync(thumbPath)) {
+      return res.sendFile(thumbPath);
+    }
+
+    res.status(404).json({ error: 'Thumbnail not available' });
+  } catch (err) {
+    console.error('Public thumbnail endpoint error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+
 // Public Share Download - Single file
 app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
   const { slug, fileId } = req.params;
@@ -1683,10 +2235,12 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found.' });
 
-    // Increment download count
-    await pool.query('UPDATE shares SET download_count = download_count + 1 WHERE id = $1', [share.id]);
-
-    res.download(filePath, file.name);
+    // Increment download count and check self-destruct after download completes
+    res.download(filePath, file.name, async (err) => {
+      if (!err) {
+        await incrementDownloadCountAndCheckSelfDestruct(share.id);
+      }
+    });
   } catch (err) {
     console.error('Public download error:', err);
     res.status(500).json({ error: 'Internal server error.' });
@@ -1919,12 +2473,17 @@ app.get('/api/users/:id/avatar', async (req, res) => {
 app.get('/api/settings', requireAuth, async (req, res) => {
   const userId = req.session.userId;
   try {
-    const userRes = await pool.query('SELECT id, username, role, email, two_factor_email, two_factor_totp FROM users WHERE id = $1', [userId]);
-    const passkeysRes = await pool.query('SELECT id, created_at FROM passkeys WHERE user_id = $1', [userId]);
+    const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, two_factor_email, two_factor_totp FROM users WHERE id = $1', [userId]);
+    const passkeysRes = await pool.query('SELECT id, name, created_at FROM passkeys WHERE user_id = $1', [userId]);
     
+    const smtpHost = await getSetting('email_smtp_host');
+    const smtpTested = await getSetting('email_smtp_tested');
+    const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
+
     const data = {
       user: userRes.rows[0],
       passkeys: passkeysRes.rows,
+      emailConfigured: emailConfigured
     };
 
     if (req.session.role === 'admin') {
@@ -1940,6 +2499,43 @@ app.get('/api/settings', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Error fetching settings:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update Profile details
+app.post('/api/settings/profile', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+  const { first_name, last_name, username, email, display_real_name } = req.body;
+
+  if (!username || !email) {
+    return res.status(400).json({ error: 'Benutzername und E-Mail sind erforderlich.' });
+  }
+
+  try {
+    // Check conflicts
+    const conflictRes = await pool.query(
+      'SELECT id FROM users WHERE (username = $1 OR email = $2) AND id != $3',
+      [username, email, userId]
+    );
+
+    if (conflictRes.rows.length > 0) {
+      return res.status(400).json({ error: 'Benutzername oder E-Mail wird bereits von einem anderen Benutzer verwendet.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE users 
+       SET first_name = $1, last_name = $2, username = $3, email = $4, display_real_name = $5
+       WHERE id = $6 RETURNING id, username, role, email, first_name, last_name, display_real_name`,
+      [first_name || null, last_name || null, username, email, !!display_real_name, userId]
+    );
+
+    // Update session cache
+    req.session.username = username;
+
+    res.json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    console.error('Error updating profile settings:', err);
+    res.status(500).json({ error: 'Internal server error.' });
   }
 });
 
@@ -1997,7 +2593,7 @@ app.post('/api/settings/2fa/totp/setup', requireAuth, async (req, res) => {
     res.json({
       success: true,
       secret: secret.base32,
-      qrCodeUrl: `https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=${encodeURIComponent(secret.otpauth_url)}&choe=UTF-8`
+      otpauthUrl: secret.otpauth_url
     });
   } catch (err) {
     console.error('TOTP setup error:', err);
@@ -2096,6 +2692,57 @@ app.delete('/api/settings/passkeys/:id', requireAuth, async (req, res) => {
   }
 });
 
+// Helper to update the .env file with new configurations
+function updateEnvFile(configs) {
+  // Locate the .env file in the application working directory (mounted from host)
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) {
+    console.log('.env file does not exist, skipping environment write.');
+    return;
+  }
+
+  try {
+    let content = fs.readFileSync(envPath, 'utf8');
+    const lines = content.split('\n');
+
+    // Mapping of DB config keys to .env variable names
+    const mapping = {
+      registration_enabled: 'REGISTRATION_ENABLED',
+      sso_enabled: 'SSO_ENABLED',
+      sso_issuer_url: 'SSO_ISSUER_URL',
+      sso_client_id: 'SSO_CLIENT_ID',
+      sso_client_secret: 'SSO_CLIENT_SECRET',
+      email_smtp_host: 'EMAIL_SMTP_HOST',
+      email_smtp_port: 'EMAIL_SMTP_PORT',
+      email_smtp_user: 'EMAIL_SMTP_USER',
+      email_smtp_pass: 'EMAIL_SMTP_PASS',
+      email_from: 'EMAIL_FROM'
+    };
+
+    for (const [key, value] of Object.entries(configs)) {
+      const envKey = mapping[key];
+      if (!envKey) continue;
+
+      let found = false;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith(`${envKey}=`)) {
+          lines[i] = `${envKey}=${value}`;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        lines.push(`${envKey}=${value}`);
+      }
+    }
+
+    fs.writeFileSync(envPath, lines.join('\n'), 'utf8');
+  } catch (err) {
+    console.error('Error updating .env file:', err);
+  }
+}
+
 // Update Admin Configuration settings
 app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
   const configs = req.body;
@@ -2106,13 +2753,19 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
       await setSetting('email_smtp_tested', 'false');
     }
 
+    const activeConfigs = {};
     for (const [key, value] of Object.entries(configs)) {
       // Avoid overwriting password with placeholder
       if (key === 'email_smtp_pass' && value === '__placeholder__') {
         continue;
       }
       await setSetting(key, value);
+      activeConfigs[key] = value;
     }
+
+    // Write updates back to .env
+    updateEnvFile(activeConfigs);
+
     res.json({ success: true, message: 'System configurations updated.' });
   } catch (err) {
     console.error('Error updating admin config:', err);
@@ -2146,7 +2799,7 @@ app.post('/api/settings/admin/test-smtp', requireAdmin, async (req, res) => {
 app.get('/api/settings/admin/users', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT u.id, u.username, u.role, u.sso_provider, u.created_at, 
+      `SELECT u.id, u.username, u.role, u.sso_provider, u.created_at, u.first_name, u.last_name, u.email, u.is_active,
        (SELECT COUNT(*) FROM files WHERE owner_id = u.id) as file_count,
        (SELECT COALESCE(SUM(size), 0) FROM files WHERE owner_id = u.id AND is_folder = false) as storage_used
        FROM users u ORDER BY u.username ASC`
@@ -2158,13 +2811,43 @@ app.get('/api/settings/admin/users', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin User-Management: Update user role / Delete user
+// Admin User-Management: Create a new user
+app.post('/api/settings/admin/users', requireAdmin, async (req, res) => {
+  const { username, email, password, role } = req.body;
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'Benutzername, E-Mail und Passwort sind erforderlich.' });
+  }
+  
+  try {
+    const conflictRes = await pool.query('SELECT id FROM users WHERE username = $1 OR email = $2', [username, email]);
+    if (conflictRes.rows.length > 0) {
+      return res.status(400).json({ error: 'Benutzername oder E-Mail existiert bereits.' });
+    }
+    
+    const saltRounds = 10;
+    const password_hash = await bcrypt.hash(password, saltRounds);
+    const targetRole = role === 'admin' ? 'admin' : 'user';
+    
+    const result = await pool.query(
+      `INSERT INTO users (username, email, password_hash, role, is_verified, is_active) 
+       VALUES ($1, $2, $3, $4, true, true) RETURNING id, username, role, email`,
+      [username, email, password_hash, targetRole]
+    );
+    
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Admin create user error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin User-Management: Update user / Block user / Delete user / Reset password
 app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
   const targetUserId = parseInt(req.params.id);
   const { action, role } = req.body;
 
   if (targetUserId === req.session.userId) {
-    return res.status(400).json({ error: 'You cannot perform actions on your own account.' });
+    return res.status(400).json({ error: 'Du kannst keine Aktionen auf deinem eigenen Konto ausführen.' });
   }
 
   try {
@@ -2179,13 +2862,45 @@ app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
       }
       
       await pool.query('DELETE FROM users WHERE id = $1', [targetUserId]);
-      return res.json({ success: true, message: 'User and all files deleted.' });
+      return res.json({ success: true, message: 'Benutzer und alle seine Dateien wurden gelöscht.' });
     } else if (action === 'role' && role) {
       await pool.query('UPDATE users SET role = $1 WHERE id = $2', [role, targetUserId]);
-      return res.json({ success: true, message: 'User role updated.' });
+      return res.json({ success: true, message: 'Benutzerrolle aktualisiert.' });
+    } else if (action === 'toggle-status') {
+      const userRes = await pool.query('SELECT is_active FROM users WHERE id = $1', [targetUserId]);
+      if (userRes.rows.length === 0) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+      const currentActive = userRes.rows[0].is_active;
+      const newActive = !currentActive;
+      await pool.query('UPDATE users SET is_active = $1 WHERE id = $2', [newActive, targetUserId]);
+      return res.json({ success: true, message: newActive ? 'Benutzer entsperrt.' : 'Benutzer gesperrt.' });
+    } else if (action === 'reset-password') {
+      const smtpHost = await getSetting('email_smtp_host');
+      const smtpTested = await getSetting('email_smtp_tested');
+      const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
+      if (!emailConfigured) {
+        return res.status(400).json({ error: 'E-Mail-Server ist nicht eingerichtet oder getestet.' });
+      }
+
+      const userRes = await pool.query('SELECT username, email FROM users WHERE id = $1', [targetUserId]);
+      if (userRes.rows.length === 0) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+      const user = userRes.rows[0];
+      if (!user.email) return res.status(400).json({ error: 'Dieser Benutzer hat keine E-Mail-Adresse hinterlegt.' });
+
+      const tempPassword = crypto.randomBytes(6).toString('hex'); // 12 characters
+      const saltRounds = 10;
+      const hash = await bcrypt.hash(tempPassword, saltRounds);
+      await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, targetUserId]);
+
+      await sendMail({
+        to: user.email,
+        subject: 'myCloud - Passwort zurückgesetzt',
+        text: `Hallo ${user.username},\n\ndein Passwort wurde von einem Administrator zurückgesetzt.\nDein neues temporäres Passwort lautet: ${tempPassword}\n\nBitte melde dich an und ändere dein Passwort in den Einstellungen.`
+      });
+
+      return res.json({ success: true, message: 'Passwort erfolgreich zurückgesetzt und E-Mail versendet.' });
     }
 
-    res.status(400).json({ error: 'Invalid admin action.' });
+    res.status(400).json({ error: 'Ungültige Admin-Aktion.' });
   } catch (err) {
     console.error('Admin user-action error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -2206,12 +2921,178 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Background cleanup task for expired shares and self-destruct notes
+setInterval(async () => {
+  try {
+    const expiredSharesRes = await pool.query(
+      'SELECT id, file_id, slug FROM shares WHERE expires_at IS NOT NULL AND expires_at < NOW()'
+    );
+    
+    for (const share of expiredSharesRes.rows) {
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [share.file_id]);
+      if (fileRes.rows.length > 0) {
+        const file = fileRes.rows[0];
+        if (file.is_one_time_note) {
+          if (!file.is_folder) {
+            const filePath = path.join(UPLOADS_DIR, file.path);
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+            }
+          }
+          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+          console.log(`Background clean: Expired self-destruct note file ${file.name} deleted.`);
+          continue;
+        }
+      }
+      await pool.query('DELETE FROM shares WHERE id = $1', [share.id]);
+    }
+  } catch (err) {
+    console.error('Expired cleanup interval error:', err);
+  }
+}, 5 * 60 * 1000); // Run every 5 minutes
+
 // Start Database & Express Server
+const WebSocket = require('ws');
+
+// Rooms map: fileId -> Set of client sockets
+const collabRooms = new Map();
+
+function initWebSocket(server) {
+  const wss = new WebSocket.Server({ noServer: true });
+
+  server.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+      if (url.pathname === '/api/collab') {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit('connection', ws, request);
+        });
+      } else {
+        socket.destroy();
+      }
+    } catch (err) {
+      console.error('WebSocket upgrade error:', err);
+      socket.destroy();
+    }
+  });
+
+  wss.on('connection', (ws, request) => {
+    try {
+      const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+      const fileId = parseInt(url.searchParams.get('fileId'));
+      const username = url.searchParams.get('username') || 'Anonym';
+      const userId = url.searchParams.get('userId') || `guest_${Math.random().toString(36).substring(2, 11)}`;
+
+      if (!fileId) {
+        ws.close(1008, 'Missing fileId');
+        return;
+      }
+
+      ws.fileId = fileId;
+      ws.username = username;
+      ws.userId = userId;
+
+      // Assign a neat color
+      const colors = ['#00d2ff', '#ff5555', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c', '#8be9fd'];
+      let hash = 0;
+      for (let i = 0; i < userId.length; i++) {
+        hash = userId.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      ws.color = colors[Math.abs(hash) % colors.length];
+
+      if (!collabRooms.has(fileId)) {
+        collabRooms.set(fileId, new Set());
+      }
+      const room = collabRooms.get(fileId);
+      room.add(ws);
+
+      const getRoomUsersList = () => {
+        const list = [];
+        for (const client of room) {
+          list.push({
+            userId: client.userId,
+            username: client.username,
+            color: client.color
+          });
+        }
+        return list;
+      };
+
+      const broadcast = (data, excludeSelf = true) => {
+        const msg = JSON.stringify(data);
+        for (const client of room) {
+          if (client.readyState === WebSocket.OPEN) {
+            if (excludeSelf && client === ws) continue;
+            client.send(msg);
+          }
+        }
+      };
+
+      // Welcome message
+      ws.send(JSON.stringify({
+        type: 'init',
+        color: ws.color,
+        users: getRoomUsersList()
+      }));
+
+      // Broadcast join
+      broadcast({
+        type: 'user_joined',
+        userId: ws.userId,
+        username: ws.username,
+        color: ws.color,
+        users: getRoomUsersList()
+      }, true);
+
+      ws.on('message', (message) => {
+        try {
+          const data = JSON.parse(message);
+          if (data.type === 'edit') {
+            broadcast({
+              type: 'edit',
+              userId: ws.userId,
+              changes: data.changes
+            }, true);
+          } else if (data.type === 'cursor') {
+            broadcast({
+              type: 'cursor',
+              userId: ws.userId,
+              username: ws.username,
+              position: data.position,
+              selection: data.selection
+            }, true);
+          }
+        } catch (err) {
+          console.error('Collab socket message handling error:', err);
+        }
+      });
+
+      ws.on('close', () => {
+        room.delete(ws);
+        if (room.size === 0) {
+          collabRooms.delete(fileId);
+        } else {
+          broadcast({
+            type: 'user_left',
+            userId: ws.userId,
+            username: ws.username,
+            users: getRoomUsersList()
+          }, true);
+        }
+      });
+    } catch (err) {
+      console.error('WebSocket connection setup error:', err);
+      ws.close(1011, 'Internal connection setup error');
+    }
+  });
+}
+
 initDb()
   .then(() => {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`myCloud app is running on ${EXPECTED_ORIGIN}`);
     });
+    initWebSocket(server);
   })
   .catch(err => {
     console.error('Database connection failed, exiting...', err);

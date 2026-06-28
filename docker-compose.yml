@@ -24,11 +24,13 @@ services:
       - "${PORT:-3000}:3000"
     volumes:
       - uploads_data:/usr/src/app/uploads
+      - ./.env:/usr/src/app/.env
     depends_on:
       - db
     environment:
       DATABASE_URL: postgresql://${DB_USER:-mycloud}:${DB_PASSWORD:-mycloud_secure_password}@db:5432/${DB_NAME:-mycloud}
       SESSION_SECRET: ${SESSION_SECRET:-change_this_to_a_long_random_string}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
       EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST}
       EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT}
       EMAIL_SMTP_USER: ${EMAIL_SMTP_USER}
@@ -53,9 +55,11 @@ services:
       - "${EURO_OFFICE_PORT:-8080}:80"
     environment:
       JWT_ENABLED: "false"
+    entrypoint: ["/bin/sh", "-c", "cp /tmp/local.json /etc/euro-office/documentserver/local.json && exec /entrypoint.sh"]
     volumes:
       - eurooffice_data:/var/lib/euro-office/documentserver
       - eurooffice_logs:/var/log/euro-office/documentserver
+      - ./eurooffice-local.json:/tmp/local.json:ro
     networks:
       - mycloud_network
 

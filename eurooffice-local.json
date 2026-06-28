@@ -1,0 +1,64 @@
+{
+  "services": {
+    "CoAuthoring": {
+      "sql": {
+        "type": "postgres",
+        "dbHost": "localhost",
+        "dbPort": 5432,
+        "dbName": "eurooffice",
+        "dbUser": "eurooffice",
+        "dbPass": "eurooffice"
+      },
+      "token": {
+        "enable": {
+          "request": {
+            "inbox": false,
+            "outbox": false
+          },
+          "browser": false
+        },
+        "inbox": {
+          "header": "Authorization",
+          "inBody": false
+        },
+        "outbox": {
+          "header": "Authorization",
+          "inBody": false
+        }
+      },
+      "secret": {
+        "browser": {
+          "string": "zCCzr8hrHglJrzia8RSjnVX5UjtzbeUf"
+        },
+        "inbox": {
+          "string": "zCCzr8hrHglJrzia8RSjnVX5UjtzbeUf"
+        },
+        "outbox": {
+          "string": "zCCzr8hrHglJrzia8RSjnVX5UjtzbeUf"
+        },
+        "session": {
+          "string": "zCCzr8hrHglJrzia8RSjnVX5UjtzbeUf"
+        }
+      },
+      "redis": {
+        "host": "localhost",
+        "port": 6379
+      },
+      "request-filtering-agent": {
+        "allowPrivateIPAddress": true,
+        "allowMetaIPAddress": true
+      }
+    }
+  },
+  "rabbitmq": {
+    "url": "amqp://guest:guest@localhost"
+  },
+  "wopi": {
+    "enable": false
+  },
+  "storage": {
+    "fs": {
+      "secretString": "A8vKcNPNoWnMfF2YqLQ5"
+    }
+  }
+}
