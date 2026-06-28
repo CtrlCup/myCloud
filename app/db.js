@@ -68,6 +68,12 @@ async function initDb() {
       )
     `);
 
+    // Update shares table columns if not exists
+    await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)');
+    await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS max_downloads INTEGER');
+    await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS download_count INTEGER DEFAULT 0');
+    await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS only_upload BOOLEAN DEFAULT FALSE');
+
     // Settings Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS settings (
@@ -87,7 +93,10 @@ async function initDb() {
       { key: 'email_smtp_port', value: '587' },
       { key: 'email_smtp_user', value: '' },
       { key: 'email_smtp_pass', value: '' },
-      { key: 'email_from', value: 'noreply@mycloud.local' }
+      { key: 'email_from', value: 'noreply@mycloud.local' },
+      { key: 'cloud_name', value: 'myCloud' },
+      { key: 'cloud_tab_name', value: 'myCloud' },
+      { key: 'cloud_icon_path', value: '' }
     ];
 
     for (const seed of settingsSeeds) {

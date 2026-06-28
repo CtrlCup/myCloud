@@ -100,10 +100,13 @@ async function checkAuthStatus() {
   }
 }
 
+const adminView = document.getElementById('admin-view');
+
 function showView(viewName) {
   authView.style.display = 'none';
   dashboardView.style.display = 'none';
   settingsView.style.display = 'none';
+  if (adminView) adminView.style.display = 'none';
 
   if (viewName === 'auth') {
     authView.style.display = 'flex';
@@ -113,6 +116,14 @@ function showView(viewName) {
   } else if (viewName === 'settings') {
     settingsView.style.display = 'block';
     loadSettings();
+  } else if (viewName === 'admin') {
+    if (currentUser && currentUser.role === 'admin') {
+      if (adminView) adminView.style.display = 'block';
+      loadAdminSettings();
+    } else {
+      window.location.hash = '#dashboard';
+      showView('dashboard');
+    }
   }
   lucide.createIcons();
 }
@@ -125,6 +136,8 @@ window.addEventListener('hashchange', () => {
   } else if (currentUser) {
     if (hash === '#settings') {
       showView('settings');
+    } else if (hash === '#admin') {
+      showView('admin');
     } else {
       showView('dashboard');
     }
@@ -960,16 +973,24 @@ async function openShareModal(file) {
   shareCanDownloadCheck.checked = true;
   shareCanZipCheck.checked = true;
   shareExpiresInput.value = '';
+  document.getElementById('share-password').value = '';
+  document.getElementById('share-max-downloads').value = '';
+  document.getElementById('share-only-upload').checked = false;
+  document.getElementById('share-password-remove-container').style.display = 'none';
+  document.getElementById('share-password-remove').checked = false;
   deleteShareBtn.style.display = 'none';
   shareResultSection.style.display = 'none';
   document.getElementById('share-existing-id').value = '';
 
-  // Schreibrechte-Checkbox aktivieren/deaktivieren, falls es eine Datei ist (Schreiben auf Datei macht keinen Sinn, nur auf Ordner)
+  // Only Upload Container handle (only makes sense for folders)
+  const onlyUploadContainer = document.getElementById('share-only-upload-container');
   if (!file.is_folder) {
     shareCanWriteCheck.checked = false;
     shareCanWriteCheck.disabled = true;
+    if (onlyUploadContainer) onlyUploadContainer.style.display = 'none';
   } else {
     shareCanWriteCheck.disabled = false;
+    if (onlyUploadContainer) onlyUploadContainer.style.display = 'flex';
   }
 
   // Check if already shared
@@ -990,6 +1011,16 @@ async function openShareModal(file) {
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
         shareExpiresInput.value = diffDays;
       }
+
+      if (existing.password_hash) {
+        document.getElementById('share-password-remove-container').style.display = 'flex';
+      }
+
+      if (existing.max_downloads) {
+        document.getElementById('share-max-downloads').value = existing.max_downloads;
+      }
+
+      document.getElementById('share-only-upload').checked = existing.only_upload;
       
       deleteShareBtn.style.display = 'inline-flex';
       displayGeneratedLink(existing.slug);
@@ -1033,6 +1064,10 @@ shareForm.onsubmit = async (e) => {
     canDownload: shareCanDownloadCheck.checked,
     canZip: shareCanZipCheck.checked,
     expiresDays: shareExpiresInput.value ? parseInt(shareExpiresInput.value) : null,
+    password: document.getElementById('share-password').value || null,
+    maxDownloads: document.getElementById('share-max-downloads').value ? parseInt(document.getElementById('share-max-downloads').value) : null,
+    onlyUpload: document.getElementById('share-only-upload').checked,
+    removePassword: document.getElementById('share-password-remove').checked
   };
 
   const url = existingId ? `/api/shares/${existingId}` : '/api/shares';
@@ -1050,6 +1085,16 @@ shareForm.onsubmit = async (e) => {
       showToast(existingId ? 'Freigabe aktualisiert!' : 'Freigabe-Link erstellt!');
       document.getElementById('share-existing-id').value = data.id;
       deleteShareBtn.style.display = 'inline-flex';
+      
+      // Update password remove state
+      if (data.password_hash) {
+        document.getElementById('share-password-remove-container').style.display = 'flex';
+      } else {
+        document.getElementById('share-password-remove-container').style.display = 'none';
+        document.getElementById('share-password-remove').checked = false;
+      }
+      document.getElementById('share-password').value = ''; // clear input
+
       displayGeneratedLink(data.slug);
     } else {
       showToast(data.error);
@@ -1088,10 +1133,22 @@ deleteShareBtn.onclick = async () => {
    SETTINGS & ADMIN LOGIC
    ========================================================================== */
 // Sidebar navigation inside Settings
-document.querySelectorAll('.settings-nav-item').forEach(item => {
+document.querySelectorAll('#settings-nav .settings-nav-item').forEach(item => {
   item.onclick = () => {
-    document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
-    document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('#settings-nav .settings-nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('#settings-view .settings-section').forEach(s => s.classList.remove('active'));
+    
+    item.classList.add('active');
+    const targetSection = item.getAttribute('data-section');
+    document.getElementById(targetSection).classList.add('active');
+  };
+});
+
+// Sidebar navigation inside Admin
+document.querySelectorAll('#admin-nav .settings-nav-item').forEach(item => {
+  item.onclick = () => {
+    document.querySelectorAll('#admin-nav .settings-nav-item').forEach(i => i.classList.remove('active'));
+    document.querySelectorAll('#admin-view .settings-section').forEach(s => s.classList.remove('active'));
     
     item.classList.add('active');
     const targetSection = item.getAttribute('data-section');
@@ -1113,26 +1170,6 @@ async function loadSettings() {
     // Render passkeys
     renderPasskeyList(data.passkeys);
 
-    // If Admin, fill config inputs
-    if (currentUser.role === 'admin' && data.adminConfig) {
-      const conf = data.adminConfig;
-      document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
-      document.getElementById('admin-sso-enabled').checked = conf.sso_enabled === 'true';
-      document.getElementById('admin-sso-issuer').value = conf.sso_issuer_url || '';
-      document.getElementById('admin-sso-client-id').value = conf.sso_client_id || '';
-      document.getElementById('admin-sso-client-secret').value = conf.sso_client_secret_configured ? '__placeholder__' : '';
-      document.getElementById('admin-sso-redirect').value = `${window.location.origin}/auth/sso/callback`;
-      
-      document.getElementById('admin-smtp-host').value = conf.email_smtp_host || '';
-      document.getElementById('admin-smtp-port').value = conf.email_smtp_port || '';
-      document.getElementById('admin-smtp-user').value = conf.email_smtp_user || '';
-      document.getElementById('admin-smtp-pass').value = conf.email_smtp_pass_configured ? '__placeholder__' : '';
-      document.getElementById('admin-smtp-from').value = conf.email_from || '';
-
-      // Load Users List
-      loadAdminUsers();
-    }
-
     // Load Geteilte Links List
     loadUserShares();
 
@@ -1145,6 +1182,7 @@ async function loadSettings() {
 // Render User Passkeys
 function renderPasskeyList(passkeys) {
   const container = document.getElementById('passkey-list');
+  if (!container) return;
   container.innerHTML = '';
 
   if (passkeys.length === 0) {
@@ -1189,15 +1227,12 @@ function renderPasskeyList(passkeys) {
 // Register new Passkey
 document.getElementById('register-passkey-btn').onclick = async () => {
   try {
-    // 1. Get options from server
     const optionsRes = await fetch('/api/auth/passkey/register-options', { method: 'POST' });
     if (!optionsRes.ok) throw new Error('Registrierungsoptionen konnten nicht geholt werden.');
     const options = await optionsRes.json();
 
-    // 2. Start browser registration
     const credential = await SimpleWebAuthnBrowser.startRegistration(options);
 
-    // 3. Verify on server
     const verifyRes = await fetch('/api/auth/passkey/register-verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1242,27 +1277,45 @@ document.getElementById('change-password-form').onsubmit = async (e) => {
   }
 };
 
-// Admin Config Form Submit
-document.getElementById('admin-config-form').onsubmit = async (e) => {
-  e.preventDefault();
+async function loadAdminSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
 
-  const secretInput = document.getElementById('admin-sso-client-secret').value;
-  const smtpPassInput = document.getElementById('admin-smtp-pass').value;
+    if (currentUser.role === 'admin' && data.adminConfig) {
+      const conf = data.adminConfig;
+      
+      // Branding Sektion befüllen
+      document.getElementById('admin-cloud-name').value = conf.cloud_name || 'myCloud';
+      document.getElementById('admin-cloud-tab-name').value = conf.cloud_tab_name || 'myCloud';
+      document.getElementById('admin-icon-preview').src = `/api/public/branding/icon?t=${Date.now()}`;
 
-  const payload = {
-    registration_enabled: document.getElementById('admin-reg-enabled').checked ? 'true' : 'false',
-    sso_enabled: document.getElementById('admin-sso-enabled').checked ? 'true' : 'false',
-    sso_issuer_url: document.getElementById('admin-sso-issuer').value.trim(),
-    sso_client_id: document.getElementById('admin-sso-client-id').value.trim(),
-    sso_client_secret: secretInput === '__placeholder__' ? '__placeholder__' : secretInput,
-    
-    email_smtp_host: document.getElementById('admin-smtp-host').value.trim(),
-    email_smtp_port: document.getElementById('admin-smtp-port').value.trim(),
-    email_smtp_user: document.getElementById('admin-smtp-user').value.trim(),
-    email_smtp_pass: smtpPassInput === '__placeholder__' ? '__placeholder__' : smtpPassInput,
-    email_from: document.getElementById('admin-smtp-from').value.trim(),
-  };
+      // Systemeinstellungen befüllen
+      document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
+      document.getElementById('admin-sso-enabled').checked = conf.sso_enabled === 'true';
+      document.getElementById('admin-sso-issuer').value = conf.sso_issuer_url || '';
+      document.getElementById('admin-sso-client-id').value = conf.sso_client_id || '';
+      document.getElementById('admin-sso-client-secret').value = conf.sso_client_secret_configured ? '__placeholder__' : '';
+      document.getElementById('admin-sso-redirect').value = `${window.location.origin}/auth/sso/callback`;
+      
+      // SMTP befüllen
+      document.getElementById('admin-smtp-host').value = conf.email_smtp_host || '';
+      document.getElementById('admin-smtp-port').value = conf.email_smtp_port || '';
+      document.getElementById('admin-smtp-user').value = conf.email_smtp_user || '';
+      document.getElementById('admin-smtp-pass').value = conf.email_smtp_pass_configured ? '__placeholder__' : '';
+      document.getElementById('admin-smtp-from').value = conf.email_from || 'noreply@mycloud.local';
 
+      // Load Users List
+      loadAdminUsers();
+    }
+  } catch (err) {
+    console.error('Admin settings load error:', err);
+    showToast('Fehler beim Laden der Admin-Einstellungen.');
+  }
+}
+
+// Help method to save admin config payload
+async function saveAdminConfig(payload) {
   try {
     const res = await fetch('/api/settings/admin/config', {
       method: 'POST',
@@ -1271,16 +1324,85 @@ document.getElementById('admin-config-form').onsubmit = async (e) => {
     });
 
     if (res.ok) {
-      showToast('Systemkonfigurationen gespeichert.');
-      loadSettings();
+      showToast('Konfiguration erfolgreich gespeichert.');
+      loadAdminSettings();
     } else {
       const err = await res.json();
-      showToast(err.error);
+      showToast(err.error || 'Fehler beim Speichern.');
     }
   } catch (err) {
-    showToast('Fehler beim Speichern der Konfiguration.');
+    showToast('Verbindungsfehler beim Speichern.');
   }
+}
+
+// Submit Forms inside Admin View
+document.getElementById('admin-branding-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const payload = {
+    cloud_name: document.getElementById('admin-cloud-name').value.trim(),
+    cloud_tab_name: document.getElementById('admin-cloud-tab-name').value.trim()
+  };
+  await saveAdminConfig(payload);
+  loadBranding(); // Reload headers & document title instantly
 };
+
+document.getElementById('admin-system-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const secretInput = document.getElementById('admin-sso-client-secret').value;
+  const payload = {
+    registration_enabled: document.getElementById('admin-reg-enabled').checked ? 'true' : 'false',
+    sso_enabled: document.getElementById('admin-sso-enabled').checked ? 'true' : 'false',
+    sso_issuer_url: document.getElementById('admin-sso-issuer').value.trim(),
+    sso_client_id: document.getElementById('admin-sso-client-id').value.trim(),
+    sso_client_secret: secretInput === '__placeholder__' ? '__placeholder__' : secretInput
+  };
+  await saveAdminConfig(payload);
+};
+
+document.getElementById('admin-smtp-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const smtpPassInput = document.getElementById('admin-smtp-pass').value;
+  const payload = {
+    email_smtp_host: document.getElementById('admin-smtp-host').value.trim(),
+    email_smtp_port: document.getElementById('admin-smtp-port').value.trim(),
+    email_smtp_user: document.getElementById('admin-smtp-user').value.trim(),
+    email_smtp_pass: smtpPassInput === '__placeholder__' ? '__placeholder__' : smtpPassInput,
+    email_from: document.getElementById('admin-smtp-from').value.trim(),
+  };
+  await saveAdminConfig(payload);
+};
+
+// Admin Cloud Icon Upload Listener
+const adminIconInput = document.getElementById('admin-icon-upload-input');
+if (adminIconInput) {
+  adminIconInput.onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('icon', file);
+
+    showToast('Lade Cloud-Icon hoch...');
+
+    try {
+      const res = await fetch('/api/settings/admin/icon', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        showToast('Cloud-Icon erfolgreich geändert!');
+        loadAdminSettings();
+        loadBranding(); // Reload headers & document title instantly
+      } else {
+        showToast(data.error || 'Fehler beim Hochladen.');
+      }
+    } catch (err) {
+      showToast('Verbindungsfehler beim Icon-Upload.');
+    }
+  };
+}
 
 // Admin Test SMTP
 document.getElementById('test-smtp-btn').onclick = async () => {
@@ -1457,10 +1579,49 @@ async function loadUserShares() {
   }
 }
 
+// Load Branding configurations dynamically
+async function loadBranding() {
+  try {
+    const res = await fetch('/api/public/branding');
+    const data = await res.json();
+    
+    // Update Document Title
+    document.title = data.tabName || 'myCloud';
+
+    // Update Header and Login logos
+    const logoTexts = document.querySelectorAll('.logo');
+    logoTexts.forEach(logo => {
+      const name = data.name || 'myCloud';
+      const prefix = name.length > 2 ? name.slice(0, 2) : name;
+      const suffix = name.length > 2 ? name.slice(2) : '';
+      logo.innerHTML = `<i data-lucide="cloud"></i> ${prefix}<span>${suffix}</span>`;
+    });
+    lucide.createIcons();
+
+    // Update Favicon link
+    let favicon = document.querySelector('link[rel="icon"]');
+    if (!favicon) {
+      favicon = document.createElement('link');
+      favicon.rel = 'icon';
+      document.head.appendChild(favicon);
+    }
+    if (data.hasIcon) {
+      favicon.href = `/api/public/branding/icon?t=${Date.now()}`;
+    } else {
+      favicon.href = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="%2300d2ff"><path d="M75,45 C75,32 64,22 50,22 C40,22 31,28 27,37 C25,36 23,36 21,36 C10,36 2,44 2,55 C2,66 10,74 21,74 L75,74 C85,74 93,66 93,55 C93,45 85,37 75,37 C75,37 75,45 75,45 Z"/></svg>';
+    }
+  } catch (err) {
+    console.error('Error loading branding:', err);
+  }
+}
+
 /* ==========================================================================
    INITIALIZATION
    ========================================================================== */
 window.onload = () => {
+  // Load branding info
+  loadBranding();
+
   // Check reset password URL param
   const urlParams = new URLSearchParams(window.location.search);
   const resetToken = urlParams.get('token');
@@ -1470,6 +1631,14 @@ window.onload = () => {
   }
 
   checkAuthStatus();
+
+  // Admin back button
+  const adminBackBtn = document.getElementById('admin-back-to-dashboard-btn');
+  if (adminBackBtn) {
+    adminBackBtn.onclick = () => {
+      window.location.hash = '#dashboard';
+    };
+  }
 
   // Avatar Upload Listener
   const avatarInput = document.getElementById('avatar-upload-input');

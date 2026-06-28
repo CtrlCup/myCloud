@@ -148,7 +148,7 @@
       </div>
     </main>
 
-    <!-- 3. EINSTELLUNGS-ANSICHT -->
+    <!-- 3. EINSTELLUNGS-ANSICHT (Persönlich für jeden User) -->
     <main id="settings-view" class="card" style="display: none; padding: 2.5rem;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; border-bottom: 1px solid var(--color-border); padding-bottom: 1rem;">
         <h2>Einstellungen</h2>
@@ -159,15 +159,9 @@
       
       <div class="settings-layout">
         <!-- Sidebar Navigation -->
-        <aside class="settings-nav">
+        <aside class="settings-nav" id="settings-nav">
           <div class="settings-nav-item active" data-section="profile-settings">
             <i data-lucide="user"></i> Profil & Passkeys
-          </div>
-          <div class="settings-nav-item" data-section="admin-settings" id="admin-settings-tab" style="display: none;">
-            <i data-lucide="sliders"></i> Systemeinstellungen
-          </div>
-          <div class="settings-nav-item" data-section="admin-users" id="admin-users-tab" style="display: none;">
-            <i data-lucide="users"></i> Benutzerverwaltung
           </div>
           <div class="settings-nav-item" data-section="shares-settings">
             <i data-lucide="link"></i> Geteilte Links
@@ -235,11 +229,98 @@
             </div>
           </section>
 
-          <!-- Section 2: Admin Systemeinstellungen -->
-          <section id="admin-settings" class="settings-section">
-            <form id="admin-config-form">
+          <!-- Section 2: Geteilte Links -->
+          <section id="shares-settings" class="settings-section">
+            <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Element</th>
+                    <th>Typ</th>
+                    <th>Link (Slug)</th>
+                    <th>Rechte</th>
+                    <th>Ablaufdatum</th>
+                    <th>Aktion</th>
+                  </tr>
+                </thead>
+                <tbody id="user-shares-list">
+                  <!-- Dynamisch generiert -->
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </main>
+
+    <!-- 4. ADMIN-ANSICHT (Nur für Administratoren) -->
+    <main id="admin-view" class="card" style="display: none; padding: 2.5rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; border-bottom: 1px solid var(--color-border); padding-bottom: 1rem;">
+        <h2>Admin-Einstellungen</h2>
+        <button class="btn" id="admin-back-to-dashboard-btn">
+          <i data-lucide="arrow-left"></i> Zurück zum Dashboard
+        </button>
+      </div>
+      
+      <div class="settings-layout">
+        <!-- Sidebar Navigation -->
+        <aside class="settings-nav" id="admin-nav">
+          <div class="settings-nav-item active" data-section="admin-branding">
+            <i data-lucide="palette"></i> Design & Branding
+          </div>
+          <div class="settings-nav-item" data-section="admin-system">
+            <i data-lucide="sliders"></i> Systemeinstellungen
+          </div>
+          <div class="settings-nav-item" data-section="admin-smtp">
+            <i data-lucide="mail"></i> E-Mail Service (SMTP)
+          </div>
+          <div class="settings-nav-item" data-section="admin-users">
+            <i data-lucide="users"></i> Benutzerverwaltung
+          </div>
+        </aside>
+
+        <!-- Content Bereich -->
+        <div class="settings-content">
+          
+          <!-- Section 1: Cloud Branding -->
+          <section id="admin-branding" class="settings-section active">
+            <form id="admin-branding-form">
               <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
-                <h3>Allgemein</h3>
+                <h3>Cloud Name & Design</h3>
+                <div class="form-group" style="margin-top: 1.5rem;">
+                  <label for="admin-cloud-name">Cloud-Name</label>
+                  <input type="text" id="admin-cloud-name" class="form-control" placeholder="myCloud" required>
+                </div>
+                <div class="form-group">
+                  <label for="admin-cloud-tab-name">Browser-Tab Name (Titel)</label>
+                  <input type="text" id="admin-cloud-tab-name" class="form-control" placeholder="myCloud" required>
+                </div>
+              </div>
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>Cloud-Icon / Logo ändern</h3>
+                <div style="display: flex; align-items: center; gap: 1.5rem; margin-top: 1.5rem; flex-wrap: wrap;">
+                  <img id="admin-icon-preview" class="user-avatar-large" src="/api/public/branding/icon" alt="Cloud Icon" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 100 100\' fill=\'%2300d2ff\'><path d=\'M75,45 C75,32 64,22 50,22 C40,22 31,28 27,37 C25,36 23,36 21,36 C10,36 2,44 2,55 C2,66 10,74 21,74 L75,74 C85,74 93,66 93,55 C93,45 85,37 75,37 C75,37 75,45 75,45 Z\'/></svg>'">
+                  <div>
+                    <label class="btn btn-primary" style="margin: 0; cursor: pointer;">
+                      <i data-lucide="image"></i> Icon hochladen
+                      <input type="file" id="admin-icon-upload-input" style="display: none;" accept="image/*">
+                    </label>
+                    <p style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.5rem;">Unterstützt PNG, JPG oder SVG. Max. 1 MB.</p>
+                  </div>
+                </div>
+              </div>
+              <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
+                Branding speichern
+              </button>
+            </form>
+          </section>
+
+          <!-- Section 2: Systemeinstellungen -->
+          <section id="admin-system" class="settings-section">
+            <form id="admin-system-form">
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>Registrierung</h3>
                 <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem;">
                   <div>
                     <strong style="display: block;">Registrierung erlauben</strong>
@@ -281,10 +362,18 @@
                   <input type="text" id="admin-sso-redirect" class="form-control" readonly>
                 </div>
               </div>
+              <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
+                Systemkonfigurationen speichern
+              </button>
+            </form>
+          </section>
 
+          <!-- Section 3: SMTP Einstellungen -->
+          <section id="admin-smtp" class="settings-section">
+            <form id="admin-smtp-form">
               <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
                 <h3>E-Mail Service (SMTP)</h3>
-                <div class="form-group">
+                <div class="form-group" style="margin-top: 1.5rem;">
                   <label for="admin-smtp-host">SMTP Host</label>
                   <input type="text" id="admin-smtp-host" class="form-control" placeholder="smtp.mailtrap.io">
                 </div>
@@ -313,14 +402,13 @@
                   <button type="button" class="btn" id="test-smtp-btn">SMTP testen</button>
                 </div>
               </div>
-
               <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
-                Systemkonfigurationen speichern
+                SMTP-Konfiguration speichern
               </button>
             </form>
           </section>
 
-          <!-- Section 3: Admin Benutzerverwaltung -->
+          <!-- Section 4: Benutzerverwaltung -->
           <section id="admin-users" class="settings-section">
             <div class="table-container">
               <table>
@@ -335,27 +423,6 @@
                   </tr>
                 </thead>
                 <tbody id="admin-user-list">
-                  <!-- Dynamisch generiert -->
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <!-- Section 4: Geteilte Links -->
-          <section id="shares-settings" class="settings-section">
-            <div class="table-container">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Element</th>
-                    <th>Typ</th>
-                    <th>Link (Slug)</th>
-                    <th>Rechte</th>
-                    <th>Ablaufdatum</th>
-                    <th>Aktion</th>
-                  </tr>
-                </thead>
-                <tbody id="user-shares-list">
                   <!-- Dynamisch generiert -->
                 </tbody>
               </table>
@@ -400,6 +467,11 @@
             <span>Dateien hochladen (Schreibrechte)</span>
           </label>
           
+          <label id="share-only-upload-container" style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer; padding-left: 1.5rem;">
+            <input type="checkbox" id="share-only-upload">
+            <span>Nur-Hochladen (Dateien-Abgabe, Besucher sieht keine Inhalte)</span>
+          </label>
+          
           <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
             <input type="checkbox" id="share-can-download" checked>
             <span>Dateien herunterladen</span>
@@ -414,6 +486,19 @@
         <div class="form-group">
           <label for="share-expires">Ablaufdatum (Tage)</label>
           <input type="number" id="share-expires" class="form-control" placeholder="Nie (leer lassen)" min="1">
+        </div>
+
+        <div class="form-group">
+          <label for="share-password">Passwortschutz</label>
+          <input type="password" id="share-password" class="form-control" placeholder="Optionales Passwort eingeben/ändern">
+          <label id="share-password-remove-container" style="display: none; align-items: center; gap: 0.5rem; margin-top: 0.5rem; cursor: pointer; font-size: 0.85rem; color: #ff5555;">
+            <input type="checkbox" id="share-password-remove"> Passwortschutz entfernen
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label for="share-max-downloads">Automatisches Deaktivieren nach X Klicks/Downloads</label>
+          <input type="number" id="share-max-downloads" class="form-control" placeholder="Unbegrenzt" min="1">
         </div>
 
         <div class="form-actions" style="margin-top: 1.5rem;">

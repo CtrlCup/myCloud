@@ -917,7 +917,7 @@ app.post('/api/files/create-empty', requireAuth, async (req, res) => {
 
 // Create a share link
 app.post('/api/shares', requireAuth, async (req, res) => {
-  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays } = req.body;
+  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload } = req.body;
   const userId = req.session.userId;
 
   try {
@@ -942,10 +942,14 @@ app.post('/api/shares', requireAuth, async (req, res) => {
       expiresAt.setDate(expiresAt.getDate() + parseInt(expiresDays));
     }
 
+    const passwordHash = password ? await bcrypt.hash(password, 10) : null;
+    const maxDownloadsVal = maxDownloads ? parseInt(maxDownloads) : null;
+    const onlyUploadVal = onlyUpload === true;
+
     const result = await pool.query(
-      `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt]
+      `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, password_hash, max_downloads, only_upload) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal]
     );
 
     res.status(201).json(result.rows[0]);
@@ -958,7 +962,7 @@ app.post('/api/shares', requireAuth, async (req, res) => {
 // Update an existing share link
 app.put('/api/shares/:id', requireAuth, async (req, res) => {
   const shareId = parseInt(req.params.id);
-  const { customSlug, canRead, canWrite, canDownload, canZip, expiresDays } = req.body;
+  const { customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, removePassword } = req.body;
   const userId = req.session.userId;
 
   try {
@@ -995,11 +999,28 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
       }
     }
 
+    let passwordHash = share.password_hash;
+    if (removePassword) {
+      passwordHash = null;
+    } else if (password) {
+      passwordHash = await bcrypt.hash(password, 10);
+    }
+
+    const maxDownloadsVal = (maxDownloads !== undefined) 
+      ? (maxDownloads ? parseInt(maxDownloads) : null) 
+      : share.max_downloads;
+
+    const onlyUploadVal = (onlyUpload !== undefined) 
+      ? (onlyUpload === true) 
+      : share.only_upload;
+
     const result = await pool.query(
       `UPDATE shares 
-       SET slug = $1, can_read = $2, can_write = $3, can_download = $4, can_zip = $5, expires_at = $6 
-       WHERE id = $7 RETURNING *`,
-      [slug, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, shareId]
+       SET slug = $1, can_read = $2, can_write = $3, can_download = $4, can_zip = $5, expires_at = $6,
+           password_hash = $7, max_downloads = $8, only_upload = $9 
+       WHERE id = $10 RETURNING *`,
+      [slug, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, 
+       passwordHash, maxDownloadsVal, onlyUploadVal, shareId]
     );
 
     res.json(result.rows[0]);
@@ -1051,6 +1072,61 @@ app.get('/api/shares', requireAuth, async (req, res) => {
   }
 });
 
+// Get Branding Config
+app.get('/api/public/branding', async (req, res) => {
+  try {
+    const name = await getSetting('cloud_name') || 'myCloud';
+    const tabName = await getSetting('cloud_tab_name') || 'myCloud';
+    const hasIcon = await getSetting('cloud_icon_path') ? true : false;
+    res.json({ name, tabName, hasIcon });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get Cloud Icon
+app.get('/api/public/branding/icon', async (req, res) => {
+  try {
+    const iconPath = await getSetting('cloud_icon_path');
+    if (iconPath) {
+      const filePath = path.join(UPLOADS_DIR, iconPath);
+      if (fs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+    }
+    res.status(404).send('Icon not found');
+  } catch (err) {
+    res.status(500).send('Internal server error');
+  }
+});
+
+// Upload Cloud Icon (Admin only)
+app.post('/api/settings/admin/icon', requireAdmin, upload.single('icon'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No icon file provided.' });
+  }
+
+  try {
+    const oldIcon = await getSetting('cloud_icon_path');
+    await setSetting('cloud_icon_path', req.file.filename);
+
+    if (oldIcon) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldIcon);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+
+    res.json({ success: true, iconUrl: `/api/public/branding/icon?t=${Date.now()}` });
+  } catch (err) {
+    console.error('Error saving admin icon:', err);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Public Share API - Fetch share metadata & files
 app.get('/api/public/shares/:slug', async (req, res) => {
   const { slug } = req.params;
@@ -1067,6 +1143,11 @@ app.get('/api/public/shares/:slug', async (req, res) => {
       return res.status(410).json({ error: 'This share link has expired.' });
     }
 
+    // Check download limit
+    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    }
+
     // Get the base file/folder shared
     const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id FROM files WHERE id = $1', [share.file_id]);
     if (baseFileRes.rows.length === 0) {
@@ -1074,6 +1155,22 @@ app.get('/api/public/shares/:slug', async (req, res) => {
     }
 
     const baseFile = baseFileRes.rows[0];
+
+    // Check password protection
+    const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
+    if (share.password_hash && !isUnlocked) {
+      return res.json({
+        share: {
+          slug: share.slug,
+          passwordRequired: true,
+        },
+        baseFile: {
+          id: baseFile.id,
+          name: baseFile.is_folder ? 'Geschützter Ordner' : 'Geschützte Datei',
+          is_folder: baseFile.is_folder,
+        }
+      });
+    }
 
     // Determine current folder we are viewing
     let currentFolderId = baseFile.id;
@@ -1100,14 +1197,17 @@ app.get('/api/public/shares/:slug', async (req, res) => {
 
     // List files inside the current folder
     let files = [];
-    if (baseFile.is_folder) {
+    if (share.only_upload && baseFile.is_folder) {
+      // "Only Upload" Mode: Return empty list, user can't see files
+      files = [];
+    } else if (baseFile.is_folder) {
       const filesRes = await pool.query(
         'SELECT id, name, size, is_folder, mime_type, created_at, parent_id FROM files WHERE parent_id = $1 ORDER BY is_folder DESC, name ASC',
         [currentFolderId]
       );
       files = filesRes.rows;
     } else {
-      files = [baseFile];
+      files = share.only_upload ? [] : [baseFile];
     }
 
     res.json({
@@ -1118,6 +1218,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         can_download: share.can_download,
         can_zip: share.can_zip,
         expires_at: share.expires_at,
+        only_upload: share.only_upload,
       },
       baseFile: {
         id: baseFile.id,
@@ -1133,6 +1234,38 @@ app.get('/api/public/shares/:slug', async (req, res) => {
   }
 });
 
+// Unlock password protected share
+app.post('/api/public/shares/:slug/unlock', async (req, res) => {
+  const { slug } = req.params;
+  const { password } = req.body;
+
+  try {
+    const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
+    if (shareRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Share link not found.' });
+    }
+
+    const share = shareRes.rows[0];
+    if (!share.password_hash) {
+      return res.json({ success: true, message: 'Share is not password protected.' });
+    }
+
+    const isValid = await bcrypt.compare(password || '', share.password_hash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Falsches Passwort.' });
+    }
+
+    req.session.unlockedShares = req.session.unlockedShares || {};
+    req.session.unlockedShares[slug] = true;
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error unlocking share:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
 // Public Share Download - Single file
 app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
   const { slug, fileId } = req.params;
@@ -1146,6 +1279,17 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
       return res.status(410).json({ error: 'Share has expired.' });
     }
     if (!share.can_download) return res.status(403).json({ error: 'Download permissions denied.' });
+
+    // Check download limit
+    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    }
+
+    // Check password protection
+    const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
+    if (share.password_hash && !isUnlocked) {
+      return res.status(401).json({ error: 'Password required.' });
+    }
 
     // Verify fileId is either the shared file or a descendant of the shared folder
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [parseInt(fileId)]);
@@ -1170,6 +1314,9 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found.' });
+
+    // Increment download count
+    await pool.query('UPDATE shares SET download_count = download_count + 1 WHERE id = $1', [share.id]);
 
     res.download(filePath, file.name);
   } catch (err) {
@@ -1200,6 +1347,13 @@ app.post('/api/public/shares/:slug/upload', upload.single('file'), async (req, r
     if (!share.can_write) {
       fs.unlinkSync(req.file.path);
       return res.status(403).json({ error: 'Upload permissions denied.' });
+    }
+
+    // Check password protection
+    const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
+    if (share.password_hash && !isUnlocked) {
+      fs.unlinkSync(req.file.path);
+      return res.status(401).json({ error: 'Password required.' });
     }
 
     // Verify parentId is descendant of shared folder
@@ -1255,6 +1409,17 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     }
     if (!share.can_zip) return res.status(403).json({ error: 'ZIP Download permissions denied.' });
 
+    // Check download limit
+    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    }
+
+    // Check password protection
+    const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
+    if (share.password_hash && !isUnlocked) {
+      return res.status(401).json({ error: 'Password required.' });
+    }
+
     // Verify folderId is or is descendant of share.file_id
     const targetFolderRes = await pool.query('SELECT * FROM files WHERE id = $1 AND is_folder = true', [parseInt(folderId)]);
     if (targetFolderRes.rows.length === 0) return res.status(404).json({ error: 'Folder not found.' });
@@ -1274,6 +1439,9 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     }
 
     if (!isValid) return res.status(403).json({ error: 'Access denied.' });
+
+    // Increment download count
+    await pool.query('UPDATE shares SET download_count = download_count + 1 WHERE id = $1', [share.id]);
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(targetFolder.name)}.zip"`);

@@ -27,7 +27,22 @@
     </header>
 
     <!-- CONTENT -->
-    <main class="explorer">
+    <!-- Passwort-Bereich -->
+    <div class="card" id="password-block-view" style="display: none; max-width: 500px; margin: 6rem auto; padding: 2.5rem; text-align: center;">
+      <i data-lucide="lock" style="width: 48px; height: 48px; color: var(--color-accent); margin-bottom: 1rem;"></i>
+      <h3>Freigabe ist passwortgeschützt</h3>
+      <p style="color: var(--color-text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">Bitte gib das Passwort ein, um auf die freigegebenen Dateien zuzugreifen.</p>
+      <form id="password-unlock-form">
+        <div class="form-group">
+          <input type="password" id="share-pass-input" class="form-control" placeholder="Passwort eingeben" required style="text-align: center;">
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center; margin-top: 1rem;">
+          <i data-lucide="unlock"></i> Freischalten
+        </button>
+      </form>
+    </div>
+
+    <main class="explorer" id="main-explorer">
       
       <!-- Geteilte Ordner Info -->
       <div class="card" id="share-meta-card" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
@@ -47,7 +62,7 @@
       </div>
 
       <!-- Toolbar -->
-      <div class="toolbar">
+      <div class="toolbar" id="share-toolbar">
         <div class="breadcrumbs" id="share-breadcrumbs">
           <!-- Dynamisch -->
         </div>
@@ -61,9 +76,9 @@
       </div>
 
       <!-- Dropzone (nur sichtbar bei Schreibrechten) -->
-      <div id="public-dropzone" class="dropzone" style="display: none;">
-        <i data-lucide="upload-cloud" style="width: 48px; height: 48px; color: var(--color-accent); margin-bottom: 0.5rem;"></i>
-        <p>Dateien per Drag & Drop in diese Freigabe hochladen</p>
+      <div id="public-dropzone" class="dropzone" style="display: none; padding: 4rem 2rem;">
+        <i data-lucide="upload-cloud" style="width: 56px; height: 56px; color: var(--color-accent); margin-bottom: 0.5rem;"></i>
+        <p id="dropzone-text">Dateien per Drag & Drop in diese Freigabe hochladen</p>
       </div>
 
       <!-- Dateiliste -->
@@ -121,6 +136,18 @@
 
         const data = await res.json();
         shareConfig = data.share;
+
+        // Check if password required
+        if (shareConfig.passwordRequired) {
+          document.getElementById('password-block-view').style.display = 'block';
+          document.getElementById('main-explorer').style.display = 'none';
+          lucide.createIcons();
+          return;
+        } else {
+          document.getElementById('password-block-view').style.display = 'none';
+          document.getElementById('main-explorer').style.display = 'block';
+        }
+
         currentFolderId = data.currentFolderId;
 
         // Render Meta Info
@@ -128,37 +155,58 @@
           <i data-lucide="${data.baseFile.is_folder ? 'folder' : 'file'}"></i> ${data.baseFile.name}
         `;
         
+        // Only-Upload / File-Drop check
+        const isOnlyUpload = shareConfig.only_upload === true;
+
         // Badges
         const badges = [];
-        if (shareConfig.can_read) badges.push('<span class="badge">Lesen</span>');
-        if (shareConfig.can_write) badges.push('<span class="badge">Schreiben/Hochladen</span>');
-        if (shareConfig.can_download) badges.push('<span class="badge">Download</span>');
-        if (shareConfig.can_zip) badges.push('<span class="badge">ZIP-Export</span>');
+        if (isOnlyUpload) {
+          badges.push('<span class="badge" style="background: rgba(0, 210, 255, 0.15); border-color: var(--color-accent);">Nur-Hochladen (Abgabe-Ordner)</span>');
+        } else {
+          if (shareConfig.can_read) badges.push('<span class="badge">Lesen</span>');
+          if (shareConfig.can_write) badges.push('<span class="badge">Schreiben/Hochladen</span>');
+          if (shareConfig.can_download) badges.push('<span class="badge">Download</span>');
+          if (shareConfig.can_zip) badges.push('<span class="badge">ZIP-Export</span>');
+        }
         document.getElementById('share-permissions-badges').innerHTML = badges.join('');
 
         // ZIP-Download Button anzeigen
-        if (shareConfig.can_zip && data.baseFile.is_folder) {
+        if (shareConfig.can_zip && data.baseFile.is_folder && !isOnlyUpload) {
           const zipBtn = document.getElementById('download-all-zip-btn');
           zipBtn.style.display = 'inline-flex';
           zipBtn.onclick = () => {
             window.location.href = `/api/public/shares/${slug}/download-zip/${currentFolderId}`;
           };
+        } else {
+          document.getElementById('download-all-zip-btn').style.display = 'none';
         }
 
         // Schreibrechte aktivieren
         if (shareConfig.can_write && data.baseFile.is_folder) {
           document.getElementById('public-upload-label').style.display = 'inline-flex';
           document.getElementById('public-dropzone').style.display = 'block';
+          if (isOnlyUpload) {
+            document.getElementById('dropzone-text').textContent = 'Dateien ablegen, um sie anonym abzugeben';
+          } else {
+            document.getElementById('dropzone-text').textContent = 'Dateien per Drag & Drop in diese Freigabe hochladen';
+          }
         } else {
           document.getElementById('public-upload-label').style.display = 'none';
           document.getElementById('public-dropzone').style.display = 'none';
         }
 
-        // Update Breadcrumbs
-        updateBreadcrumbs(data.baseFile, currentFolderId);
-
-        // Render Files
-        renderFiles(data.files);
+        // Layout elements visibility based on Only-Upload
+        if (isOnlyUpload) {
+          document.getElementById('share-toolbar').style.display = 'none';
+          document.getElementById('public-file-grid').style.display = 'none';
+        } else {
+          document.getElementById('share-toolbar').style.display = 'flex';
+          document.getElementById('public-file-grid').style.display = 'grid';
+          // Update Breadcrumbs
+          updateBreadcrumbs(data.baseFile, currentFolderId);
+          // Render Files
+          renderFiles(data.files);
+        }
         
         lucide.createIcons();
       } catch (err) {
@@ -166,6 +214,30 @@
         showToast('Fehler beim Verbinden mit dem Server.');
       }
     }
+
+    // Unlock form event handler
+    document.getElementById('password-unlock-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const password = document.getElementById('share-pass-input').value;
+
+      try {
+        const res = await fetch(`/api/public/shares/${slug}/unlock`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+
+        if (res.ok) {
+          document.getElementById('share-pass-input').value = '';
+          loadShareData();
+        } else {
+          const err = await res.json();
+          showToast(err.error || 'Falsches Passwort.');
+        }
+      } catch (err) {
+        showToast('Verbindungsfehler.');
+      }
+    };
 
     // Breadcrumbs generieren
     function updateBreadcrumbs(baseFile, activeId) {
