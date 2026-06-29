@@ -8,6 +8,8 @@ let selectedFileIds = [];
 let renderedFilesList = [];
 let lastSelectedId = null; // Für Shift-Auswahl
 let viewMode = localStorage.getItem('viewMode') || 'grid';
+let gridSizeIndex = parseInt(localStorage.getItem('gridSizeIndex') || '2');
+let listSizeIndex = parseInt(localStorage.getItem('listSizeIndex') || '2');
 let isEmailConfigured = false;
 let clickTimeout = null;
 let clickTimeoutFileId = null;
@@ -647,6 +649,22 @@ function renderBreadcrumbs() {
   });
 }
 
+function applyLayoutDensity() {
+  const grid = document.getElementById('file-grid');
+  if (!grid) return;
+
+  grid.classList.remove('grid-xs', 'grid-sm', 'grid-md', 'grid-lg', 'grid-xl');
+  grid.classList.remove('list-xs', 'list-sm', 'list-md', 'list-lg', 'list-xl');
+
+  if (viewMode === 'grid') {
+    const sizeClasses = ['grid-xs', 'grid-sm', 'grid-md', 'grid-lg', 'grid-xl'];
+    grid.classList.add(sizeClasses[gridSizeIndex]);
+  } else {
+    const sizeClasses = ['list-xs', 'list-sm', 'list-md', 'list-lg', 'list-xl'];
+    grid.classList.add(sizeClasses[listSizeIndex]);
+  }
+}
+
 function renderFiles(files) {
   renderedFilesList = files;
   const grid = document.getElementById('file-grid');
@@ -657,6 +675,7 @@ function renderFiles(files) {
   } else {
     grid.classList.remove('list-view');
   }
+  applyLayoutDensity();
 
   if (files.length === 0) {
     grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--color-text-muted); padding: 3rem 0;">Dieser Ordner ist leer.</div>`;
@@ -3080,15 +3099,29 @@ window.onload = () => {
   if (gridBtn && listBtn) {
     updateViewModeButtons();
     gridBtn.onclick = () => {
-      viewMode = 'grid';
-      localStorage.setItem('viewMode', 'grid');
-      updateViewModeButtons();
+      if (viewMode === 'grid') {
+        gridSizeIndex = (gridSizeIndex + 1) % 5;
+        localStorage.setItem('gridSizeIndex', gridSizeIndex);
+        const sizeNames = ['Sehr klein', 'Klein', 'Mittel', 'Groß', 'Sehr groß'];
+        showToast(`Kachelgröße: ${sizeNames[gridSizeIndex]}`);
+      } else {
+        viewMode = 'grid';
+        localStorage.setItem('viewMode', 'grid');
+        updateViewModeButtons();
+      }
       renderFiles(renderedFilesList);
     };
     listBtn.onclick = () => {
-      viewMode = 'list';
-      localStorage.setItem('viewMode', 'list');
-      updateViewModeButtons();
+      if (viewMode === 'list') {
+        listSizeIndex = (listSizeIndex + 1) % 5;
+        localStorage.setItem('listSizeIndex', listSizeIndex);
+        const spacingNames = ['Sehr kompakt', 'Kompakt', 'Normal', 'Bequem', 'Geräumig'];
+        showToast(`Listenabstand: ${spacingNames[listSizeIndex]}`);
+      } else {
+        viewMode = 'list';
+        localStorage.setItem('viewMode', 'list');
+        updateViewModeButtons();
+      }
       renderFiles(renderedFilesList);
     };
   }

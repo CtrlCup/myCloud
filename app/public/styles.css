@@ -1207,3 +1207,138 @@ tr:hover td {
 .file-item:active {
   transform: scale(0.97) translateY(-1px) !important;
 }
+
+/* Custom search deep checkbox switch styling */
+.search-container label:has(#dashboard-search-deep:checked) {
+  border-color: rgba(var(--color-accent-rgb), 0.5) !important;
+  background: rgba(var(--color-accent-rgb), 0.12) !important;
+  box-shadow: 0 0 8px rgba(var(--color-accent-rgb), 0.15);
+}
+.search-container #dashboard-search-deep:checked + .custom-indicator {
+  background: var(--color-accent) !important;
+  box-shadow: 0 0 8px var(--color-accent);
+}
+.search-container #dashboard-search-deep:checked ~ span {
+  color: var(--color-text) !important;
+}
+
+/* Layout Densities (Grid & List sizes) */
+
+/* Grid Densities */
+.file-grid.grid-xs {
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)) !important;
+  gap: 0.5rem !important;
+}
+.file-grid.grid-xs .file-item {
+  padding: 0.6rem 0.4rem !important;
+}
+.file-grid.grid-xs .file-name {
+  font-size: 0.8rem !important;
+}
+.file-grid.grid-xs .file-icon {
+  width: 32px !important;
+  height: 32px !important;
+}
+
+.file-grid.grid-sm {
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)) !important;
+  gap: 0.75rem !important;
+}
+.file-grid.grid-sm .file-item {
+  padding: 0.9rem 0.6rem !important;
+}
+.file-grid.grid-sm .file-name {
+  font-size: 0.85rem !important;
+}
+.file-grid.grid-sm .file-icon {
+  width: 40px !important;
+  height: 40px !important;
+}
+
+.file-grid.grid-md {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)) !important;
+  gap: 1rem !important;
+}
+
+.file-grid.grid-lg {
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)) !important;
+  gap: 1.25rem !important;
+}
+.file-grid.grid-lg .file-item {
+  padding: 1.6rem 1rem !important;
+}
+.file-grid.grid-lg .file-name {
+  font-size: 1.05rem !important;
+}
+.file-grid.grid-lg .file-icon {
+  width: 56px !important;
+  height: 56px !important;
+}
+
+.file-grid.grid-xl {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)) !important;
+  gap: 1.5rem !important;
+}
+.file-grid.grid-xl .file-item {
+  padding: 2rem 1.25rem !important;
+}
+.file-grid.grid-xl .file-name {
+  font-size: 1.15rem !important;
+}
+.file-grid.grid-xl .file-icon {
+  width: 64px !important;
+  height: 64px !important;
+}
+
+/* List Densities */
+.file-grid.list-xs {
+  gap: 0.15rem !important;
+}
+.file-grid.list-xs .file-item {
+  padding: 0.25rem 0.6rem !important;
+  font-size: 0.8rem !important;
+}
+.file-grid.list-xs .file-icon {
+  font-size: 1.1rem !important;
+}
+
+.file-grid.list-sm {
+  gap: 0.2rem !important;
+}
+.file-grid.list-sm .file-item {
+  padding: 0.4rem 0.8rem !important;
+  font-size: 0.85rem !important;
+}
+.file-grid.list-sm .file-icon {
+  font-size: 1.2rem !important;
+}
+
+.file-grid.list-md {
+  gap: 0.3rem !important;
+}
+.file-grid.list-md .file-item {
+  padding: 0.55rem 1rem !important;
+  font-size: 0.9rem !important;
+}
+
+.file-grid.list-lg {
+  gap: 0.4rem !important;
+}
+.file-grid.list-lg .file-item {
+  padding: 0.75rem 1.25rem !important;
+  font-size: 1rem !important;
+}
+.file-grid.list-lg .file-icon {
+  font-size: 1.4rem !important;
+}
+
+.file-grid.list-xl {
+  gap: 0.5rem !important;
+}
+.file-grid.list-xl .file-item {
+  padding: 1rem 1.5rem !important;
+  font-size: 1.1rem !important;
+}
+.file-grid.list-xl .file-icon {
+  font-size: 1.5rem !important;
+}

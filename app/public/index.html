@@ -116,10 +116,11 @@
           <!-- Search Input with Deep Search check -->
           <div class="search-container" style="position: relative; display: flex; align-items: center;">
             <i data-lucide="search" style="position: absolute; left: 0.75rem; width: 16px; height: 16px; color: var(--color-text-muted); pointer-events: none;"></i>
-            <input type="text" id="dashboard-search-input" class="form-control" placeholder="Suchen..." style="padding-left: 2.25rem; padding-right: 4rem; width: 220px; font-size: 0.85rem; height: 38px; border-radius: var(--radius-sm);">
-            <label style="position: absolute; right: 0.5rem; display: flex; align-items: center; gap: 0.25rem; font-size: 0.75rem; cursor: pointer; color: var(--color-text-muted); padding: 0.2rem 0.4rem; background: rgba(255,255,255,0.05); border-radius: 4px; border: 1px solid var(--glass-border);" title="Tiefensuche (OCR-PDFs & Textinhalte)">
-              <input type="checkbox" id="dashboard-search-deep" style="margin: 0; transform: scale(0.9);">
-              <span>Tief</span>
+            <input type="text" id="dashboard-search-input" class="form-control" placeholder="Suchen..." style="padding-left: 2.25rem; padding-right: 9.5rem; width: 320px; font-size: 0.85rem; height: 38px; border-radius: var(--radius-sm);">
+            <label style="position: absolute; right: 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.72rem; cursor: pointer; color: var(--color-text-muted); padding: 0.25rem 0.55rem; background: rgba(255,255,255,0.06); border-radius: 20px; border: 1px solid var(--glass-border); transition: all 0.2s ease; user-select: none;" title="Tiefensuche (OCR-PDFs & Textinhalte)">
+              <input type="checkbox" id="dashboard-search-deep" style="display: none;">
+              <span class="custom-indicator" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-muted); transition: all 0.2s ease;"></span>
+              <span style="font-weight: 500;">Intelligente Suche</span>
             </label>
           </div>
 
