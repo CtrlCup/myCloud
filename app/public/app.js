@@ -699,11 +699,21 @@ function renderFiles(files) {
                   <i data-lucide="${iconName}" style="display: none;"></i>`;
     }
 
+    const extVal = file.is_folder ? 'Ordner' : (file.name.split('.').pop().toLowerCase() || 'Datei');
+    const sizeStr = formatBytes(file.size);
+
     item.innerHTML = `
       <div class="file-item-checkbox"></div>
       <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
-      <div class="file-name" title="${file.name}">${file.name}</div>
-      <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
+      <div style="display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px;">
+        <div class="file-name" title="${file.name}" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.name}</div>
+        <div class="file-meta-list" style="display: none; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: var(--color-text-muted);">
+          <span class="file-ext-label" style="text-transform: uppercase; font-weight: 600; font-size: 0.7rem; background: rgba(var(--color-accent-rgb), 0.1); color: var(--color-accent); padding: 1px 4px; border-radius: 3px;">${extVal}</span>
+          <span>•</span>
+          <span>${sizeStr}</span>
+        </div>
+      </div>
+      <div class="file-info">${file.is_folder ? 'Ordner' : sizeStr}</div>
       <div class="file-actions">
         <button class="btn btn-icon btn-action-more" style="padding: 4px; background: var(--color-surface); border-radius: 4px;" title="Optionen">
           <i data-lucide="more-vertical" style="width: 16px; height: 16px;"></i>
@@ -801,6 +811,8 @@ function renderFiles(files) {
           openImageViewer(file.id, file.name);
         } else if (videoExts.includes(ext)) {
           openVideoViewer(file.id, file.name);
+        } else if (ext === 'pdf') {
+          openPdfViewer(file.id, file.name);
         } else if (codeExts.includes(ext)) {
           openCodeEditor(file.id, file.name);
         } else if (officeExts.includes(ext)) {
@@ -1641,8 +1653,8 @@ function setUploadWidgetState(state) {
     
     // Animate container size and shape
     container.style.borderRadius = '12px';
-    container.style.width = '360px';
-    container.style.height = '360px';
+    container.style.width = '480px';
+    container.style.height = '380px';
   } else {
     // Morph to minimized pill view
     panel.style.opacity = '0';
@@ -1760,6 +1772,58 @@ document.getElementById('multi-zip-btn').onclick = () => {
   clearSelection();
 };
 
+document.getElementById('multi-share-btn').onclick = async () => {
+  if (selectedFileIds.length === 0) return;
+
+  const folderName = await showInputPrompt(
+    'Ausgewählte Dateien teilen',
+    'Um mehrere Dateien zu teilen, wird ein neuer Ordner erstellt, in den die Dateien verschoben werden. Bitte gib einen Namen für den Freigabe-Ordner ein:',
+    'Geteilte Auswahl'
+  );
+
+  if (!folderName || !folderName.trim()) return;
+
+  try {
+    const createRes = await fetch('/api/files/folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: folderName.trim(),
+        parentId: currentFolderId
+      })
+    });
+
+    if (!createRes.ok) {
+      const err = await createRes.json();
+      showToast(err.error || 'Fehler beim Erstellen des Ordners.');
+      return;
+    }
+
+    const targetFolder = await createRes.json();
+
+    const moveRes = await fetch('/api/files/move-multiple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileIds: selectedFileIds,
+        targetFolderId: targetFolder.id
+      })
+    });
+
+    if (!moveRes.ok) {
+      showToast('Fehler beim Verschieben der Dateien in den Ordner.');
+      return;
+    }
+
+    clearSelection();
+    await loadFiles(currentFolderId);
+    openShareModal(targetFolder);
+  } catch (err) {
+    console.error('Error sharing multiple files:', err);
+    showToast('Fehler beim Ausführen der Aktion.');
+  }
+};
+
 // Fullscreen Drag & Drop on Dashboard
 const dragOverlay = document.getElementById('drag-overlay');
 const dashboard = document.getElementById('dashboard-view');
@@ -1806,10 +1870,25 @@ const shareSlugInput = document.getElementById('share-slug');
 const shareCanWriteCheck = document.getElementById('share-can-write');
 const shareCanDownloadCheck = document.getElementById('share-can-download');
 const shareCanZipCheck = document.getElementById('share-can-zip');
-const shareExpiresInput = document.getElementById('share-expires');
+const shareExpiryType = document.getElementById('share-expiry-type');
+const shareExpiryHoursInput = document.getElementById('share-expiry-hours');
+const shareExpiryDaysInput = document.getElementById('share-expiry-days');
+const shareExpiryCustomInput = document.getElementById('share-expiry-custom');
 const deleteShareBtn = document.getElementById('delete-share-btn');
 const shareResultSection = document.getElementById('share-result-section');
 const shareResultInput = document.getElementById('share-result-input');
+
+function updateShareExpiryUI() {
+  if (!shareExpiryType) return;
+  const type = shareExpiryType.value;
+  document.getElementById('share-expiry-hours-container').style.display = type === 'hours' ? 'block' : 'none';
+  document.getElementById('share-expiry-days-container').style.display = type === 'days' ? 'block' : 'none';
+  document.getElementById('share-expiry-custom-container').style.display = type === 'custom' ? 'block' : 'none';
+}
+
+if (shareExpiryType) {
+  shareExpiryType.onchange = updateShareExpiryUI;
+}
 
 async function openShareModal(file) {
   document.getElementById('share-file-id').value = file.id;
@@ -1821,7 +1900,12 @@ async function openShareModal(file) {
   shareCanWriteCheck.checked = false;
   shareCanDownloadCheck.checked = true;
   shareCanZipCheck.checked = true;
-  shareExpiresInput.value = '';
+  if (shareExpiryType) shareExpiryType.value = 'none';
+  if (shareExpiryHoursInput) shareExpiryHoursInput.value = '';
+  if (shareExpiryDaysInput) shareExpiryDaysInput.value = '';
+  if (shareExpiryCustomInput) shareExpiryCustomInput.value = '';
+  updateShareExpiryUI();
+  
   document.getElementById('share-password').value = '';
   document.getElementById('share-max-downloads').value = '';
   document.getElementById('share-only-upload').checked = false;
@@ -1833,13 +1917,16 @@ async function openShareModal(file) {
 
   // Only Upload Container handle (only makes sense for folders)
   const onlyUploadContainer = document.getElementById('share-only-upload-container');
-  if (!file.is_folder) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  const isCode = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'].includes(ext);
+
+  if (!file.is_folder && !isCode) {
     shareCanWriteCheck.checked = false;
     shareCanWriteCheck.disabled = true;
     if (onlyUploadContainer) onlyUploadContainer.style.display = 'none';
   } else {
     shareCanWriteCheck.disabled = false;
-    if (onlyUploadContainer) onlyUploadContainer.style.display = 'flex';
+    if (onlyUploadContainer) onlyUploadContainer.style.display = file.is_folder ? 'flex' : 'none';
   }
 
   // Check if already shared
@@ -1856,9 +1943,20 @@ async function openShareModal(file) {
       shareCanZipCheck.checked = existing.can_zip;
       
       if (existing.expires_at) {
-        const diffTime = Math.abs(new Date(existing.expires_at) - new Date());
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        shareExpiresInput.value = diffDays;
+        const expiryDate = new Date(existing.expires_at);
+        const year = expiryDate.getFullYear();
+        const month = String(expiryDate.getMonth() + 1).padStart(2, '0');
+        const day = String(expiryDate.getDate()).padStart(2, '0');
+        const hours = String(expiryDate.getHours()).padStart(2, '0');
+        const minutes = String(expiryDate.getMinutes()).padStart(2, '0');
+        
+        if (shareExpiryCustomInput) {
+          shareExpiryCustomInput.value = `${year}-${month}-${day}T${hours}:${minutes}`;
+        }
+        if (shareExpiryType) {
+          shareExpiryType.value = 'custom';
+        }
+        updateShareExpiryUI();
       }
 
       if (existing.password_hash) {
@@ -1907,6 +2005,22 @@ shareForm.onsubmit = async (e) => {
   const fileId = document.getElementById('share-file-id').value;
   const existingId = document.getElementById('share-existing-id').value;
   
+  let expiresAt = null;
+  if (shareExpiryType) {
+    const expType = shareExpiryType.value;
+    if (expType === 'hours' && shareExpiryHoursInput.value) {
+      const d = new Date();
+      d.setHours(d.getHours() + parseInt(shareExpiryHoursInput.value));
+      expiresAt = d.toISOString();
+    } else if (expType === 'days' && shareExpiryDaysInput.value) {
+      const d = new Date();
+      d.setDate(d.getDate() + parseInt(shareExpiryDaysInput.value));
+      expiresAt = d.toISOString();
+    } else if (expType === 'custom' && shareExpiryCustomInput.value) {
+      expiresAt = new Date(shareExpiryCustomInput.value).toISOString();
+    }
+  }
+
   const payload = {
     fileId: parseInt(fileId),
     customSlug: shareSlugInput.value.trim(),
@@ -1914,7 +2028,7 @@ shareForm.onsubmit = async (e) => {
     canWrite: shareCanWriteCheck.checked,
     canDownload: shareCanDownloadCheck.checked,
     canZip: shareCanZipCheck.checked,
-    expiresDays: shareExpiresInput.value ? parseInt(shareExpiresInput.value) : null,
+    expiresAt: expiresAt,
     password: document.getElementById('share-password').value || null,
     maxDownloads: document.getElementById('share-max-downloads').value ? parseInt(document.getElementById('share-max-downloads').value) : null,
     onlyUpload: document.getElementById('share-only-upload').checked,
@@ -3144,6 +3258,11 @@ window.addEventListener('keydown', (e) => {
       document.getElementById('close-video-viewer-btn').click();
       return;
     }
+    const pdfViewer = document.getElementById('pdf-viewer-overlay');
+    if (pdfViewer && pdfViewer.style.display !== 'none') {
+      document.getElementById('close-pdf-viewer-btn').click();
+      return;
+    }
 
     // 2. Close other overlays (except the main settings/admin views themselves)
     const activeOverlays = Array.from(document.querySelectorAll('.modal-overlay.active'))
@@ -3464,7 +3583,7 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     document.getElementById('code-editor-title').innerHTML = `<i data-lucide="file-code"></i> ${fileName}`;
     lucide.createIcons();
 
-    document.getElementById('code-editor-overlay').style.display = 'block';
+    document.getElementById('code-editor-overlay').classList.add('active');
     const collabContainer = document.getElementById('collab-users-container');
     if (collabContainer) {
       collabContainer.style.display = 'none';
@@ -3600,7 +3719,7 @@ document.getElementById('close-code-editor-btn').onclick = () => {
     monacoEditorInstance.dispose();
     monacoEditorInstance = null;
   }
-  document.getElementById('code-editor-overlay').style.display = 'none';
+  document.getElementById('code-editor-overlay').classList.remove('active');
   if (typeof loadFiles === 'function') {
     loadFiles(currentFolderId);
   } else {
@@ -3636,7 +3755,7 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
   
   img.style.display = 'none';
   loading.style.display = 'flex';
-  overlay.style.display = 'block';
+  overlay.classList.add('active');
 
   if (currentImageObjectUrl) {
     URL.revokeObjectURL(currentImageObjectUrl);
@@ -3691,7 +3810,7 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
 }
 
 document.getElementById('close-image-viewer-btn').onclick = () => {
-  document.getElementById('image-viewer-overlay').style.display = 'none';
+  document.getElementById('image-viewer-overlay').classList.remove('active');
   const img = document.getElementById('image-viewer-img');
   img.src = '';
   if (currentImageObjectUrl) {
@@ -3713,18 +3832,39 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
     : `/api/files/download/${fileId}`;
 
   player.src = sourceUrl;
-  overlay.style.display = 'block';
+  overlay.classList.add('active');
 }
 
 document.getElementById('close-video-viewer-btn').onclick = () => {
-  document.getElementById('video-viewer-overlay').style.display = 'none';
+  document.getElementById('video-viewer-overlay').classList.remove('active');
   const player = document.getElementById('video-viewer-player');
   player.pause();
   player.src = '';
 };
 
+function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
+  const overlay = document.getElementById('pdf-viewer-overlay');
+  const iframe = document.getElementById('pdf-viewer-iframe');
+  const title = document.getElementById('pdf-viewer-title');
+
+  title.innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
+  lucide.createIcons();
+
+  const sourceUrl = isPublic 
+    ? `/api/public/shares/${slug}/download/${fileId}`
+    : `/api/files/download/${fileId}`;
+
+  iframe.src = sourceUrl;
+  overlay.classList.add('active');
+}
+
+document.getElementById('close-pdf-viewer-btn').onclick = () => {
+  document.getElementById('pdf-viewer-overlay').classList.remove('active');
+  document.getElementById('pdf-viewer-iframe').src = '';
+};
+
 // Backdrop click close for new overlays
-['code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay'].forEach(id => {
+['code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay'].forEach(id => {
   const overlay = document.getElementById(id);
   if (overlay) {
     overlay.addEventListener('click', (e) => {
@@ -3735,6 +3875,8 @@ document.getElementById('close-video-viewer-btn').onclick = () => {
           document.getElementById('close-image-viewer-btn').click();
         } else if (id === 'video-viewer-overlay') {
           document.getElementById('close-video-viewer-btn').click();
+        } else if (id === 'pdf-viewer-overlay') {
+          document.getElementById('close-pdf-viewer-btn').click();
         }
       }
     });

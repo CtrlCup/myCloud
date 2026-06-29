@@ -163,15 +163,18 @@
           <i data-lucide="check-square" style="color: var(--color-accent); width: 20px; height: 20px;"></i>
           <span id="multi-selection-count">0 Elemente ausgewählt</span>
         </div>
-        <div style="display: flex; gap: 0.75rem;">
+        <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
           <button class="btn" id="multi-zip-btn">
             <i data-lucide="file-archive"></i> Als ZIP laden
+          </button>
+          <button class="btn" id="multi-share-btn">
+            <i data-lucide="share-2"></i> Teilen
           </button>
           <button class="btn" id="multi-delete-btn" style="color: #ff5555; border-color: rgba(255,0,0,0.3);">
             <i data-lucide="trash-2"></i> Löschen
           </button>
           <button class="btn" id="multi-cancel-btn">
-            Auswahl aufheben
+            <i data-lucide="minus-square"></i> Auswahl aufheben
           </button>
         </div>
       </div>
@@ -673,13 +676,40 @@
         </div>
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
-          <div class="form-group" style="margin-bottom: 0;">
-            <label for="share-expires" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Ablaufdatum (Tage)</label>
-            <input type="number" id="share-expires" class="form-control" placeholder="Nie (leer)" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          <div class="form-group" style="margin-bottom: 0; display: flex; flex-direction: column;">
+            <label for="share-expiry-type" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Ablaufzeitpunkt definieren</label>
+            <select id="share-expiry-type" class="form-control" style="padding: 0.4rem 0.75rem; font-size: 0.85rem; background: var(--input-bg); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-sm); outline: none; cursor: pointer; width: 100%;">
+              <option value="none">Nie (Unbegrenzt)</option>
+              <option value="hours">Stunden</option>
+              <option value="days">Tage</option>
+              <option value="custom">Datum & Uhrzeit wählen</option>
+            </select>
           </div>
           <div class="form-group" style="margin-bottom: 0;">
             <label for="share-max-downloads" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Klicks/Downloads Limit</label>
             <input type="number" id="share-max-downloads" class="form-control" placeholder="Unbegrenzt" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          </div>
+        </div>
+
+        <!-- Dynamic expiry sub-inputs -->
+        <div id="share-expiry-hours-container" style="display: none; margin-top: -0.25rem;">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="share-expiry-hours" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">In wie vielen Stunden soll die Freigabe ablaufen?</label>
+            <input type="number" id="share-expiry-hours" class="form-control" placeholder="z.B. 3" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          </div>
+        </div>
+
+        <div id="share-expiry-days-container" style="display: none; margin-top: -0.25rem;">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="share-expiry-days" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">In wie vielen Tagen soll die Freigabe ablaufen?</label>
+            <input type="number" id="share-expiry-days" class="form-control" placeholder="z.B. 7" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          </div>
+        </div>
+
+        <div id="share-expiry-custom-container" style="display: none; margin-top: -0.25rem;">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="share-expiry-custom" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">Genaue Uhrzeit & Datum auswählen (Kalender)</label>
+            <input type="datetime-local" id="share-expiry-custom" class="form-control" style="padding: 0.4rem 0.75rem; font-size: 0.85rem; color-scheme: dark; background: var(--input-bg); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-sm); width: 100%; box-sizing: border-box;">
           </div>
         </div>
 
@@ -903,7 +933,7 @@
   </div>
 
   <!-- CODE EDITOR MODAL -->
-  <div class="modal-overlay" id="code-editor-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
+  <div class="modal-overlay" id="code-editor-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 1rem;">
@@ -929,7 +959,7 @@
   </div>
 
   <!-- IMAGE VIEWER MODAL -->
-  <div class="modal-overlay" id="image-viewer-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+  <div class="modal-overlay" id="image-viewer-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="image-viewer-title">
@@ -952,7 +982,7 @@
   </div>
 
   <!-- VIDEO VIEWER MODAL -->
-  <div class="modal-overlay" id="video-viewer-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+  <div class="modal-overlay" id="video-viewer-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="video-viewer-title">
@@ -964,6 +994,23 @@
       </div>
       <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden;">
         <video id="video-viewer-player" controls autoplay style="max-width: 90%; max-height: 90%; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDF VIEWER MODAL -->
+  <div class="modal-overlay" id="pdf-viewer-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+    <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
+        <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="pdf-viewer-title">
+          <i data-lucide="file-text"></i> PDF-Vorschau
+        </div>
+        <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div style="flex: 1; padding: 0; overflow: hidden; background: #525659; display: flex; justify-content: center; align-items: center;">
+        <iframe id="pdf-viewer-iframe" style="width: 100%; height: 100%; border: none; background: #525659;" allow="autoplay"></iframe>
       </div>
     </div>
   </div>
@@ -1017,10 +1064,10 @@
   </div>
 
   <!-- UPLOAD CONTAINER (BOTTOM RIGHT) -->
-  <div id="upload-container" style="display: none; position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1100; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 50px; width: 200px; height: 44px; backdrop-filter: blur(15px); box-sizing: border-box;">
+  <div id="upload-container" style="display: none; position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1100; transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1); overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 50px; width: 200px; height: 44px; backdrop-filter: blur(15px); box-sizing: border-box;">
     
     <!-- MINIMIZED VIEW -->
-    <div id="upload-status-trigger" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 1rem; cursor: pointer; box-sizing: border-box; transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1); opacity: 1; z-index: 2;">
+    <div id="upload-status-trigger" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 1rem; cursor: pointer; box-sizing: border-box; transition: opacity 0.15s ease; opacity: 1; z-index: 2;">
       <div id="upload-status-circle" style="width: 28px; height: 28px; border-radius: 50%; border: 3px solid rgba(255,255,255,0.1); border-top-color: var(--color-primary); display: flex; align-items: center; justify-content: center; position: relative; flex-shrink: 0;">
         <i data-lucide="upload-cloud" id="upload-status-icon" style="width: 14px; height: 14px;"></i>
       </div>
@@ -1028,14 +1075,14 @@
     </div>
 
     <!-- MAXIMIZED VIEW -->
-    <div id="upload-details-panel" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1); opacity: 0; pointer-events: none; z-index: 1; box-sizing: border-box;">
+    <div id="upload-details-panel" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; transition: opacity 0.15s ease; opacity: 0; pointer-events: none; z-index: 1; box-sizing: border-box;">
       <!-- Header -->
       <div style="padding: 1rem; border-bottom: 1px solid var(--color-border); display: flex; justify-content: space-between; align-items: center; background: rgba(255,255,255,0.03); flex-shrink: 0;">
         <div style="display: flex; align-items: center; gap: 0.5rem;">
           <i data-lucide="upload" style="width: 18px; height: 18px; color: var(--color-primary);"></i>
           <h4 style="margin: 0; font-size: 0.95rem;">Uploads</h4>
         </div>
-        <button class="btn-icon" id="close-upload-panel-btn" style="padding: 0.25rem;">
+        <button class="btn-icon" id="close-upload-panel-btn" style="padding: 0.4rem; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.05); transition: background 0.1s ease, transform 0.1s ease; border: none; cursor: pointer; color: var(--color-text);" onmousedown="this.style.transform='scale(0.9)'" onmouseup="this.style.transform=''" onmouseleave="this.style.transform=''">
           <i data-lucide="x" style="width: 16px; height: 16px;"></i>
         </button>
       </div>

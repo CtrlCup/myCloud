@@ -51,7 +51,9 @@ async function extractTextContent(filePath, mimeType, fileName) {
     if (ext === '.pdf' || mimeType === 'application/pdf') {
       if (!fs.existsSync(filePath)) return null;
       const dataBuffer = fs.readFileSync(filePath);
-      const parsed = await pdfParse(dataBuffer);
+      const uint8Array = new Uint8Array(dataBuffer);
+      const parser = new pdfParse.PDFParse(uint8Array);
+      const parsed = await parser.getText();
       return parsed.text || '';
     }
     
@@ -842,18 +844,35 @@ app.get('/api/files/search', requireAuth, async (req, res) => {
 
   try {
     let sql = `
-      SELECT id, name, size, is_folder, mime_type, created_at, parent_id 
-      FROM files 
-      WHERE owner_id = $1 AND (name ILIKE $2`;
+      WITH RECURSIVE folder_sizes AS (
+        SELECT id, size, parent_id
+        FROM files
+        WHERE is_folder = false AND owner_id = $1
+        
+        UNION ALL
+        
+        SELECT f.id, fs.size, f.parent_id
+        FROM files f
+        JOIN folder_sizes fs ON f.id = fs.parent_id
+        WHERE f.owner_id = $1
+      )
+      SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id 
+      FROM files f
+      LEFT JOIN (
+        SELECT id, SUM(size) as total_size
+        FROM folder_sizes
+        GROUP BY id
+      ) sz ON f.id = sz.id
+      WHERE f.owner_id = $1 AND (f.name ILIKE $2`;
     
     const params = [userId, `%${query}%`];
 
     if (deep) {
-      sql += ` OR content ILIKE $3`;
+      sql += ` OR f.content ILIKE $3`;
       params.push(`%${query}%`);
     }
 
-    sql += `) ORDER BY is_folder DESC, name ASC`;
+    sql += `) ORDER BY f.is_folder DESC, f.name ASC`;
 
     const result = await pool.query(sql, params);
     res.json(result.rows);
@@ -876,10 +895,27 @@ app.get('/api/files/list', requireAuth, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT id, name, size, is_folder, mime_type, created_at, parent_id 
-       FROM files 
-       WHERE owner_id = $1 AND (parent_id = $2 OR (parent_id IS NULL AND $2 IS NULL))
-       ORDER BY is_folder DESC, name ASC`,
+      `WITH RECURSIVE folder_sizes AS (
+         SELECT id, size, parent_id
+         FROM files
+         WHERE is_folder = false AND owner_id = $1
+         
+         UNION ALL
+         
+         SELECT f.id, fs.size, f.parent_id
+         FROM files f
+         JOIN folder_sizes fs ON f.id = fs.parent_id
+         WHERE f.owner_id = $1
+       )
+       SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id 
+       FROM files f
+       LEFT JOIN (
+         SELECT id, SUM(size) as total_size
+         FROM folder_sizes
+         GROUP BY id
+       ) sz ON f.id = sz.id
+       WHERE f.owner_id = $1 AND (f.parent_id = $2 OR (f.parent_id IS NULL AND $2 IS NULL))
+       ORDER BY f.is_folder DESC, f.name ASC`,
       [userId, parentId]
     );
 
@@ -1086,6 +1122,35 @@ app.delete('/api/files/:id', requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Error deleting file:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Move multiple files/folders to a target folder
+app.post('/api/files/move-multiple', requireAuth, async (req, res) => {
+  const { fileIds, targetFolderId } = req.body;
+  const userId = req.session.userId;
+
+  if (!Array.isArray(fileIds) || fileIds.length === 0) {
+    return res.status(400).json({ error: 'fileIds must be a non-empty array' });
+  }
+
+  try {
+    // Verify target folder ownership if not root
+    if (targetFolderId !== null) {
+      const isOwner = await verifyFileOwner(targetFolderId, userId);
+      if (!isOwner) return res.status(403).json({ error: 'Access denied to target folder' });
+    }
+
+    // Update parent_id for all these files belonging to the user
+    await pool.query(
+      'UPDATE files SET parent_id = $1 WHERE id = ANY($2) AND owner_id = $3',
+      [targetFolderId, fileIds, userId]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error moving multiple files:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1486,7 +1551,9 @@ app.post('/api/shares', requireAuth, async (req, res) => {
     }
 
     let expiresAt = null;
-    if (expiresDays) {
+    if (req.body.expiresAt) {
+      expiresAt = new Date(req.body.expiresAt);
+    } else if (expiresDays) {
       expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + parseInt(expiresDays));
     }
@@ -1539,7 +1606,9 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
     }
 
     let expiresAt = share.expires_at;
-    if (expiresDays !== undefined) {
+    if (req.body.expiresAt !== undefined) {
+      expiresAt = req.body.expiresAt ? new Date(req.body.expiresAt) : null;
+    } else if (expiresDays !== undefined) {
       if (expiresDays === null || expiresDays === '') {
         expiresAt = null;
       } else {
@@ -2046,7 +2115,26 @@ app.get('/api/public/shares/:slug', async (req, res) => {
       files = [];
     } else if (baseFile.is_folder) {
       const filesRes = await pool.query(
-        'SELECT id, name, size, is_folder, mime_type, created_at, parent_id FROM files WHERE parent_id = $1 ORDER BY is_folder DESC, name ASC',
+        `WITH RECURSIVE folder_sizes AS (
+           SELECT id, size, parent_id
+           FROM files
+           WHERE is_folder = false
+           
+           UNION ALL
+           
+           SELECT f.id, fs.size, f.parent_id
+           FROM files f
+           JOIN folder_sizes fs ON f.id = fs.parent_id
+         )
+         SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id 
+         FROM files f
+         LEFT JOIN (
+           SELECT id, SUM(size) as total_size
+           FROM folder_sizes
+           GROUP BY id
+         ) sz ON f.id = sz.id
+         WHERE f.parent_id = $1 
+         ORDER BY f.is_folder DESC, f.name ASC`,
         [currentFolderId]
       );
       files = filesRes.rows;

@@ -94,7 +94,7 @@
   </div>
 
   <!-- CODE EDITOR MODAL -->
-  <div class="modal-overlay" id="code-editor-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
+  <div class="modal-overlay" id="code-editor-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 1rem;">
@@ -120,7 +120,7 @@
   </div>
 
   <!-- IMAGE VIEWER MODAL -->
-  <div class="modal-overlay" id="image-viewer-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+  <div class="modal-overlay" id="image-viewer-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="image-viewer-title">
@@ -143,7 +143,7 @@
   </div>
 
   <!-- VIDEO VIEWER MODAL -->
-  <div class="modal-overlay" id="video-viewer-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+  <div class="modal-overlay" id="video-viewer-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="video-viewer-title">
@@ -155,6 +155,23 @@
       </div>
       <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden;">
         <video id="video-viewer-player" controls autoplay style="max-width: 90%; max-height: 90%; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDF VIEWER MODAL -->
+  <div class="modal-overlay" id="pdf-viewer-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg); backdrop-filter: var(--glass-blur);">
+    <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
+        <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="pdf-viewer-title">
+          <i data-lucide="file-text"></i> PDF-Vorschau
+        </div>
+        <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div style="flex: 1; padding: 0; overflow: hidden; background: #525659; display: flex; justify-content: center; align-items: center;">
+        <iframe id="pdf-viewer-iframe" style="width: 100%; height: 100%; border: none; background: #525659;" allow="autoplay"></iframe>
       </div>
     </div>
   </div>
@@ -285,6 +302,8 @@
               openImageViewer(file.id, file.name, true, slug);
             } else if (videoExts.includes(ext)) {
               openVideoViewer(file.id, file.name, true, slug);
+            } else if (ext === 'pdf') {
+              openPdfViewer(file.id, file.name, true, slug);
             } else if (codeExts.includes(ext)) {
               openCodeEditor(file.id, file.name, true, slug);
             }
@@ -428,6 +447,8 @@
               openImageViewer(file.id, file.name, true, slug);
             } else if (videoExts.includes(ext)) {
               openVideoViewer(file.id, file.name, true, slug);
+            } else if (ext === 'pdf') {
+              openPdfViewer(file.id, file.name, true, slug);
             } else if (codeExts.includes(ext)) {
               openCodeEditor(file.id, file.name, true, slug);
             } else {
@@ -895,7 +916,7 @@
         document.getElementById('code-editor-title').innerHTML = `<i data-lucide="file-code"></i> ${fileName}`;
         lucide.createIcons();
 
-        document.getElementById('code-editor-overlay').style.display = 'block';
+        document.getElementById('code-editor-overlay').classList.add('active');
         const collabContainer = document.getElementById('collab-users-container');
         if (collabContainer) {
           collabContainer.style.display = 'none';
@@ -1031,7 +1052,7 @@
         monacoEditorInstance.dispose();
         monacoEditorInstance = null;
       }
-      document.getElementById('code-editor-overlay').style.display = 'none';
+      document.getElementById('code-editor-overlay').classList.remove('active');
       loadShareData(currentFolderId);
     };
 
@@ -1063,7 +1084,7 @@
       
       img.style.display = 'none';
       loading.style.display = 'flex';
-      overlay.style.display = 'block';
+      overlay.classList.add('active');
 
       if (currentImageObjectUrl) {
         URL.revokeObjectURL(currentImageObjectUrl);
@@ -1118,7 +1139,7 @@
     }
 
     document.getElementById('close-image-viewer-btn').onclick = () => {
-      document.getElementById('image-viewer-overlay').style.display = 'none';
+      document.getElementById('image-viewer-overlay').classList.remove('active');
       const img = document.getElementById('image-viewer-img');
       img.src = '';
       if (currentImageObjectUrl) {
@@ -1140,15 +1161,87 @@
         : `/api/files/download/${fileId}`;
 
       player.src = sourceUrl;
-      overlay.style.display = 'block';
+      overlay.classList.add('active');
     }
 
     document.getElementById('close-video-viewer-btn').onclick = () => {
-      document.getElementById('video-viewer-overlay').style.display = 'none';
+      document.getElementById('video-viewer-overlay').classList.remove('active');
       const player = document.getElementById('video-viewer-player');
       player.pause();
       player.src = '';
     };
+
+    function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
+      const overlay = document.getElementById('pdf-viewer-overlay');
+      const iframe = document.getElementById('pdf-viewer-iframe');
+      const title = document.getElementById('pdf-viewer-title');
+
+      title.innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
+      lucide.createIcons();
+
+      const sourceUrl = isPublic 
+        ? `/api/public/shares/${slug}/download/${fileId}`
+        : `/api/files/download/${fileId}`;
+
+      iframe.src = sourceUrl;
+      overlay.classList.add('active');
+    }
+
+    document.getElementById('close-pdf-viewer-btn').onclick = () => {
+      document.getElementById('pdf-viewer-overlay').classList.remove('active');
+      document.getElementById('pdf-viewer-iframe').src = '';
+    };
+
+    // Backdrop click close for public overlays
+    ['code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay'].forEach(id => {
+      const overlay = document.getElementById(id);
+      if (overlay) {
+        overlay.addEventListener('click', (e) => {
+          if (e.target === overlay) {
+            if (id === 'code-editor-overlay') {
+              // Do not close code editor on background click
+            } else if (id === 'image-viewer-overlay') {
+              document.getElementById('close-image-viewer-btn').click();
+            } else if (id === 'video-viewer-overlay') {
+              document.getElementById('close-video-viewer-btn').click();
+            } else if (id === 'pdf-viewer-overlay') {
+              document.getElementById('close-pdf-viewer-btn').click();
+            }
+          }
+        });
+      }
+    });
+
+    // Disable background scrolling when any modal is open on public share page
+    function checkModalsScrollLock() {
+      const overlays = document.querySelectorAll('.modal-overlay');
+      let anyOpen = false;
+      overlays.forEach(overlay => {
+        const isClassActive = overlay.classList.contains('active');
+        const isStyleVisible = overlay.style.display && overlay.style.display !== 'none';
+        if (isClassActive || isStyleVisible) {
+          anyOpen = true;
+        }
+      });
+
+      if (anyOpen) {
+        document.body.style.overflow = 'hidden';
+        document.documentElement.style.overflow = 'hidden';
+      } else {
+        document.body.style.overflow = '';
+        document.documentElement.style.overflow = '';
+      }
+    }
+
+    const modalObserver = new MutationObserver(() => {
+      checkModalsScrollLock();
+    });
+
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+      modalObserver.observe(overlay, { attributes: true, attributeFilter: ['class', 'style'] });
+    });
+
+    checkModalsScrollLock();
   </script>
 </body>
 </html>
