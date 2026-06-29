@@ -3519,7 +3519,7 @@ window.addEventListener('keydown', (e) => {
       return;
     }
     const pdfViewer = document.getElementById('pdf-viewer-overlay');
-    if (pdfViewer && pdfViewer.style.display !== 'none') {
+    if (pdfViewer && pdfViewer.classList.contains('active')) {
       document.getElementById('close-pdf-viewer-btn').click();
       return;
     }
@@ -4115,11 +4115,14 @@ function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
     : `/api/files/download/${fileId}`;
 
   iframe.src = sourceUrl;
+  overlay.style.display = 'flex';
   overlay.classList.add('active');
 }
 
 document.getElementById('close-pdf-viewer-btn').onclick = () => {
-  document.getElementById('pdf-viewer-overlay').classList.remove('active');
+  const overlay = document.getElementById('pdf-viewer-overlay');
+  overlay.classList.remove('active');
+  overlay.style.display = 'none';
   document.getElementById('pdf-viewer-iframe').src = '';
 };
 
