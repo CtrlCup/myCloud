@@ -113,6 +113,16 @@
           </div>
         </div>
         <div style="display: flex; gap: 0.75rem; align-items: center; position: relative;">
+          <!-- Search Input with Deep Search check -->
+          <div class="search-container" style="position: relative; display: flex; align-items: center;">
+            <i data-lucide="search" style="position: absolute; left: 0.75rem; width: 16px; height: 16px; color: var(--color-text-muted); pointer-events: none;"></i>
+            <input type="text" id="dashboard-search-input" class="form-control" placeholder="Suchen..." style="padding-left: 2.25rem; padding-right: 4rem; width: 220px; font-size: 0.85rem; height: 38px; border-radius: var(--radius-sm);">
+            <label style="position: absolute; right: 0.5rem; display: flex; align-items: center; gap: 0.25rem; font-size: 0.75rem; cursor: pointer; color: var(--color-text-muted); padding: 0.2rem 0.4rem; background: rgba(255,255,255,0.05); border-radius: 4px; border: 1px solid var(--glass-border);" title="Tiefensuche (OCR-PDFs & Textinhalte)">
+              <input type="checkbox" id="dashboard-search-deep" style="margin: 0; transform: scale(0.9);">
+              <span>Tief</span>
+            </label>
+          </div>
+
           <!-- Single Plus button -->
           <button class="btn btn-primary" id="plus-menu-btn" style="border-radius: 50%; width: 42px; height: 42px; padding: 0; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(0,210,255,0.25);" title="Hinzufügen">
             <i data-lucide="plus" style="width: 24px; height: 24px;"></i>
@@ -643,84 +653,87 @@
 
   <!-- SHARE MODAL -->
   <div class="modal-overlay" id="share-modal-overlay">
-    <div class="card modal no-scrollbar">
-      <div class="modal-header" style="position: relative; margin-bottom: 1.5rem; padding-left: 2rem;">
+    <div class="card modal no-scrollbar" style="max-height: 95vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="position: relative; margin-bottom: 0.75rem; padding-left: 2rem;">
         <button class="btn-icon close-btn" id="close-share-modal-btn" type="button" style="position: absolute; top: 0; left: 0; padding: 0.25rem;" title="Schließen">
           <i data-lucide="x"></i>
         </button>
-        <h3 class="modal-title" style="margin: 0;">Ordner/Datei teilen</h3>
+        <h3 class="modal-title" style="margin: 0; font-size: 1.2rem;">Ordner/Datei teilen</h3>
       </div>
-      <form id="share-form">
+      <form id="share-form" style="display: flex; flex-direction: column; gap: 0.75rem;">
         <input type="hidden" id="share-file-id">
         <input type="hidden" id="share-existing-id">
         
-        <div class="form-group">
-          <label for="share-slug">Freigabe-Link bearbeiten (Slug)</label>
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="share-slug" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Freigabe-Link bearbeiten (Slug)</label>
           <div style="display: flex; gap: 0.5rem; align-items: center;">
-            <span style="color: var(--color-text-muted); font-size: 0.9rem;" id="share-url-prefix">http://localhost:3000/s/</span>
-            <input type="text" id="share-slug" class="form-control" placeholder="mein-ordner" pattern="[a-z0-9-_]+" title="Nur Kleinbuchstaben, Zahlen, - und _">
+            <span style="color: var(--color-text-muted); font-size: 0.85rem;" id="share-url-prefix">http://localhost:3000/s/</span>
+            <input type="text" id="share-slug" class="form-control" placeholder="mein-ordner" pattern="[a-z0-9-_]+" title="Nur Kleinbuchstaben, Zahlen, - und _" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
           </div>
         </div>
 
-        <div style="display: flex; flex-direction: column; gap: 0.75rem; margin: 1.5rem 0;">
-          <strong style="font-size: 0.85rem; text-transform: uppercase; color: var(--color-text-muted); letter-spacing: 0.05em;">Berechtigungen</strong>
-          
-          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
-            <input type="checkbox" id="share-can-read" checked disabled>
-            <span>Inhalte anzeigen (Leserechte)</span>
-          </label>
-          
-          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
-            <input type="checkbox" id="share-can-write">
-            <span>Dateien hochladen (Schreibrechte)</span>
-          </label>
-          
-          <label id="share-only-upload-container" style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer; padding-left: 1.5rem;">
-            <input type="checkbox" id="share-only-upload">
-            <span>Nur-Hochladen (Dateien-Abgabe, Besucher sieht keine Inhalte)</span>
-          </label>
-          
-          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
-            <input type="checkbox" id="share-can-download" checked>
-            <span>Dateien herunterladen</span>
-          </label>
-          
-          <label style="display: flex; align-items: center; gap: 0.75rem; cursor: pointer;">
-            <input type="checkbox" id="share-can-zip" checked>
-            <span>Als ZIP herunterladen</span>
-          </label>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="share-expires" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Ablaufdatum (Tage)</label>
+            <input type="number" id="share-expires" class="form-control" placeholder="Nie (leer)" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="share-max-downloads" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Klicks/Downloads Limit</label>
+            <input type="number" id="share-max-downloads" class="form-control" placeholder="Unbegrenzt" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          </div>
         </div>
 
-        <div class="form-group">
-          <label for="share-expires">Ablaufdatum (Tage)</label>
-          <input type="number" id="share-expires" class="form-control" placeholder="Nie (leer lassen)" min="1">
-        </div>
-
-        <div class="form-group">
-          <label for="share-password">Passwortschutz</label>
-          <input type="password" id="share-password" class="form-control" placeholder="Optionales Passwort eingeben/ändern">
-          <label id="share-password-remove-container" style="display: none; align-items: center; gap: 0.5rem; margin-top: 0.5rem; cursor: pointer; font-size: 0.85rem; color: #ff5555;">
+        <div class="form-group" style="margin-bottom: 0;">
+          <label for="share-password" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Passwortschutz</label>
+          <input type="password" id="share-password" class="form-control" placeholder="Optionales Passwort eingeben/ändern" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          <label id="share-password-remove-container" style="display: none; align-items: center; gap: 0.5rem; margin-top: 0.25rem; cursor: pointer; font-size: 0.8rem; color: #ff5555;">
             <input type="checkbox" id="share-password-remove"> Passwortschutz entfernen
           </label>
         </div>
 
-        <div class="form-group">
-          <label for="share-max-downloads">Automatisches Deaktivieren nach X Klicks/Downloads</label>
-          <input type="number" id="share-max-downloads" class="form-control" placeholder="Unbegrenzt" min="1">
+        <div style="display: flex; flex-direction: column; gap: 0.4rem; padding: 0.5rem; background: rgba(255,255,255,0.03); border-radius: var(--radius-sm); border: 1px solid var(--glass-border);">
+          <strong style="font-size: 0.75rem; text-transform: uppercase; color: var(--color-text-muted); letter-spacing: 0.05em; margin-bottom: 0.15rem;">Berechtigungen</strong>
+          
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 0.75rem;">
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+              <input type="checkbox" id="share-can-read" checked disabled>
+              <span style="color: var(--color-text-muted);">Inhalte anzeigen</span>
+            </label>
+            
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+              <input type="checkbox" id="share-can-download" checked>
+              <span>Herunterladen</span>
+            </label>
+            
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+              <input type="checkbox" id="share-can-write">
+              <span>Dateien hochladen</span>
+            </label>
+            
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+              <input type="checkbox" id="share-can-zip" checked>
+              <span>Als ZIP laden</span>
+            </label>
+          </div>
+          
+          <label id="share-only-upload-container" style="display: none; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; padding-left: 0.25rem; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 0.25rem; padding-top: 0.25rem;">
+            <input type="checkbox" id="share-only-upload">
+            <span>Nur-Hochladen (Besucher sieht keine Inhalte)</span>
+          </label>
         </div>
 
-        <div class="form-actions" style="margin-top: 1.5rem;">
-          <button type="submit" class="btn btn-primary" style="justify-content: center;">Link generieren</button>
-          <button type="button" class="btn" id="delete-share-btn" style="display: none; border-color: rgba(255,0,0,0.3); color: #ff5555; justify-content: center;">Freigabe aufheben</button>
+        <div class="form-actions" style="margin-top: 0.25rem; display: flex; gap: 0.5rem;">
+          <button type="submit" class="btn btn-primary" style="justify-content: center; flex: 1; padding: 0.5rem 1rem; font-size: 0.85rem;">Link generieren</button>
+          <button type="button" class="btn" id="delete-share-btn" style="display: none; border-color: rgba(255,0,0,0.3); color: #ff5555; justify-content: center; flex: 1; padding: 0.5rem 1rem; font-size: 0.85rem;">Freigabe aufheben</button>
         </div>
 
         <!-- Result Link Section -->
-        <div id="share-result-section" style="display: none; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--color-border);">
-          <label>Freigabe-Link</label>
-          <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-            <input type="text" id="share-result-input" class="form-control" readonly>
-            <button type="button" class="btn btn-primary" id="copy-share-link-btn">
-              <i data-lucide="copy"></i> Kopieren
+        <div id="share-result-section" style="display: none; margin-top: 0.25rem; padding-top: 0.5rem; border-top: 1px solid var(--color-border);">
+          <label style="font-size: 0.8rem; font-weight: 500; display: block; margin-bottom: 0.25rem;">Generierter Freigabe-Link</label>
+          <div style="display: flex; gap: 0.5rem;">
+            <input type="text" id="share-result-input" class="form-control" readonly style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+            <button type="button" class="btn btn-primary" id="copy-share-link-btn" style="padding: 0 0.75rem; font-size: 0.85rem; display: flex; align-items: center; gap: 0.25rem;">
+              <i data-lucide="copy" style="width: 14px; height: 14px;"></i> Kopieren
             </button>
           </div>
         </div>

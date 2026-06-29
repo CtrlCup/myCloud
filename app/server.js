@@ -41,6 +41,54 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
+const pdfParse = require('pdf-parse');
+
+async function extractTextContent(filePath, mimeType, fileName) {
+  try {
+    const ext = path.extname(fileName).toLowerCase();
+    
+    // 1. PDF files
+    if (ext === '.pdf' || mimeType === 'application/pdf') {
+      if (!fs.existsSync(filePath)) return null;
+      const dataBuffer = fs.readFileSync(filePath);
+      const parsed = await pdfParse(dataBuffer);
+      return parsed.text || '';
+    }
+    
+    // 2. Plain text / code files
+    const textExts = ['.txt', '.md', '.json', '.js', '.css', '.html', '.py', '.sh', '.xml', '.yaml', '.yml', '.csv', '.ini', '.conf'];
+    if (textExts.includes(ext) || (mimeType && mimeType.startsWith('text/'))) {
+      if (!fs.existsSync(filePath)) return null;
+      const text = fs.readFileSync(filePath, 'utf8');
+      // Cap size to 500KB to prevent db bloat
+      return text.substring(0, 500000);
+    }
+  } catch (err) {
+    console.error('Error extracting text content from file:', fileName, err);
+  }
+  return null;
+}
+
+async function indexExistingFiles() {
+  try {
+    const res = await pool.query(
+      "SELECT id, name, path, mime_type FROM files WHERE is_folder = false AND content IS NULL"
+    );
+    for (const row of res.rows) {
+      const filePath = path.join(UPLOADS_DIR, row.path);
+      if (fs.existsSync(filePath)) {
+        console.log(`Indexing existing file: ${row.name}`);
+        const content = await extractTextContent(filePath, row.mime_type, row.name);
+        if (content !== null) {
+          await pool.query("UPDATE files SET content = $1 WHERE id = $2", [content, row.id]);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error indexing existing files:', err);
+  }
+}
+
 // Session Configuration using PostgreSQL for session store
 app.use(session({
   store: new (require('connect-pg-simple')(session))({
@@ -782,6 +830,39 @@ async function verifyFileOwner(fileId, userId) {
   return res.rows[0].owner_id === userId;
 }
 
+// Search files (normal and deep/OCR modes)
+app.get('/api/files/search', requireAuth, async (req, res) => {
+  const query = req.query.q || '';
+  const deep = req.query.deep === 'true';
+  const userId = req.session.userId;
+
+  if (!query.trim()) {
+    return res.json([]);
+  }
+
+  try {
+    let sql = `
+      SELECT id, name, size, is_folder, mime_type, created_at, parent_id 
+      FROM files 
+      WHERE owner_id = $1 AND (name ILIKE $2`;
+    
+    const params = [userId, `%${query}%`];
+
+    if (deep) {
+      sql += ` OR content ILIKE $3`;
+      params.push(`%${query}%`);
+    }
+
+    sql += `) ORDER BY is_folder DESC, name ASC`;
+
+    const result = await pool.query(sql, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error searching files:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get directory listing
 app.get('/api/files/list', requireAuth, async (req, res) => {
   const parentId = req.query.parentId === 'null' || !req.query.parentId ? null : parseInt(req.query.parentId);
@@ -855,10 +936,12 @@ app.post('/api/files/upload', requireAuth, upload.single('file'), async (req, re
       }
     }
 
+    const textContent = await extractTextContent(req.file.path, req.file.mimetype, req.file.originalname);
+
     const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, false, parentId, userId]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, false, parentId, userId, textContent]
     );
 
     res.status(201).json(result.rows[0]);
@@ -1212,9 +1295,9 @@ app.post('/api/files/create-note', requireAuth, async (req, res) => {
 
     // Insert file record
     const fileRes = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note)
-       VALUES ($1, $2, $3, $4, false, $5, $6, true) RETURNING id`,
-      [cleanName, uniqueFilename, 'text/plain', size, parsedParentId, userId]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
+       VALUES ($1, $2, $3, $4, false, $5, $6, true, $7) RETURNING id`,
+      [cleanName, uniqueFilename, 'text/plain', size, parsedParentId, userId, content]
     );
     const fileId = fileRes.rows[0].id;
 
@@ -1281,7 +1364,7 @@ app.put('/api/files/content/:id', requireAuth, async (req, res) => {
     fs.writeFileSync(filePath, content);
     const stats = fs.statSync(filePath);
 
-    await pool.query('UPDATE files SET size = $1 WHERE id = $2', [stats.size, fileId]);
+    await pool.query('UPDATE files SET size = $1, content = $2 WHERE id = $3', [stats.size, content, fileId]);
 
     res.json({ success: true, size: stats.size });
   } catch (err) {
@@ -1686,9 +1769,10 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
             fileStream.close();
             
             const stats = fs.statSync(filePath);
+            const textContent = await extractTextContent(filePath, file.mime_type, file.name);
             await pool.query(
-              'UPDATE files SET size = $1, updated_at = NOW() WHERE id = $2',
-              [stats.size, fileId]
+              'UPDATE files SET size = $1, content = $2, updated_at = NOW() WHERE id = $3',
+              [stats.size, textContent, fileId]
             );
 
             console.log(`Office document ${fileId} successfully saved. New size: ${stats.size} bytes.`);
@@ -3093,6 +3177,7 @@ initDb()
       console.log(`myCloud app is running on ${EXPECTED_ORIGIN}`);
     });
     initWebSocket(server);
+    indexExistingFiles();
   })
   .catch(err => {
     console.error('Database connection failed, exiting...', err);

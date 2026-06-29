@@ -496,7 +496,7 @@ header {
   display: flex;
   justify-content: center;
   align-items: center;
-  z-index: 1000;
+  z-index: 1200;
   opacity: 0;
   pointer-events: none;
   backdrop-filter: blur(0px);

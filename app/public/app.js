@@ -1933,7 +1933,6 @@ shareForm.onsubmit = async (e) => {
 
     const data = await res.json();
     if (res.ok) {
-      showToast(existingId ? 'Freigabe aktualisiert!' : 'Freigabe-Link erstellt!');
       document.getElementById('share-existing-id').value = data.id;
       deleteShareBtn.style.display = 'inline-flex';
       
@@ -1947,6 +1946,16 @@ shareForm.onsubmit = async (e) => {
       document.getElementById('share-password').value = ''; // clear input
 
       displayGeneratedLink(data.slug);
+
+      // Automatically copy generated link to clipboard
+      try {
+        await navigator.clipboard.writeText(shareResultInput.value);
+        showToast(existingId ? 'Freigabe aktualisiert & Link kopiert!' : 'Freigabe-Link erstellt & kopiert!');
+      } catch (clipErr) {
+        shareResultInput.select();
+        document.execCommand('copy');
+        showToast(existingId ? 'Freigabe aktualisiert & Link kopiert!' : 'Freigabe-Link erstellt & kopiert!');
+      }
     } else {
       showToast(data.error);
     }
@@ -3929,4 +3938,99 @@ if (plusMenuBtn && plusDropdownMenu) {
       plusDropdownMenu.style.display = 'none';
     }
   });
+}
+
+// Disable background scrolling when any modal is open
+function checkModalsScrollLock() {
+  const overlays = document.querySelectorAll('.modal-overlay');
+  let anyOpen = false;
+  overlays.forEach(overlay => {
+    const isClassActive = overlay.classList.contains('active');
+    const isStyleVisible = overlay.style.display && overlay.style.display !== 'none';
+    if (isClassActive || isStyleVisible) {
+      anyOpen = true;
+    }
+  });
+
+  if (anyOpen) {
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+  } else {
+    document.body.style.overflow = '';
+    document.documentElement.style.overflow = '';
+  }
+}
+
+// Watch for changes to .modal-overlay class attributes or style attributes
+const modalObserver = new MutationObserver(() => {
+  checkModalsScrollLock();
+});
+
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  modalObserver.observe(overlay, { attributes: true, attributeFilter: ['class', 'style'] });
+});
+
+// Run initially
+checkModalsScrollLock();
+
+// Debounced Dashboard Search (Name and Deep Content/OCR Search)
+let searchTimeout = null;
+const searchInput = document.getElementById('dashboard-search-input');
+const searchDeepCheck = document.getElementById('dashboard-search-deep');
+
+if (searchInput && searchDeepCheck) {
+  const triggerSearch = async () => {
+    const query = searchInput.value.trim();
+    if (!query) {
+      loadFiles(currentFolderId);
+      return;
+    }
+
+    try {
+      const isDeep = searchDeepCheck.checked;
+      const res = await fetch(`/api/files/search?q=${encodeURIComponent(query)}&deep=${isDeep}`);
+      if (res.ok) {
+        const files = await res.json();
+        renderFiles(files);
+        
+        // Render search breadcrumbs path
+        const breadcrumbsContainer = document.getElementById('breadcrumbs');
+        breadcrumbsContainer.innerHTML = '';
+        
+        const homeLink = document.createElement('a');
+        homeLink.href = '#';
+        homeLink.className = 'breadcrumb-item';
+        homeLink.textContent = 'Zurück';
+        homeLink.onclick = (e) => {
+          e.preventDefault();
+          searchInput.value = '';
+          loadFiles(currentFolderId);
+        };
+        breadcrumbsContainer.appendChild(homeLink);
+
+        const sep = document.createElement('span');
+        sep.className = 'breadcrumb-separator';
+        sep.textContent = '/';
+        breadcrumbsContainer.appendChild(sep);
+
+        const searchLabel = document.createElement('span');
+        searchLabel.className = 'breadcrumb-current';
+        searchLabel.innerHTML = `Suchergebnisse für "${query}" ${isDeep ? '<b>(Tiefensuche)</b>' : ''}`;
+        breadcrumbsContainer.appendChild(searchLabel);
+      }
+    } catch (err) {
+      console.error('Search error:', err);
+    }
+  };
+
+  searchInput.oninput = () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(triggerSearch, 300);
+  };
+
+  searchDeepCheck.onchange = () => {
+    if (searchInput.value.trim()) {
+      triggerSearch();
+    }
+  };
 }
