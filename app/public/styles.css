@@ -1006,15 +1006,7 @@ tr:hover td {
   display: none !important;
 }
 
-/* ─── Force Overlays Visible ─── */
-#code-editor-overlay,
-#image-viewer-overlay,
-#video-viewer-overlay,
-#pdf-viewer-overlay,
-#office-editor-overlay {
-  opacity: 1 !important;
-  pointer-events: all !important;
-}
+
 
 /* ─── Template Tiles (Glass) ─── */
 .template-tile:hover {
