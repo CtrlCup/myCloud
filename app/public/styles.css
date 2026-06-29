@@ -1342,3 +1342,16 @@ tr:hover td {
 .file-grid.list-xl .file-icon {
   font-size: 1.5rem !important;
 }
+
+/* Remove default browser blue outline focus rings in overlays, modals, and popups */
+.modal-overlay :focus, 
+.modal-overlay :focus-visible, 
+.modal-overlay input:focus, 
+.modal-overlay select:focus, 
+.modal-overlay button:focus,
+.modal-overlay label:focus,
+.context-menu :focus,
+.context-menu :focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
