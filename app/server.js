@@ -964,6 +964,19 @@ app.post('/api/files/upload', requireAuth, upload.single('file'), async (req, re
   const userId = req.session.userId;
 
   try {
+    // Check storage quota
+    const userRes = await pool.query('SELECT storage_quota FROM users WHERE id = $1', [userId]);
+    const quotaBytes = userRes.rows[0].storage_quota ? parseInt(userRes.rows[0].storage_quota) : null;
+    
+    if (quotaBytes !== null) {
+      const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [userId]);
+      const usedBytes = parseInt(usedRes.rows[0].total || 0);
+      if (usedBytes + req.file.size > quotaBytes) {
+        fs.unlinkSync(req.file.path);
+        return res.status(413).json({ error: 'Speicherplatzlimit überschritten! Bitte lösche Dateien oder wende dich an einen Admin.' });
+      }
+    }
+
     if (parentId !== null) {
       const isOwner = await verifyFileOwner(parentId, userId);
       if (!isOwner) {
@@ -1151,6 +1164,72 @@ app.post('/api/files/move-multiple', requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Error moving multiple files:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Recursive copy helper for files and folders
+async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
+  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fileId, userId]);
+  if (fileRes.rows.length === 0) return;
+  const file = fileRes.rows[0];
+
+  if (file.is_folder) {
+    const folderName = `${file.name} (Kopie)`;
+    const newFolderRes = await pool.query(
+      `INSERT INTO files (name, is_folder, parent_id, owner_id) 
+       VALUES ($1, true, $2, $3) RETURNING *`,
+      [folderName, targetFolderId, userId]
+    );
+    const newFolder = newFolderRes.rows[0];
+
+    const childrenRes = await pool.query('SELECT id FROM files WHERE parent_id = $1 AND owner_id = $2', [file.id, userId]);
+    for (const child of childrenRes.rows) {
+      await copyFileOrFolderRecursive(child.id, newFolder.id, userId);
+    }
+  } else {
+    const oldPath = path.join(UPLOADS_DIR, file.path);
+    if (!fs.existsSync(oldPath)) return;
+
+    const newFilename = crypto.randomUUID() + path.extname(file.name);
+    const newPath = path.join(UPLOADS_DIR, newFilename);
+    fs.copyFileSync(oldPath, newPath);
+
+    const newName = file.name.includes('.') 
+      ? file.name.replace(/(\.[^.]+)$/, ' (Kopie)$1') 
+      : `${file.name} (Kopie)`;
+
+    await pool.query(
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content) 
+       VALUES ($1, $2, $3, $4, false, $5, $6, $7)`,
+      [newName, newFilename, file.mime_type, file.size, targetFolderId, userId, file.content]
+    );
+  }
+}
+
+// Copy multiple files/folders
+app.post('/api/files/copy-multiple', requireAuth, async (req, res) => {
+  const { fileIds, targetFolderId } = req.body;
+  const userId = req.session.userId;
+
+  if (!Array.isArray(fileIds) || fileIds.length === 0) {
+    return res.status(400).json({ error: 'fileIds must be a non-empty array' });
+  }
+
+  try {
+    // Verify target folder ownership if not root
+    if (targetFolderId !== null) {
+      const isOwner = await verifyFileOwner(targetFolderId, userId);
+      if (!isOwner) return res.status(403).json({ error: 'Access denied to target folder' });
+    }
+
+    for (const id of fileIds) {
+      await copyFileOrFolderRecursive(parseInt(id), targetFolderId, userId);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error copying multiple files:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -2674,6 +2753,39 @@ app.get('/api/settings', requireAuth, async (req, res) => {
   }
 });
 
+// Get user storage consumption & quota & disk info
+app.get('/api/users/storage', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+
+  try {
+    // 1. Used space
+    const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [userId]);
+    const usedBytes = parseInt(usedRes.rows[0].total || 0);
+
+    // 2. User quota
+    const userRes = await pool.query('SELECT storage_quota FROM users WHERE id = $1', [userId]);
+    const quotaBytes = userRes.rows[0].storage_quota ? parseInt(userRes.rows[0].storage_quota) : null;
+
+    // 3. Free disk space
+    let freeDiskBytes = 0;
+    try {
+      const stats = fs.statfsSync('/');
+      freeDiskBytes = stats.bsize * stats.bavail;
+    } catch (diskErr) {
+      console.error('Error reading disk stats:', diskErr);
+    }
+
+    res.json({
+      usedBytes,
+      quotaBytes,
+      freeDiskBytes
+    });
+  } catch (err) {
+    console.error('Error fetching user storage:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Update Profile details
 app.post('/api/settings/profile', requireAuth, async (req, res) => {
   const userId = req.session.userId;
@@ -2971,7 +3083,7 @@ app.post('/api/settings/admin/test-smtp', requireAdmin, async (req, res) => {
 app.get('/api/settings/admin/users', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT u.id, u.username, u.role, u.sso_provider, u.created_at, u.first_name, u.last_name, u.email, u.is_active,
+      `SELECT u.id, u.username, u.role, u.sso_provider, u.created_at, u.first_name, u.last_name, u.email, u.is_active, u.storage_quota,
        (SELECT COUNT(*) FROM files WHERE owner_id = u.id) as file_count,
        (SELECT COALESCE(SUM(size), 0) FROM files WHERE owner_id = u.id AND is_folder = false) as storage_used
        FROM users u ORDER BY u.username ASC`
@@ -3035,6 +3147,10 @@ app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
       
       await pool.query('DELETE FROM users WHERE id = $1', [targetUserId]);
       return res.json({ success: true, message: 'Benutzer und alle seine Dateien wurden gelöscht.' });
+    } else if (action === 'quota') {
+      const quotaBytes = req.body.quotaBytes !== undefined ? (req.body.quotaBytes ? parseInt(req.body.quotaBytes) : null) : null;
+      await pool.query('UPDATE users SET storage_quota = $1 WHERE id = $2', [quotaBytes, targetUserId]);
+      return res.json({ success: true, message: 'Speicherplatzlimit aktualisiert.' });
     } else if (action === 'role' && role) {
       await pool.query('UPDATE users SET role = $1 WHERE id = $2', [role, targetUserId]);
       return res.json({ success: true, message: 'Benutzerrolle aktualisiert.' });

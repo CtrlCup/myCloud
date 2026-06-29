@@ -12,6 +12,9 @@ let isEmailConfigured = false;
 let clickTimeout = null;
 let clickTimeoutFileId = null;
 
+let clipboardFileIds = [];
+let clipboardAction = null; // 'copy' or 'cut'
+
 // Real-time collaboration state
 let collabSocket = null;
 let collabUserColor = null;
@@ -2115,6 +2118,10 @@ document.querySelectorAll('#settings-nav .settings-nav-item').forEach(item => {
     item.classList.add('active');
     const targetSection = item.getAttribute('data-section');
     document.getElementById(targetSection).classList.add('active');
+
+    if (targetSection === 'storage-settings') {
+      loadStorageSettings();
+    }
   };
 });
 
@@ -2181,9 +2188,61 @@ async function loadSettings() {
     // Load Geteilte Links List
     loadUserShares();
 
+    // Load Storage stats
+    loadStorageSettings();
+
   } catch (err) {
     console.error('Settings load error:', err);
     showToast('Fehler beim Laden der Einstellungen.');
+  }
+}
+
+async function loadStorageSettings() {
+  const usedText = document.getElementById('storage-used-text');
+  const limitText = document.getElementById('storage-limit-text');
+  const progressBar = document.getElementById('storage-progress-bar');
+  const detailText = document.getElementById('storage-detail-text');
+
+  if (!usedText || !limitText || !progressBar || !detailText) return;
+
+  try {
+    const res = await fetch('/api/users/storage');
+    if (!res.ok) throw new Error('Failed to load storage info');
+    const data = await res.json();
+
+    const used = data.usedBytes;
+    const quota = data.quotaBytes;
+    const freeDisk = data.freeDiskBytes;
+
+    usedText.textContent = `${formatBytes(used)} verwendet`;
+
+    if (quota !== null && quota > 0) {
+      limitText.textContent = `von ${formatBytes(quota)}`;
+      const percentage = Math.min(100, (used / quota) * 100);
+      progressBar.style.width = `${percentage}%`;
+      
+      const free = Math.max(0, quota - used);
+      detailText.innerHTML = `
+        Du hast <strong>${formatBytes(free)}</strong> freien Speicherplatz von deinem zugeteilten Speicher-Limit.
+      `;
+      if (percentage > 90) {
+        progressBar.style.background = '#ff5555';
+      } else if (percentage > 70) {
+        progressBar.style.background = '#ffaa00';
+      } else {
+        progressBar.style.background = 'linear-gradient(90deg, var(--color-accent) 0%, #bd93f9 100%)';
+      }
+    } else {
+      limitText.textContent = 'unbegrenzt';
+      progressBar.style.width = '0%';
+      detailText.innerHTML = `
+        Dein Speicherplatz-Limit ist unbegrenzt.<br>
+        Freie Kapazität des Server-Laufwerks: <strong>${formatBytes(freeDisk)}</strong> frei.
+      `;
+    }
+  } catch (err) {
+    console.error('Error loading storage settings:', err);
+    detailText.textContent = 'Fehler beim Laden der Speicherplatz-Informationen.';
   }
 }
 
@@ -2662,7 +2721,14 @@ async function loadAdminUsers() {
         </td>
         <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${ssoText}</td>
         <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${user.file_count}</td>
-        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${formatBytes(user.storage_used)}</td>
+        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">
+          <div style="display: flex; align-items: center; gap: 0.5rem;">
+            <span>${formatBytes(user.storage_used)} / ${user.storage_quota ? formatBytes(user.storage_quota) : 'unbegrenzt'}</span>
+            <button class="btn btn-icon btn-action-edit-quota" style="padding: 2px; border: none; background: transparent; color: var(--color-accent);" title="Speicherlimit ändern">
+              <i data-lucide="edit-3" style="width: 14px; height: 14px;"></i>
+            </button>
+          </div>
+        </td>
         <td style="padding: 1rem 0.5rem; text-align: right;">
           <div style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center;">
             <button class="btn btn-action-lock-user" style="color: ${lockColor}; border-color: ${lockBorder}; padding: 4px 8px; font-size: 0.8rem;" title="${lockText}">
@@ -2677,6 +2743,45 @@ async function loadAdminUsers() {
           </div>
         </td>
       `;
+
+      // Handle edit quota
+      const editQuotaBtn = row.querySelector('.btn-action-edit-quota');
+      if (editQuotaBtn) {
+        editQuotaBtn.onclick = async () => {
+          const currentGb = user.storage_quota ? (user.storage_quota / (1024 * 1024 * 1024)).toFixed(1) : '';
+          const inputVal = await showInputPrompt(
+            'Speicherlimit festlegen',
+            `Speicherplatz-Limit für ${user.username} in Gigabyte (GB). Gib 0 oder leer ein für unbegrenzten Speicherplatz:`,
+            currentGb,
+            'z. B. 5'
+          );
+          if (inputVal === null) return; // user cancelled
+
+          let quotaBytes = null;
+          const parsed = parseFloat(inputVal.replace(',', '.'));
+          if (!isNaN(parsed) && parsed > 0) {
+            quotaBytes = Math.round(parsed * 1024 * 1024 * 1024);
+          }
+
+          try {
+            const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'quota', quotaBytes }),
+            });
+            if (r.ok) {
+              showToast('Speicherlimit erfolgreich aktualisiert.');
+              loadAdminUsers();
+            } else {
+              const err = await r.json();
+              showToast(err.error || 'Fehler beim Aktualisieren des Limits.');
+            }
+          } catch (err) {
+            console.error(err);
+            showToast('Verbindungsfehler beim Aktualisieren des Limits.');
+          }
+        };
+      }
 
       // Handle role change
       row.querySelector('.select-role').onchange = async (e) => {
@@ -3227,9 +3332,131 @@ if (totpForm) {
   };
 }
 
-// Keyboard ESC listener & Modal overlay backdrop click listener & Admin toggle auto-save
+// Paste Action trigger
+async function triggerPasteAction() {
+  if (clipboardFileIds.length === 0 || !clipboardAction) return;
+
+  const url = clipboardAction === 'cut' 
+    ? '/api/files/move-multiple' 
+    : '/api/files/copy-multiple';
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileIds: clipboardFileIds,
+        targetFolderId: currentFolderId
+      })
+    });
+
+    if (res.ok) {
+      showToast(clipboardAction === 'cut' ? 'Elemente eingefügt (verschoben)!' : 'Elemente dupliziert!');
+      if (clipboardAction === 'cut') {
+        clipboardFileIds = [];
+        clipboardAction = null;
+      }
+      clearSelection();
+      loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error || 'Fehler beim Einfügen.');
+    }
+  } catch (err) {
+    console.error('Error pasting files:', err);
+    showToast('Verbindungsfehler beim Einfügen.');
+  }
+}
+
+// Keyboard ESC listener & Modal overlay backdrop click listener & Admin toggle auto-save & Desktop Explorer Hotkeys
 window.addEventListener('keydown', (e) => {
+  // Check if user is typing in an input, textarea, select, or Monaco/Office editor
+  const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+  const isInput = activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select' || document.activeElement.closest('.monaco-editor') || document.activeElement.closest('#office-editor-overlay');
+  
+  if (isInput) {
+    // If the search input is focused and Escape is pressed, clear and blur it
+    if (e.key === 'Escape' && document.activeElement.id === 'dashboard-search-input') {
+      const searchInput = document.getElementById('dashboard-search-input');
+      if (searchInput) {
+        searchInput.value = '';
+        searchInput.blur();
+        loadFiles(currentFolderId);
+      }
+    }
+    return;
+  }
+
+  // Ctrl + A (Select All)
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+    e.preventDefault();
+    selectedFileIds = renderedFilesList.map(f => f.id);
+    updateMultiSelectUI();
+    return;
+  }
+
+  // Ctrl + C (Copy selected file IDs)
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+    if (selectedFileIds.length > 0) {
+      e.preventDefault();
+      clipboardFileIds = [...selectedFileIds];
+      clipboardAction = 'copy';
+      showToast(`${selectedFileIds.length} Element(e) kopiert!`);
+    }
+    return;
+  }
+
+  // Ctrl + X (Cut selected file IDs)
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+    if (selectedFileIds.length > 0) {
+      e.preventDefault();
+      clipboardFileIds = [...selectedFileIds];
+      clipboardAction = 'cut';
+      showToast(`${selectedFileIds.length} Element(e) ausgeschnitten!`);
+    }
+    return;
+  }
+
+  // Ctrl + V (Paste copied/cut files)
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+    if (clipboardFileIds.length > 0 && clipboardAction) {
+      e.preventDefault();
+      triggerPasteAction();
+    }
+    return;
+  }
+
+  // Ctrl + F (Focus Search)
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    const searchInput = document.getElementById('dashboard-search-input');
+    if (searchInput) {
+      e.preventDefault();
+      searchInput.focus();
+      searchInput.select();
+    }
+    return;
+  }
+
+  // Auto-Search on simple character typing (a-z, A-Z, 0-9)
+  if (!e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1 && /^[a-zA-Z0-9]$/.test(e.key)) {
+    const searchInput = document.getElementById('dashboard-search-input');
+    if (searchInput) {
+      e.preventDefault();
+      searchInput.focus();
+      searchInput.value = e.key;
+      searchInput.dispatchEvent(new Event('input'));
+    }
+    return;
+  }
+
   if (e.key === 'Escape') {
+    // Check if search input has value, then clear it
+    const searchInput = document.getElementById('dashboard-search-input');
+    if (searchInput && searchInput.value) {
+      searchInput.value = '';
+      loadFiles(currentFolderId);
+      return;
+    }
     // 1. Close Office Editor
     const officeEditor = document.getElementById('office-editor-overlay');
     if (officeEditor && officeEditor.style.display !== 'none') {
