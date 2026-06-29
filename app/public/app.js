@@ -727,7 +727,7 @@ function renderFiles(files) {
     item.innerHTML = `
       <div class="file-item-checkbox"></div>
       <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
-      <div style="display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px;">
+      <div class="file-info-group" style="display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px;">
         <div class="file-name" title="${file.name}" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.name}</div>
         <div class="file-meta-list" style="display: none; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: var(--color-text-muted);">
           <span class="file-ext-label" style="text-transform: uppercase; font-weight: 600; font-size: 0.7rem; background: rgba(var(--color-accent-rgb), 0.1); color: var(--color-accent); padding: 1px 4px; border-radius: 3px;">${extVal}</span>
@@ -2977,13 +2977,21 @@ function applyBackgrounds(viewName) {
   document.body.style.backgroundAttachment = 'fixed';
   document.body.style.backgroundRepeat = 'no-repeat';
 
+  const orbs = document.getElementById('glowing-orbs-container');
+
   if (viewName === 'auth') {
     if (brandingCache.hasLoginBg) {
       document.body.style.backgroundImage = `url('/api/public/branding/login-bg?t=${Date.now()}')`;
+      if (orbs) orbs.style.display = 'none';
+    } else {
+      if (orbs) orbs.style.display = 'block';
     }
   } else {
     if (brandingCache.hasDashboardBg) {
       document.body.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
+      if (orbs) orbs.style.display = 'none';
+    } else {
+      if (orbs) orbs.style.display = 'block';
     }
   }
 }
@@ -3065,10 +3073,56 @@ async function loadBranding() {
   }
 }
 
+// Theme management functions
+function toggleTheme() {
+  const currentTheme = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', newTheme);
+  localStorage.setItem('theme', newTheme);
+  updateThemeIcons();
+}
+
+function updateThemeIcons() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
+                 (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  
+  const authToggleBtn = document.getElementById('auth-theme-toggle-btn');
+  const mainToggleBtn = document.getElementById('theme-toggle-btn');
+  
+  const iconName = isDark ? 'sun' : 'moon';
+  
+  if (authToggleBtn) {
+    authToggleBtn.innerHTML = `<i data-lucide="${iconName}" style="width: 18px; height: 18px;"></i>`;
+  }
+  if (mainToggleBtn) {
+    mainToggleBtn.innerHTML = `<i data-lucide="${iconName}" style="width: 18px; height: 18px;"></i>`;
+  }
+  
+  if (typeof lucide !== 'undefined' && lucide.createIcons) {
+    lucide.createIcons();
+  }
+}
+
 /* ==========================================================================
    INITIALIZATION
    ========================================================================== */
 window.onload = () => {
+  // Set initial theme
+  const savedTheme = localStorage.getItem('theme');
+  if (savedTheme) {
+    document.documentElement.setAttribute('data-theme', savedTheme);
+  }
+  updateThemeIcons();
+
+  const authToggleBtn = document.getElementById('auth-theme-toggle-btn');
+  if (authToggleBtn) {
+    authToggleBtn.onclick = toggleTheme;
+  }
+  const mainToggleBtn = document.getElementById('theme-toggle-btn');
+  if (mainToggleBtn) {
+    mainToggleBtn.onclick = toggleTheme;
+  }
+
   // Load branding info
   loadBranding();
 
@@ -4111,8 +4165,8 @@ function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
   lucide.createIcons();
 
   const sourceUrl = isPublic 
-    ? `/api/public/shares/${slug}/download/${fileId}`
-    : `/api/files/download/${fileId}`;
+    ? `/api/public/shares/${slug}/download/${fileId}?inline=true`
+    : `/api/files/download/${fileId}?inline=true`;
 
   iframe.src = sourceUrl;
   overlay.style.display = 'flex';

@@ -1029,6 +1029,25 @@ app.get('/api/files/download/:id', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'Physical file not found on disk' });
     }
 
+    if (req.query.inline === 'true') {
+      let mimeType = file.mime_type;
+      if (!mimeType) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (ext === 'pdf') {
+          mimeType = 'application/pdf';
+        } else {
+          mimeType = 'application/octet-stream';
+        }
+      }
+
+      return res.sendFile(filePath, {
+        headers: {
+          'Content-Type': mimeType,
+          'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
+        }
+      });
+    }
+
     res.download(filePath, file.name);
   } catch (err) {
     console.error('Error downloading file:', err);
@@ -2485,6 +2504,29 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found.' });
+
+    if (req.query.inline === 'true') {
+      let mimeType = file.mime_type;
+      if (!mimeType) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (ext === 'pdf') {
+          mimeType = 'application/pdf';
+        } else {
+          mimeType = 'application/octet-stream';
+        }
+      }
+
+      return res.sendFile(filePath, {
+        headers: {
+          'Content-Type': mimeType,
+          'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
+        }
+      }, async (err) => {
+        if (!err) {
+          await incrementDownloadCountAndCheckSelfDestruct(share.id);
+        }
+      });
+    }
 
     // Increment download count and check self-destruct after download completes
     res.download(filePath, file.name, async (err) => {

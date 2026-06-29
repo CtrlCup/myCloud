@@ -15,14 +15,25 @@
 </head>
 <body>
 
+  <!-- Floating Glowing Orbs Background -->
+  <div id="glowing-orbs-container" style="position: absolute; inset: 0; overflow: hidden; z-index: 0; pointer-events: none;">
+    <div style="position: absolute; width: 480px; height: 480px; border-radius: 50%; filter: blur(72px); opacity: 0.55; top: -130px; left: -110px; background: radial-gradient(circle, var(--color-accent), transparent 70%); animation: f1 19s ease-in-out infinite;"></div>
+    <div style="position: absolute; width: 440px; height: 440px; border-radius: 50%; filter: blur(72px); opacity: 0.5; top: -70px; right: -90px; background: radial-gradient(circle, #bf5af2, transparent 70%); animation: f2 23s ease-in-out infinite;"></div>
+    <div style="position: absolute; width: 420px; height: 420px; border-radius: 50%; filter: blur(72px); opacity: 0.45; bottom: -130px; left: 12%; background: radial-gradient(circle, #30d158, transparent 70%); animation: f3 21s ease-in-out infinite;"></div>
+    <div style="position: absolute; width: 400px; height: 400px; border-radius: 50%; filter: blur(72px); opacity: 0.45; bottom: -90px; right: 6%; background: radial-gradient(circle, #ff9f0a, transparent 70%); animation: f1 26s ease-in-out infinite;"></div>
+  </div>
+
   <div class="container">
     <!-- HEADER -->
     <header>
       <div class="logo">
         <i data-lucide="cloud"></i> my<span>Cloud</span> Shared
       </div>
-      <div class="user-nav">
-        <span class="badge" id="share-owner-badge" style="font-weight: 500;">Geteilter Inhalt</span>
+      <div class="user-nav" style="display: flex; align-items: center; gap: 0.75rem;">
+        <button id="share-theme-toggle-btn" class="btn btn-icon" style="border-radius: 50%; width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--glass-border);" title="Hintergrund wechseln">
+          <i data-lucide="moon" style="width: 18px; height: 18px;"></i>
+        </button>
+        <span class="badge" id="share-owner-badge" style="font-weight: 500; margin: 0;">Geteilter Inhalt</span>
       </div>
     </header>
 
@@ -570,12 +581,17 @@
         }
 
         // Apply background
+        const orbs = document.getElementById('glowing-orbs-container');
         if (data.hasDashboardBg) {
           document.body.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
           document.body.style.backgroundSize = 'cover';
           document.body.style.backgroundPosition = 'center';
           document.body.style.backgroundAttachment = 'fixed';
           document.body.style.backgroundRepeat = 'no-repeat';
+          if (orbs) orbs.style.display = 'none';
+        } else {
+          document.body.style.backgroundImage = '';
+          if (orbs) orbs.style.display = 'block';
         }
 
         // Update Favicon
@@ -610,8 +626,45 @@
       }
     }
 
+    // Theme management functions
+    function toggleTheme() {
+      const currentTheme = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+      updateThemeIcons();
+    }
+
+    function updateThemeIcons() {
+      const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
+                     (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      
+      const shareToggleBtn = document.getElementById('share-theme-toggle-btn');
+      const iconName = isDark ? 'sun' : 'moon';
+      
+      if (shareToggleBtn) {
+        shareToggleBtn.innerHTML = `<i data-lucide="${iconName}" style="width: 18px; height: 18px;"></i>`;
+      }
+      
+      if (typeof lucide !== 'undefined' && lucide.createIcons) {
+        lucide.createIcons();
+      }
+    }
+
     // Start
     window.onload = () => {
+      // Set initial theme
+      const savedTheme = localStorage.getItem('theme');
+      if (savedTheme) {
+        document.documentElement.setAttribute('data-theme', savedTheme);
+      }
+      updateThemeIcons();
+
+      const shareToggleBtn = document.getElementById('share-theme-toggle-btn');
+      if (shareToggleBtn) {
+        shareToggleBtn.onclick = toggleTheme;
+      }
+
       loadBranding();
       loadShareData();
     };
@@ -1180,8 +1233,8 @@
       lucide.createIcons();
 
       const sourceUrl = isPublic 
-        ? `/api/public/shares/${slug}/download/${fileId}`
-        : `/api/files/download/${fileId}`;
+        ? `/api/public/shares/${slug}/download/${fileId}?inline=true`
+        : `/api/files/download/${fileId}?inline=true`;
 
       iframe.src = sourceUrl;
       overlay.style.display = 'flex';
