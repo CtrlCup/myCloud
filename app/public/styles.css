@@ -1464,3 +1464,347 @@ tr:hover td {
   outline: none !important;
   box-shadow: none !important;
 }
+
+/* ════════════════════════════════════════════════════
+   ANIMATION SYSTEM
+   ════════════════════════════════════════════════════ */
+
+/* ─── File item staggered entrance ─── */
+@keyframes fileItemIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.file-item-enter {
+  animation: fileItemIn 0.28s cubic-bezier(0.25, 0.8, 0.25, 1) both;
+  animation-delay: calc(var(--fi, 0) * 22ms);
+}
+
+/* ─── File grid folder-navigation exit ─── */
+@keyframes gridExit {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to   { opacity: 0; transform: scale(0.985) translateY(6px); }
+}
+.file-grid.grid-exit {
+  animation: gridExit 0.15s ease forwards;
+  pointer-events: none;
+}
+
+/* ─── Multi-select bar slide-up bounce ─── */
+@keyframes barSlideUp {
+  from { opacity: 0; transform: translateX(-50%) translateY(28px) scale(0.88); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
+#multi-actions-bar.bar-enter {
+  animation: barSlideUp 0.38s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+/* ─── Drag Ghost ─── */
+@keyframes ghostAppear {
+  from { opacity: 0; transform: scale(0.75); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes ghostLeave {
+  to { opacity: 0; transform: scale(0.7); }
+}
+
+#drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 99999;
+  width: 80px;
+  height: 80px;
+  animation: ghostAppear 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  transform-origin: top left;
+}
+#drag-ghost.ghost-leaving {
+  animation: ghostLeave 0.2s ease forwards;
+}
+
+.ghost-card {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  background: var(--glass-bg);
+  background-image: var(--glass-highlight);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ghost-back-1 {
+  transform: rotate(6deg) translate(5px, -5px);
+  opacity: 0.7;
+}
+.ghost-back-2 {
+  transform: rotate(11deg) translate(10px, -10px);
+  opacity: 0.45;
+}
+.ghost-main {
+  transform: rotate(-2deg);
+  z-index: 1;
+}
+.ghost-count {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  box-shadow: 0 2px 8px rgba(var(--color-accent-rgb), 0.5);
+}
+
+/* ─── Context menu appear ─── */
+@keyframes contextIn {
+  from { opacity: 0; transform: scale(0.92) translateY(-6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+.context-menu {
+  animation: contextIn 0.18s cubic-bezier(0.25, 0.8, 0.25, 1) forwards;
+  transform-origin: top left;
+}
+
+/* ─── View transitions ─── */
+@keyframes viewFadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+.view-enter {
+  animation: viewFadeIn 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) both;
+}
+
+/* ─── Toast bounce-in ─── */
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(20px) scale(0.94); }
+  to   { opacity: 1; transform: none; }
+}
+.notification.show {
+  animation: toastIn 0.28s cubic-bezier(0.34, 1.3, 0.64, 1) forwards;
+}
+
+/* ─── File item selection pulse ─── */
+@keyframes selectPop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+.file-item.selected {
+  animation: selectPop 0.22s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+/* ─── Modal spring entrance ─── */
+.modal {
+  transition: transform 0.35s cubic-bezier(0.34, 1.4, 0.64, 1), opacity 0.25s ease !important;
+}
+.modal-overlay.active .modal {
+  transform: scale(1) translateY(0) !important;
+}
+
+/* ════════════════════════════════════════════════════
+   CODE EDITOR — Nimbus Glass IDE Style
+   ════════════════════════════════════════════════════ */
+
+:root {
+  --editor-bg:       #0d0d14;
+  --editor-titlebar: rgba(18, 18, 28, 0.95);
+  --editor-border:   rgba(255,255,255,0.08);
+  --editor-fg:       rgba(240,240,255,0.92);
+  --editor-muted:    rgba(180,180,210,0.5);
+  --editor-accent:   #0a84ff;
+  --editor-save:     #50fa7b;
+}
+
+/* ─── Titlebar ─── */
+.editor-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1rem;
+  height: 44px;
+  flex-shrink: 0;
+  background: var(--editor-titlebar);
+  border-bottom: 1px solid var(--editor-border);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  gap: 0.75rem;
+  color: var(--editor-fg);
+  user-select: none;
+}
+
+.editor-titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.editor-titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+/* ─── File badge ─── */
+.editor-file-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: rgba(10,132,255,0.18);
+  border: 1px solid rgba(10,132,255,0.3);
+  color: #0a84ff;
+  flex-shrink: 0;
+}
+
+/* ─── Collab pill ─── */
+.editor-collab-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--editor-border);
+  border-radius: 20px;
+  padding: 0.18rem 0.6rem;
+  font-size: 0.72rem;
+  color: var(--editor-fg);
+  flex-shrink: 0;
+}
+.editor-collab-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #50fa7b;
+  box-shadow: 0 0 6px #50fa7b;
+  animation: pulse 2s infinite ease-in-out;
+}
+
+/* ─── Language selector ─── */
+.editor-lang-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--editor-border);
+  border-radius: 8px;
+  padding: 0.2rem 0.55rem;
+  color: var(--editor-muted);
+  flex-shrink: 0;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.editor-lang-wrap:hover {
+  border-color: rgba(10,132,255,0.4);
+  background: rgba(10,132,255,0.07);
+  color: var(--editor-fg);
+}
+.editor-lang-select {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 0.25rem;
+}
+.editor-lang-select option {
+  background: #1e1e2e;
+  color: #e0e0f0;
+}
+
+/* ─── Keyboard shortcut hint ─── */
+.editor-kbd {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--editor-muted);
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--editor-border);
+  border-radius: 5px;
+  padding: 0.15rem 0.45rem;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+/* ─── Save status indicator ─── */
+.editor-save-status {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--editor-save);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+/* ─── Divider ─── */
+.editor-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--editor-border);
+  margin: 0 0.15rem;
+}
+
+/* ─── Editor action buttons ─── */
+.editor-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 28px;
+  padding: 0 0.65rem;
+  border: 1px solid var(--editor-border);
+  border-radius: 7px;
+  background: rgba(255,255,255,0.05);
+  color: var(--editor-fg);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.15s ease;
+  white-space: nowrap;
+}
+.editor-btn:hover {
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.2);
+  transform: translateY(-1px);
+}
+.editor-btn:active {
+  transform: scale(0.96);
+}
+.editor-btn-save {
+  background: rgba(10,132,255,0.18);
+  border-color: rgba(10,132,255,0.4);
+  color: #60a8ff;
+}
+.editor-btn-save:hover {
+  background: rgba(10,132,255,0.28);
+  border-color: rgba(10,132,255,0.6);
+  color: #80bfff;
+}
+.editor-btn-close {
+  padding: 0 0.45rem;
+}
+.editor-btn-close:hover {
+  background: rgba(255,69,58,0.15);
+  border-color: rgba(255,69,58,0.4);
+  color: #ff453a;
+}
+
+/* ─── Monaco container subtle glow ─── */
+#monaco-editor-container {
+  background: var(--editor-bg);
+}

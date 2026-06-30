@@ -973,28 +973,72 @@
   </div>
 
   <!-- CODE EDITOR MODAL -->
-  <div class="modal-overlay" id="code-editor-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
+  <div class="modal-overlay" id="code-editor-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: #0d0d14;">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
-      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
-        <div style="display: flex; align-items: center; gap: 1rem;">
-          <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="code-editor-title">
-            <i data-lucide="file-code"></i> Code Editor
+
+      <!-- Editor Titlebar -->
+      <div class="editor-titlebar">
+
+        <!-- Left: file icon + name + collab -->
+        <div class="editor-titlebar-left">
+          <div class="editor-file-badge">
+            <i data-lucide="file-code" style="width:15px;height:15px;"></i>
           </div>
-          <div id="collab-users-container" style="display: flex; align-items: center; gap: 0.5rem; background: rgba(255,255,255,0.05); padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.85rem; border: 1px solid var(--color-border);">
-            <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #50fa7b; box-shadow: 0 0 8px #50fa7b;"></span>
-            <span id="collab-users-list" style="font-weight: 500;">Nur du bist online</span>
+          <span id="code-editor-title" style="font-weight:600; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:260px; color:var(--editor-fg);">Editor</span>
+          <div id="collab-users-container" class="editor-collab-pill" style="display:none;">
+            <span class="editor-collab-dot"></span>
+            <span id="collab-users-list" style="font-size:0.75rem; font-weight:500;">Nur du</span>
           </div>
         </div>
-        <div style="display: flex; gap: 0.75rem;">
-          <button class="btn btn-primary" id="save-code-editor-btn" style="justify-content: center;">
-            <i data-lucide="save"></i> Speichern
+
+        <!-- Center: language selector -->
+        <div class="editor-lang-wrap">
+          <i data-lucide="code-2" style="width:13px;height:13px;opacity:0.6;"></i>
+          <select id="monaco-lang-select" class="editor-lang-select" title="Programmiersprache wechseln">
+            <option value="plaintext">Plaintext</option>
+            <option value="javascript">JavaScript</option>
+            <option value="typescript">TypeScript</option>
+            <option value="html">HTML</option>
+            <option value="css">CSS</option>
+            <option value="scss">SCSS</option>
+            <option value="less">Less</option>
+            <option value="json">JSON</option>
+            <option value="xml">XML</option>
+            <option value="markdown">Markdown</option>
+            <option value="python">Python</option>
+            <option value="java">Java</option>
+            <option value="c">C</option>
+            <option value="cpp">C++</option>
+            <option value="csharp">C#</option>
+            <option value="go">Go</option>
+            <option value="rust">Rust</option>
+            <option value="php">PHP</option>
+            <option value="ruby">Ruby</option>
+            <option value="shell">Shell</option>
+            <option value="sql">SQL</option>
+            <option value="yaml">YAML</option>
+            <option value="dockerfile">Dockerfile</option>
+            <option value="graphql">GraphQL</option>
+          </select>
+        </div>
+
+        <!-- Right: save status + buttons -->
+        <div class="editor-titlebar-right">
+          <span id="editor-save-status" class="editor-save-status"></span>
+          <kbd class="editor-kbd">Strg+S</kbd>
+          <button id="save-code-editor-btn" class="editor-btn editor-btn-save" title="Speichern (Strg+S)">
+            <i data-lucide="save" style="width:15px;height:15px;"></i>
+            <span>Speichern</span>
           </button>
-          <button class="btn" id="close-code-editor-btn" style="justify-content: center;">
-            <i data-lucide="x"></i> Schließen
+          <div class="editor-divider"></div>
+          <button id="close-code-editor-btn" class="editor-btn editor-btn-close" title="Schließen (ESC)">
+            <i data-lucide="x" style="width:15px;height:15px;"></i>
           </button>
         </div>
       </div>
-      <div id="monaco-editor-container" style="flex: 1; width: 100%; height: 100%; background: #1e1e1e;"></div>
+
+      <!-- Monaco Editor -->
+      <div id="monaco-editor-container" style="flex:1; width:100%; height:100%; min-height:0;"></div>
     </div>
   </div>
 

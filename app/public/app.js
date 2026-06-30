@@ -584,6 +584,13 @@ document.getElementById('logo-btn').onclick = (e) => {
 async function loadFiles(folderId = null) {
   try {
     currentFolderId = folderId;
+
+    // Fade out current content
+    const grid = document.getElementById('file-grid');
+    if (grid && grid.children.length > 0) {
+      grid.classList.add('grid-exit');
+    }
+
     let url = '/api/files/list';
     if (folderId) {
       url += `?parentId=${folderId}`;
@@ -599,6 +606,7 @@ async function loadFiles(folderId = null) {
     }
 
     const files = await res.json();
+    if (grid) grid.classList.remove('grid-exit');
     renderFiles(files);
     renderBreadcrumbs();
   } catch (err) {
@@ -728,6 +736,46 @@ const FILE_TYPE_MAP = {
   dmg:          ['Programm',      '#95a5a6'],
 };
 
+/* ─── Drag Ghost ─── */
+let _dragGhost = null;
+
+function createDragGhost(count, iconColor) {
+  removeDragGhost();
+  const ghost = document.createElement('div');
+  ghost.id = 'drag-ghost';
+
+  for (let i = Math.min(count - 1, 2); i >= 1; i--) {
+    const back = document.createElement('div');
+    back.className = `ghost-card ghost-back-${i}`;
+    ghost.appendChild(back);
+  }
+
+  const main = document.createElement('div');
+  main.className = 'ghost-card ghost-main';
+  main.innerHTML = `<i data-lucide="files" style="width:28px;height:28px;color:${iconColor};"></i>`;
+  ghost.appendChild(main);
+
+  if (count > 1) {
+    const badge = document.createElement('div');
+    badge.className = 'ghost-count';
+    badge.textContent = count;
+    ghost.appendChild(badge);
+  }
+
+  document.body.appendChild(ghost);
+  _dragGhost = ghost;
+  if (typeof lucide !== 'undefined') lucide.createIcons({ el: ghost });
+}
+
+function removeDragGhost() {
+  if (_dragGhost) {
+    _dragGhost.classList.add('ghost-leaving');
+    const el = _dragGhost;
+    _dragGhost = null;
+    setTimeout(() => el.remove(), 220);
+  }
+}
+
 function getFileTypeLabel(file) {
   if (file.is_folder) return 'Ordner';
   const ext = file.name.split('.').pop().toLowerCase();
@@ -757,10 +805,12 @@ function renderFiles(files) {
     return;
   }
 
-  files.forEach(file => {
+  files.forEach((file, _fi) => {
     const item = document.createElement('div');
     item.className = 'file-item';
     item.setAttribute('data-id', file.id);
+    item.style.setProperty('--fi', _fi);
+    item.classList.add('file-item-enter');
     if (selectedFileIds.includes(file.id)) {
       item.classList.add('selected');
     }
@@ -930,12 +980,18 @@ function renderFiles(files) {
       const ids = selectedFileIds.includes(file.id) ? selectedFileIds : [file.id];
       e.dataTransfer.setData('text/x-mycloud-ids', JSON.stringify(ids));
       e.dataTransfer.effectAllowed = 'move';
+      // Suppress native ghost image
+      const blank = new Image();
+      blank.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAUEBAAAACwAAAAAAQABAAACAkQBADs=';
+      e.dataTransfer.setDragImage(blank, 0, 0);
+      createDragGhost(ids.length, iconColor);
       item.classList.add('dragging');
     });
 
     item.addEventListener('dragend', () => {
       item.classList.remove('dragging');
       document.querySelectorAll('.file-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+      removeDragGhost();
     });
 
     if (file.is_folder) {
@@ -1027,10 +1083,17 @@ function updateMultiSelectUI() {
   });
 
   if (selectedFileIds.length > 0) {
+    const wasHidden = bar.style.display !== 'flex';
     bar.style.display = 'flex';
+    if (wasHidden) {
+      bar.classList.remove('bar-enter');
+      void bar.offsetWidth;
+      bar.classList.add('bar-enter');
+    }
     countSpan.textContent = `${selectedFileIds.length} ausgewählt`;
   } else {
     bar.style.display = 'none';
+    bar.classList.remove('bar-enter');
   }
 }
 
@@ -2034,6 +2097,13 @@ dashboard.addEventListener('drop', async (e) => {
   if (files.length === 0) return;
 
   await uploadMultipleFiles(files);
+});
+
+document.addEventListener('dragover', (e) => {
+  if (_dragGhost) {
+    _dragGhost.style.left = (e.clientX + 14) + 'px';
+    _dragGhost.style.top  = (e.clientY + 14) + 'px';
+  }
 });
 
 
@@ -4036,10 +4106,14 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     }
 
     const container = document.getElementById('monaco-editor-container');
-    container.innerHTML = ''; // Clear previous
+    container.innerHTML = '';
 
     const language = getMonacoLanguage(fileName);
-    
+
+    // Sync language selector
+    const langSelect = document.getElementById('monaco-lang-select');
+    if (langSelect) langSelect.value = language;
+
     monacoEditorInstance = monaco.editor.create(container, {
       value: textContent,
       language: language,
@@ -4047,13 +4121,70 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
       automaticLayout: true,
       readOnly: readOnly,
       fontSize: 14,
-      minimap: { enabled: true },
-      bracketPairColorization: {
-        enabled: true
-      },
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, 'Courier New', monospace",
+      fontLigatures: true,
+      lineHeight: 22,
+      letterSpacing: 0.3,
+      minimap: { enabled: true, scale: 1 },
+      bracketPairColorization: { enabled: true },
       'semanticHighlighting.enabled': true,
-      colorDecorators: true
+      colorDecorators: true,
+      cursorSmoothCaretAnimation: 'on',
+      cursorBlinking: 'phase',
+      smoothScrolling: true,
+      roundedSelection: true,
+      renderLineHighlight: 'gutter',
+      padding: { top: 12, bottom: 12 },
+      // Autocomplete & IntelliSense
+      quickSuggestions: { other: true, comments: false, strings: true },
+      suggestOnTriggerCharacters: true,
+      acceptSuggestionOnEnter: 'on',
+      tabCompletion: 'on',
+      wordBasedSuggestions: 'matchingDocuments',
+      parameterHints: { enabled: true },
+      inlineSuggest: { enabled: true },
+      snippetSuggestions: 'inline',
+      suggest: {
+        showKeywords: true,
+        showSnippets: true,
+        showClasses: true,
+        showFunctions: true,
+        showVariables: true,
+        showModules: true,
+        showProperties: true,
+        shareSuggestSelections: true,
+        insertMode: 'replace',
+        filterGraceful: true,
+        localityBonus: true,
+      },
+      // Editor UX
+      formatOnPaste: true,
+      formatOnType: true,
+      autoClosingBrackets: 'always',
+      autoClosingQuotes: 'always',
+      autoIndent: 'full',
+      folding: true,
+      foldingHighlight: true,
+      showFoldingControls: 'mouseover',
+      links: true,
+      mouseWheelZoom: true,
+      scrollBeyondLastLine: false,
     });
+
+    // Ctrl+S save shortcut inside Monaco
+    if (!readOnly) {
+      monacoEditorInstance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+        document.getElementById('save-code-editor-btn').click();
+      });
+    }
+
+    // Language selector handler
+    if (langSelect) {
+      langSelect.onchange = () => {
+        const model = monacoEditorInstance.getModel();
+        if (model) monaco.editor.setModelLanguage(model, langSelect.value);
+      };
+    }
 
     // Start Collaboration WebSocket
     const collabUsername = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.username : ('Gast_' + Math.floor(Math.random() * 900 + 100));
@@ -4078,14 +4209,15 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
         if (!monacoEditorInstance || readOnly) return;
         const currentContent = monacoEditorInstance.getValue();
         try {
-          const saveUrl = isPublic 
+          const saveUrl = isPublic
             ? `/api/public/shares/${slug}/content/${fileId}`
             : `/api/files/content/${fileId}`;
-          await fetch(saveUrl, {
+          const r = await fetch(saveUrl, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content: currentContent })
           });
+          if (r.ok && typeof showEditorSaveStatus === 'function') showEditorSaveStatus('✓ Auto-Gespeichert');
         } catch (e) {
           console.error('Autosave error:', e);
         }
@@ -4107,32 +4239,48 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     monacoEditorInstance.onDidChangeCursorPosition(sendCursorUpdate);
     monacoEditorInstance.onDidChangeCursorSelection(sendCursorUpdate);
 
+    const showEditorSaveStatus = (text, isError = false) => {
+      const el = document.getElementById('editor-save-status');
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = isError ? '#ff453a' : '#50fa7b';
+      el.style.opacity = '1';
+      clearTimeout(el._fadeTimer);
+      el._fadeTimer = setTimeout(() => { el.style.opacity = '0'; }, 2200);
+    };
+
     if (!readOnly) {
-      document.getElementById('save-code-editor-btn').onclick = async () => {
+      const doSave = async () => {
         const updatedContent = monacoEditorInstance.getValue();
-        showToast('Speichere Datei...');
-        
+        const saveStatus = document.getElementById('editor-save-status');
+        if (saveStatus) { saveStatus.textContent = '↑ Speichern…'; saveStatus.style.color = 'var(--color-text-muted)'; saveStatus.style.opacity = '1'; }
+
         try {
-          const saveUrl = isPublic 
+          const saveUrl = isPublic
             ? `/api/public/shares/${slug}/content/${fileId}`
             : `/api/files/content/${fileId}`;
-            
           const saveRes = await fetch(saveUrl, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content: updatedContent })
           });
-
           if (saveRes.ok) {
-            showToast('Datei erfolgreich gespeichert.');
+            showEditorSaveStatus('✓ Gespeichert');
           } else {
             const err = await saveRes.json();
-            showToast(err.error || 'Fehler beim Speichern.');
+            showEditorSaveStatus(err.error || 'Fehler', true);
           }
-        } catch (err) {
-          showToast('Verbindungsfehler beim Speichern.');
+        } catch {
+          showEditorSaveStatus('Verbindungsfehler', true);
         }
       };
+
+      document.getElementById('save-code-editor-btn').onclick = doSave;
+    } else {
+      const saveBtn = document.getElementById('save-code-editor-btn');
+      if (saveBtn) saveBtn.style.display = 'none';
+      const kbd = document.querySelector('.editor-kbd');
+      if (kbd) kbd.style.display = 'none';
     }
   } catch (err) {
     console.error('Error opening code editor:', err);
