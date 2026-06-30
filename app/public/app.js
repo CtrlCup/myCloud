@@ -665,6 +665,81 @@ function applyLayoutDensity() {
   }
 }
 
+// Category → [label, color]
+const FILE_TYPE_MAP = {
+  // Ordner
+  folder:       ['Ordner',        '#f5a623'],
+  // Dokumente
+  pdf:          ['PDF',           '#e74c3c'],
+  docx:         ['Dokument',      '#2980b9'], doc: ['Dokument','#2980b9'],
+  odt:          ['Dokument',      '#2980b9'], rtf: ['Dokument','#2980b9'],
+  // Tabellen
+  xlsx:         ['Tabelle',       '#27ae60'], xls: ['Tabelle','#27ae60'],
+  ods:          ['Tabelle',       '#27ae60'], csv: ['Tabelle','#27ae60'],
+  // Präsentationen
+  pptx:         ['Präsentation',  '#e67e22'], ppt: ['Präsentation','#e67e22'],
+  odp:          ['Präsentation',  '#e67e22'],
+  // Bilder
+  png:          ['Bild',          '#8e44ad'], jpg: ['Bild','#8e44ad'],
+  jpeg:         ['Bild',          '#8e44ad'], gif: ['Bild','#8e44ad'],
+  webp:         ['Bild',          '#8e44ad'], svg: ['Bild','#8e44ad'],
+  bmp:          ['Bild',          '#8e44ad'], ico: ['Bild','#8e44ad'],
+  // RAW-Bilder
+  heic:         ['RAW-Bild',      '#6c3483'], heif: ['RAW-Bild','#6c3483'],
+  cr2:          ['RAW-Bild',      '#6c3483'], nef:  ['RAW-Bild','#6c3483'],
+  dng:          ['RAW-Bild',      '#6c3483'], arw:  ['RAW-Bild','#6c3483'],
+  orf:          ['RAW-Bild',      '#6c3483'], rw2:  ['RAW-Bild','#6c3483'],
+  pef:          ['RAW-Bild',      '#6c3483'], raf:  ['RAW-Bild','#6c3483'],
+  // Video
+  mp4:          ['Video',         '#c0392b'], webm: ['Video','#c0392b'],
+  mov:          ['Video',         '#c0392b'], avi:  ['Video','#c0392b'],
+  mkv:          ['Video',         '#c0392b'], flv:  ['Video','#c0392b'],
+  wmv:          ['Video',         '#c0392b'], m4v:  ['Video','#c0392b'],
+  // Audio
+  mp3:          ['Audio',         '#1abc9c'], wav:  ['Audio','#1abc9c'],
+  flac:         ['Audio',         '#1abc9c'], aac:  ['Audio','#1abc9c'],
+  m4a:          ['Audio',         '#1abc9c'], ogg:  ['Audio','#1abc9c'],
+  // Text & Markdown
+  txt:          ['Textdatei',     '#7f8c8d'], md: ['Markdown','#7f8c8d'],
+  // Code
+  js:           ['JavaScript',    '#f1c40f'], mjs: ['JavaScript','#f1c40f'],
+  cjs:          ['JavaScript',    '#f1c40f'], jsx: ['JavaScript','#f1c40f'],
+  ts:           ['TypeScript',    '#3498db'], tsx: ['TypeScript','#3498db'],
+  html:         ['HTML',          '#e74c3c'], xml: ['XML','#e74c3c'],
+  css:          ['CSS',           '#2980b9'], scss: ['CSS','#2980b9'], less: ['CSS','#2980b9'],
+  py:           ['Python',        '#3498db'], json: ['JSON','#95a5a6'],
+  yaml:         ['YAML',          '#95a5a6'], yml:  ['YAML','#95a5a6'],
+  sh:           ['Shell',         '#2c3e50'], bash: ['Shell','#2c3e50'],
+  php:          ['PHP',           '#8e44ad'], rb: ['Ruby','#c0392b'],
+  sql:          ['SQL',           '#16a085'],
+  c:            ['C-Code',        '#2c3e50'], cpp: ['C++','#2c3e50'],
+  h:            ['Header',        '#7f8c8d'], hpp: ['Header','#7f8c8d'],
+  cs:           ['C#',            '#27ae60'], go: ['Go','#1abc9c'],
+  rs:           ['Rust',          '#e67e22'], java: ['Java','#e74c3c'],
+  // Archive
+  zip:          ['Archiv',        '#d35400'], tar:  ['Archiv','#d35400'],
+  gz:           ['Archiv',        '#d35400'], rar:  ['Archiv','#d35400'],
+  '7z':         ['Archiv',        '#d35400'], bz2:  ['Archiv','#d35400'],
+  xz:           ['Archiv',        '#d35400'],
+  // System/Sonstiges
+  iso:          ['ISO-Image',     '#7f8c8d'], apk: ['Android-App','#27ae60'],
+  deb:          ['Paket',         '#7f8c8d'], rpm: ['Paket','#7f8c8d'],
+  exe:          ['Programm',      '#95a5a6'], msi: ['Programm','#95a5a6'],
+  dmg:          ['Programm',      '#95a5a6'],
+};
+
+function getFileTypeLabel(file) {
+  if (file.is_folder) return 'Ordner';
+  const ext = file.name.split('.').pop().toLowerCase();
+  return FILE_TYPE_MAP[ext]?.[0] || (ext ? ext.toUpperCase() : 'Datei');
+}
+
+function getFileIconColor(file) {
+  if (file.is_folder) return FILE_TYPE_MAP.folder[1];
+  const ext = file.name.split('.').pop().toLowerCase();
+  return FILE_TYPE_MAP[ext]?.[1] || 'var(--color-accent)';
+}
+
 function renderFiles(files) {
   renderedFilesList = files;
   const grid = document.getElementById('file-grid');
@@ -714,28 +789,30 @@ function renderFiles(files) {
     const isImg = !file.is_folder && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext);
     const isVid = !file.is_folder && ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext);
 
-    let iconHTML = `<i data-lucide="${iconName}"></i>`;
+    const iconColor = getFileIconColor(file);
+    let iconHTML = `<i data-lucide="${iconName}" style="color: ${iconColor};"></i>`;
     if (isImg || isVid) {
       const thumbUrl = `/api/files/thumbnail/${file.id}`;
       iconHTML = `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
-                  <i data-lucide="${iconName}" style="display: none;"></i>`;
+                  <i data-lucide="${iconName}" style="display: none; color: ${iconColor};"></i>`;
     }
 
-    const extVal = file.is_folder ? 'Ordner' : (file.name.split('.').pop().toLowerCase() || 'Datei');
+    const typeLabel = getFileTypeLabel(file);
     const sizeStr = formatBytes(file.size);
 
     item.innerHTML = `
       <div class="file-item-checkbox"></div>
-      <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
       <div class="file-info-group" style="display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px;">
         <div class="file-name" title="${file.name}" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.name}</div>
         <div class="file-meta-list" style="display: none; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: var(--color-text-muted);">
-          <span class="file-ext-label" style="text-transform: uppercase; font-weight: 600; font-size: 0.7rem; background: rgba(var(--color-accent-rgb), 0.1); color: var(--color-accent); padding: 1px 4px; border-radius: 3px;">${extVal}</span>
+          <span class="file-ext-label" style="text-transform: uppercase; font-weight: 600; font-size: 0.7rem; background: rgba(var(--color-accent-rgb), 0.1); color: var(--color-accent); padding: 1px 4px; border-radius: 3px;">${typeLabel}</span>
           <span>•</span>
           <span>${sizeStr}</span>
         </div>
       </div>
-      <div class="file-info">${file.is_folder ? 'Ordner' : sizeStr}</div>
+      <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
+      <div class="file-type-label" style="color: ${iconColor};">${typeLabel}</div>
+      <div class="file-info">${sizeStr}</div>
       <div class="file-actions">
         <button class="btn btn-icon btn-action-more" style="padding: 4px; background: var(--color-surface); border-radius: 4px;" title="Optionen">
           <i data-lucide="more-vertical" style="width: 16px; height: 16px;"></i>
