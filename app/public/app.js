@@ -846,6 +846,65 @@ function renderFiles(files) {
       }
     };
 
+    // Drag & Drop (internal: move into folder)
+    item.setAttribute('draggable', 'true');
+
+    item.addEventListener('dragstart', (e) => {
+      const ids = selectedFileIds.includes(file.id) ? selectedFileIds : [file.id];
+      e.dataTransfer.setData('text/x-mycloud-ids', JSON.stringify(ids));
+      e.dataTransfer.effectAllowed = 'move';
+      item.classList.add('dragging');
+    });
+
+    item.addEventListener('dragend', () => {
+      item.classList.remove('dragging');
+      document.querySelectorAll('.file-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+    });
+
+    if (file.is_folder) {
+      item.addEventListener('dragover', (e) => {
+        if (e.dataTransfer.types.includes('text/x-mycloud-ids')) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = 'move';
+          item.classList.add('drag-over');
+        }
+      });
+
+      item.addEventListener('dragleave', (e) => {
+        if (!item.contains(e.relatedTarget)) {
+          item.classList.remove('drag-over');
+        }
+      });
+
+      item.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        item.classList.remove('drag-over');
+        const raw = e.dataTransfer.getData('text/x-mycloud-ids');
+        if (!raw) return;
+        const ids = JSON.parse(raw);
+        if (ids.includes(file.id)) return;
+        try {
+          const res = await fetch('/api/files/move-multiple', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileIds: ids, targetFolderId: file.id })
+          });
+          if (res.ok) {
+            showToast(`${ids.length} Element(e) verschoben!`);
+            clearSelection();
+            loadFiles(currentFolderId);
+          } else {
+            const err = await res.json();
+            showToast(err.error || 'Fehler beim Verschieben.');
+          }
+        } catch {
+          showToast('Verbindungsfehler beim Verschieben.');
+        }
+      });
+    }
+
     // Right Click context menu for item
     item.oncontextmenu = (e) => {
       e.preventDefault();
@@ -1789,6 +1848,18 @@ async function deleteSelectedFiles() {
 // Multi Select Bar Event Listeners
 document.getElementById('multi-cancel-btn').onclick = () => clearSelection();
 document.getElementById('multi-delete-btn').onclick = () => deleteSelectedFiles();
+document.getElementById('multi-copy-btn').onclick = () => {
+  if (selectedFileIds.length === 0) return;
+  clipboardFileIds = [...selectedFileIds];
+  clipboardAction = 'copy';
+  showToast(`${selectedFileIds.length} Element(e) kopiert!`);
+};
+document.getElementById('multi-cut-btn').onclick = () => {
+  if (selectedFileIds.length === 0) return;
+  clipboardFileIds = [...selectedFileIds];
+  clipboardAction = 'cut';
+  showToast(`${selectedFileIds.length} Element(e) ausgeschnitten!`);
+};
 document.getElementById('multi-zip-btn').onclick = () => {
   if (selectedFileIds.length === 0) return;
   window.location.href = `/api/files/download-zip-multiple?ids=${selectedFileIds.join(',')}`;
@@ -1854,6 +1925,7 @@ let dragCounter = 0;
 
 dashboard.addEventListener('dragenter', (e) => {
   e.preventDefault();
+  if (e.dataTransfer.types.includes('text/x-mycloud-ids')) return;
   dragCounter++;
   if (dragCounter === 1) {
     dragOverlay.style.display = 'flex';
@@ -1866,6 +1938,7 @@ dashboard.addEventListener('dragover', (e) => {
 
 dashboard.addEventListener('dragleave', (e) => {
   e.preventDefault();
+  if (e.dataTransfer.types.includes('text/x-mycloud-ids')) return;
   dragCounter--;
   if (dragCounter === 0) {
     dragOverlay.style.display = 'none';
@@ -1876,6 +1949,9 @@ dashboard.addEventListener('drop', async (e) => {
   e.preventDefault();
   dragCounter = 0;
   dragOverlay.style.display = 'none';
+
+  // Internal drag-and-drop (moving items into folders) is handled by folder items themselves
+  if (e.dataTransfer.types.includes('text/x-mycloud-ids')) return;
 
   const files = e.dataTransfer.files;
   if (files.length === 0) return;
@@ -3482,8 +3558,8 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Ctrl + F (Focus Search)
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+  // Ctrl + F / Ctrl + S (Focus Search)
+  if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'f' || e.key.toLowerCase() === 's')) {
     const searchInput = document.getElementById('dashboard-search-input');
     if (searchInput) {
       e.preventDefault();
@@ -4473,6 +4549,20 @@ if (searchInput && searchDeepCheck) {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(triggerSearch, 300);
   };
+
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      clearTimeout(searchTimeout);
+      triggerSearch();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      searchInput.value = '';
+      updateSearchClearBtn();
+      searchInput.blur();
+      loadFiles(currentFolderId);
+    }
+  });
 
   searchDeepCheck.onchange = () => {
     if (searchInput.value.trim()) {

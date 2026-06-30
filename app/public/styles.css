@@ -917,6 +917,17 @@ tr:hover td {
   color: #ff453a;
 }
 
+/* ─── Drag & Drop (internal) ─── */
+.file-item.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+.file-item.drag-over {
+  outline: 2px solid var(--color-accent);
+  background: rgba(var(--color-accent-rgb), 0.1) !important;
+  transform: scale(1.03);
+}
+
 /* ─── Multi-Selection Action Bar ─── */
 .multi-action-btn {
   transition: background 0.18s ease, transform 0.18s ease, opacity 0.18s ease !important;
