@@ -818,6 +818,7 @@ function renderFiles(files) {
       }
 
       if (file.is_folder) {
+        clearSelection();
         breadcrumbsHistory.push({ id: file.id, name: file.name });
         loadFiles(file.id);
       } else {
@@ -891,7 +892,7 @@ function updateMultiSelectUI() {
 
   if (selectedFileIds.length > 0) {
     bar.style.display = 'flex';
-    countSpan.textContent = `${selectedFileIds.length} Element(e) ausgewählt`;
+    countSpan.textContent = `${selectedFileIds.length} ausgewählt`;
   } else {
     bar.style.display = 'none';
   }
@@ -3073,55 +3074,15 @@ async function loadBranding() {
   }
 }
 
-// Theme management functions
-function toggleTheme() {
-  const currentTheme = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-  const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', newTheme);
-  localStorage.setItem('theme', newTheme);
-  updateThemeIcons();
-}
-
-function updateThemeIcons() {
-  const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
-                 (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
-  
-  const authToggleBtn = document.getElementById('auth-theme-toggle-btn');
-  const mainToggleBtn = document.getElementById('theme-toggle-btn');
-  
-  const iconName = isDark ? 'sun' : 'moon';
-  
-  if (authToggleBtn) {
-    authToggleBtn.innerHTML = `<i data-lucide="${iconName}" style="width: 18px; height: 18px;"></i>`;
-  }
-  if (mainToggleBtn) {
-    mainToggleBtn.innerHTML = `<i data-lucide="${iconName}" style="width: 18px; height: 18px;"></i>`;
-  }
-  
-  if (typeof lucide !== 'undefined' && lucide.createIcons) {
-    lucide.createIcons();
-  }
-}
+// Theme follows system preferences automatically (no manual override)
 
 /* ==========================================================================
    INITIALIZATION
    ========================================================================== */
 window.onload = () => {
-  // Set initial theme
-  const savedTheme = localStorage.getItem('theme');
-  if (savedTheme) {
-    document.documentElement.setAttribute('data-theme', savedTheme);
-  }
-  updateThemeIcons();
-
-  const authToggleBtn = document.getElementById('auth-theme-toggle-btn');
-  if (authToggleBtn) {
-    authToggleBtn.onclick = toggleTheme;
-  }
-  const mainToggleBtn = document.getElementById('theme-toggle-btn');
-  if (mainToggleBtn) {
-    mainToggleBtn.onclick = toggleTheme;
-  }
+  // Clear any previously saved manual theme so system preference takes over
+  localStorage.removeItem('theme');
+  document.documentElement.removeAttribute('data-theme');
 
   // Load branding info
   loadBranding();
@@ -3510,6 +3471,12 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
       triggerPasteAction();
     }
+    return;
+  }
+
+  // Escape (Clear selection)
+  if (e.key === 'Escape' && selectedFileIds.length > 0) {
+    clearSelection();
     return;
   }
 

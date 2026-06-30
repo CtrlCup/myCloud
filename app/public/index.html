@@ -36,9 +36,6 @@
         <i data-lucide="cloud"></i> my<span>Cloud</span>
       </a>
       <div class="user-nav" style="display: flex; align-items: center; gap: 0.75rem;">
-        <button id="theme-toggle-btn" class="btn btn-icon" style="border-radius: 50%; width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--glass-border);" title="Hintergrund wechseln">
-          <i data-lucide="moon" style="width: 18px; height: 18px;"></i>
-        </button>
         <div class="user-menu-container" id="user-menu-container">
           <div class="user-menu-trigger" id="user-menu-trigger">
             <img id="nav-avatar" class="user-avatar" src="" alt="A">
@@ -63,11 +60,6 @@
 
     <!-- 1. AUTHENTIFIZIERUNGS-ANSICHT -->
     <main id="auth-view" class="auth-container" style="position: relative;">
-      <!-- Theme toggle button on login screen -->
-      <button id="auth-theme-toggle-btn" class="btn btn-icon" style="position: absolute; top: 1.5rem; right: 1.5rem; width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; z-index: 10;" title="Hintergrund wechseln">
-        <i data-lucide="moon" style="width: 18px; height: 18px;"></i>
-      </button>
-
       <div class="card auth-card">
         <h1 class="logo auth-title" style="justify-content: center; margin-bottom: 0.5rem;">
           <i data-lucide="cloud" style="width: 32px; height: 32px;"></i> my<span>Cloud</span>
@@ -175,25 +167,24 @@
       </div>
 
       <!-- Mehrfachauswahl Aktionsleiste -->
-      <div id="multi-actions-bar" class="card" style="display: none; position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 1050; max-width: 800px; width: 90%; padding: 1rem 1.5rem; justify-content: space-between; align-items: center; background: var(--glass-bg); border: 2px solid var(--color-accent); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); flex-wrap: wrap; gap: 1rem;">
-        <div style="font-weight: 600; display: flex; align-items: center; gap: 0.5rem;">
-          <i data-lucide="check-square" style="color: var(--color-accent); width: 20px; height: 20px;"></i>
-          <span id="multi-selection-count">0 Elemente ausgewählt</span>
+      <div id="multi-actions-bar" style="display: none; position: fixed; bottom: 1.75rem; left: 50%; transform: translateX(-50%); z-index: 1050; padding: 0.6rem 0.75rem; align-items: center; gap: 0.5rem; background: var(--glass-bg); background-image: var(--glass-highlight); border: 1px solid var(--glass-border); border-radius: 999px; box-shadow: var(--shadow-lg); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);">
+        <div style="display: flex; align-items: center; gap: 0.4rem; padding: 0 0.5rem 0 0.25rem; border-right: 1px solid var(--glass-border); margin-right: 0.25rem;">
+          <i data-lucide="check-circle-2" style="color: var(--color-accent); width: 16px; height: 16px; flex-shrink: 0;"></i>
+          <span id="multi-selection-count" style="font-size: 0.82rem; font-weight: 600; white-space: nowrap; color: var(--color-text);">0 ausgewählt</span>
         </div>
-        <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
-          <button class="btn" id="multi-zip-btn">
-            <i data-lucide="file-archive"></i> Als ZIP laden
-          </button>
-          <button class="btn" id="multi-share-btn">
-            <i data-lucide="share-2"></i> Teilen
-          </button>
-          <button class="btn" id="multi-delete-btn" style="color: #ff5555; border-color: rgba(255,0,0,0.3);">
-            <i data-lucide="trash-2"></i> Löschen
-          </button>
-          <button class="btn" id="multi-cancel-btn">
-            <i data-lucide="minus-square"></i> Auswahl aufheben
-          </button>
-        </div>
+        <button class="btn btn-icon multi-action-btn" id="multi-zip-btn" title="Als ZIP laden" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
+          <i data-lucide="archive" style="width: 17px; height: 17px;"></i>
+        </button>
+        <button class="btn btn-icon multi-action-btn" id="multi-share-btn" title="Teilen" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
+          <i data-lucide="share-2" style="width: 17px; height: 17px;"></i>
+        </button>
+        <button class="btn btn-icon multi-action-btn" id="multi-delete-btn" title="Löschen" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent; color: #ff453a;">
+          <i data-lucide="trash-2" style="width: 17px; height: 17px;"></i>
+        </button>
+        <div style="width: 1px; height: 20px; background: var(--glass-border); margin: 0 0.15rem;"></div>
+        <button class="btn btn-icon multi-action-btn" id="multi-cancel-btn" title="Auswahl aufheben (ESC)" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent; opacity: 0.6;">
+          <i data-lucide="x" style="width: 17px; height: 17px;"></i>
+        </button>
       </div>
 
       <!-- Drag & Drop Overlay über das gesamte Dashboard -->
@@ -1032,8 +1023,8 @@
           <i data-lucide="x"></i>
         </button>
       </div>
-      <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden;">
-        <video id="video-viewer-player" controls autoplay style="max-width: 90%; max-height: 90%; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
+      <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 0.75rem; overflow: hidden;">
+        <video id="video-viewer-player" controls autoplay style="width: 100%; height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
       </div>
     </div>
   </div>

@@ -917,6 +917,16 @@ tr:hover td {
   color: #ff453a;
 }
 
+/* ─── Multi-Selection Action Bar ─── */
+.multi-action-btn {
+  transition: background 0.18s ease, transform 0.18s ease, opacity 0.18s ease !important;
+}
+.multi-action-btn:hover {
+  background: var(--color-surface-hover) !important;
+  transform: scale(1.1) !important;
+  opacity: 1 !important;
+}
+
 /* ─── Share Page ─── */
 .share-info-card {
   max-width: 560px;
