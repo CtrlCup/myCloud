@@ -124,7 +124,10 @@
           <!-- Search Input with Deep Search check -->
           <div class="search-container" style="position: relative; display: flex; align-items: center;">
             <i data-lucide="search" style="position: absolute; left: 0.75rem; width: 16px; height: 16px; color: var(--color-text-muted); pointer-events: none;"></i>
-            <input type="text" id="dashboard-search-input" class="form-control" placeholder="Suchen..." style="padding-left: 2.25rem; padding-right: 9.5rem; width: 320px; font-size: 0.85rem; height: 38px; border-radius: var(--radius-sm);">
+            <input type="text" id="dashboard-search-input" class="form-control" placeholder="Suchen..." style="padding-left: 2.25rem; padding-right: 11rem; width: 320px; font-size: 0.85rem; height: 38px; border-radius: var(--radius-sm);">
+            <button id="search-clear-btn" type="button" title="Suche leeren" style="display: none; position: absolute; right: 9rem; background: none; border: none; cursor: pointer; color: var(--color-text-muted); padding: 0; width: 20px; height: 20px; align-items: center; justify-content: center; border-radius: 50%; transition: color 0.15s ease;">
+              <i data-lucide="x" style="width: 14px; height: 14px;"></i>
+            </button>
             <label style="position: absolute; right: 0.5rem; display: flex; align-items: center; gap: 0.4rem; font-size: 0.72rem; cursor: pointer; color: var(--color-text-muted); padding: 0.25rem 0.55rem; background: rgba(255,255,255,0.06); border-radius: 20px; border: 1px solid var(--glass-border); transition: all 0.2s ease; user-select: none;" title="Tiefensuche (OCR-PDFs & Textinhalte)">
               <input type="checkbox" id="dashboard-search-deep" style="display: none;">
               <span class="custom-indicator" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--color-text-muted); transition: all 0.2s ease;"></span>

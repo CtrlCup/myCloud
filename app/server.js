@@ -864,15 +864,22 @@ app.get('/api/files/search', requireAuth, async (req, res) => {
         GROUP BY id
       ) sz ON f.id = sz.id
       WHERE f.owner_id = $1 AND (f.name ILIKE $2`;
-    
+
     const params = [userId, `%${query}%`];
 
     if (deep) {
-      sql += ` OR f.content ILIKE $3`;
-      params.push(`%${query}%`);
+      sql += ` OR f.content ILIKE $2 OR word_similarity($3, f.name) > 0.3 OR word_similarity($3, COALESCE(f.content, '')) > 0.2`;
+      params.push(query);
     }
 
-    sql += `) ORDER BY f.is_folder DESC, f.name ASC`;
+    sql += `)
+      ORDER BY
+        CASE
+          WHEN f.name ILIKE $2 THEN 0
+          WHEN f.content ILIKE $2 THEN 1
+          ELSE 2
+        END,
+        f.is_folder DESC, f.name ASC`;
 
     const result = await pool.query(sql, params);
     res.json(result.rows);

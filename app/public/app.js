@@ -3429,6 +3429,8 @@ window.addEventListener('keydown', (e) => {
       if (searchInput) {
         searchInput.value = '';
         searchInput.blur();
+        const clearBtn = document.getElementById('search-clear-btn');
+        if (clearBtn) clearBtn.style.display = 'none';
         loadFiles(currentFolderId);
       }
     }
@@ -4449,7 +4451,25 @@ if (searchInput && searchDeepCheck) {
     }
   };
 
+  const searchClearBtn = document.getElementById('search-clear-btn');
+
+  const updateSearchClearBtn = () => {
+    if (searchClearBtn) {
+      searchClearBtn.style.display = searchInput.value.length > 0 ? 'flex' : 'none';
+    }
+  };
+
+  if (searchClearBtn) {
+    searchClearBtn.onclick = () => {
+      searchInput.value = '';
+      updateSearchClearBtn();
+      loadFiles(currentFolderId);
+      searchInput.focus();
+    };
+  }
+
   searchInput.oninput = () => {
+    updateSearchClearBtn();
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(triggerSearch, 300);
   };

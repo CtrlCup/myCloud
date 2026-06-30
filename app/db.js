@@ -10,6 +10,9 @@ async function initDb() {
   try {
     await client.query('BEGIN');
 
+    // Enable trigram extension for fuzzy search
+    await client.query('CREATE EXTENSION IF NOT EXISTS pg_trgm');
+
     // Users Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
