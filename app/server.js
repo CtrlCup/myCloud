@@ -1777,6 +1777,93 @@ app.delete('/api/shares/:id', requireAuth, async (req, res) => {
   }
 });
 
+// Bulk-delete multiple shares owned by the current user
+app.post('/api/shares/bulk-delete', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : [];
+
+  if (ids.length === 0) return res.status(400).json({ error: 'No share IDs provided' });
+
+  try {
+    // Only delete shares whose underlying file belongs to the current user
+    const result = await pool.query(
+      `DELETE FROM shares s
+       USING files f
+       WHERE s.file_id = f.id AND f.owner_id = $1 AND s.id = ANY($2::int[])`,
+      [userId, ids]
+    );
+    res.json({ success: true, deleted: result.rowCount });
+  } catch (err) {
+    console.error('Error bulk-deleting shares:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Bulk-update permissions/expiry/password for multiple shares at once.
+// Only the fields present in `updates` are applied; the slug is intentionally not editable here.
+app.post('/api/shares/bulk-update', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter(Number.isInteger) : [];
+  const updates = req.body.updates || {};
+
+  if (ids.length === 0) return res.status(400).json({ error: 'No share IDs provided' });
+
+  try {
+    // Restrict to shares the user actually owns
+    const ownRes = await pool.query(
+      `SELECT s.id FROM shares s JOIN files f ON s.file_id = f.id
+       WHERE f.owner_id = $1 AND s.id = ANY($2::int[])`,
+      [userId, ids]
+    );
+    const ownedIds = ownRes.rows.map(r => r.id);
+    if (ownedIds.length === 0) return res.status(403).json({ error: 'Access denied' });
+
+    const setClauses = [];
+    const params = [];
+    let p = 1;
+
+    const addSet = (column, value) => {
+      setClauses.push(`${column} = $${p++}`);
+      params.push(value);
+    };
+
+    if (updates.canRead !== undefined) addSet('can_read', updates.canRead !== false);
+    if (updates.canWrite !== undefined) addSet('can_write', updates.canWrite === true);
+    if (updates.canDownload !== undefined) addSet('can_download', updates.canDownload !== false);
+    if (updates.canZip !== undefined) addSet('can_zip', updates.canZip !== false);
+    if (updates.onlyUpload !== undefined) addSet('only_upload', updates.onlyUpload === true);
+
+    if (updates.expiresAt !== undefined) {
+      addSet('expires_at', updates.expiresAt ? new Date(updates.expiresAt) : null);
+    }
+
+    if (updates.maxDownloads !== undefined) {
+      addSet('max_downloads', updates.maxDownloads ? parseInt(updates.maxDownloads) : null);
+    }
+
+    if (updates.removePassword) {
+      addSet('password_hash', null);
+    } else if (updates.password) {
+      addSet('password_hash', await bcrypt.hash(updates.password, 10));
+    }
+
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    params.push(ownedIds);
+    await pool.query(
+      `UPDATE shares SET ${setClauses.join(', ')} WHERE id = ANY($${p}::int[])`,
+      params
+    );
+
+    res.json({ success: true, updated: ownedIds.length });
+  } catch (err) {
+    console.error('Error bulk-updating shares:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // List all shares for current user
 app.get('/api/shares', requireAuth, async (req, res) => {
   const userId = req.session.userId;
@@ -1976,13 +2063,15 @@ app.get('/api/public/branding', async (req, res) => {
     const customColorAccent = await getSetting('custom_color_accent') || '#00d2ff';
     const hasDashboardBg = await getSetting('dashboard_bg_image') ? true : false;
     const hasLoginBg = await getSetting('login_bg_image') ? true : false;
+    const hasDashboardBgLight = await getSetting('dashboard_bg_image_light') ? true : false;
+    const hasLoginBgLight = await getSetting('login_bg_image_light') ? true : false;
     const appUrl = process.env.APP_URL || '';
-    
+
     const smtpHost = await getSetting('email_smtp_host');
     const smtpTested = await getSetting('email_smtp_tested');
     const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
 
-    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, appUrl, emailConfigured });
+    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, hasDashboardBgLight, hasLoginBgLight, appUrl, emailConfigured });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -2007,7 +2096,8 @@ app.get('/api/public/branding/icon', async (req, res) => {
 // Get Dashboard Background
 app.get('/api/public/branding/dashboard-bg', async (req, res) => {
   try {
-    const bgPath = await getSetting('dashboard_bg_image');
+    const key = req.query.variant === 'light' ? 'dashboard_bg_image_light' : 'dashboard_bg_image';
+    const bgPath = await getSetting(key);
     if (bgPath) {
       const filePath = path.join(UPLOADS_DIR, bgPath);
       if (fs.existsSync(filePath)) {
@@ -2023,7 +2113,8 @@ app.get('/api/public/branding/dashboard-bg', async (req, res) => {
 // Get Login Background
 app.get('/api/public/branding/login-bg', async (req, res) => {
   try {
-    const bgPath = await getSetting('login_bg_image');
+    const key = req.query.variant === 'light' ? 'login_bg_image_light' : 'login_bg_image';
+    const bgPath = await getSetting(key);
     if (bgPath) {
       const filePath = path.join(UPLOADS_DIR, bgPath);
       if (fs.existsSync(filePath)) {
@@ -2063,14 +2154,15 @@ app.post('/api/settings/admin/icon', requireAdmin, upload.single('icon'), async 
   }
 });
 
-// Upload Dashboard Background (Admin only)
+// Upload Dashboard Background (Admin only) — variant: dark (default) | light
 app.post('/api/settings/admin/dashboard-bg', requireAdmin, upload.single('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
   try {
-    const oldBg = await getSetting('dashboard_bg_image');
-    await setSetting('dashboard_bg_image', req.file.filename);
+    const key = req.query.variant === 'light' ? 'dashboard_bg_image_light' : 'dashboard_bg_image';
+    const oldBg = await getSetting(key);
+    await setSetting(key, req.file.filename);
 
     if (oldBg) {
       const oldFilePath = path.join(UPLOADS_DIR, oldBg);
@@ -2078,7 +2170,7 @@ app.post('/api/settings/admin/dashboard-bg', requireAdmin, upload.single('image'
         fs.unlinkSync(oldFilePath);
       }
     }
-    res.json({ success: true, bgUrl: `/api/public/branding/dashboard-bg?t=${Date.now()}` });
+    res.json({ success: true, bgUrl: `/api/public/branding/dashboard-bg?variant=${req.query.variant === 'light' ? 'light' : 'dark'}&t=${Date.now()}` });
   } catch (err) {
     console.error('Error saving dashboard bg:', err);
     if (req.file && fs.existsSync(req.file.path)) {
@@ -2090,8 +2182,9 @@ app.post('/api/settings/admin/dashboard-bg', requireAdmin, upload.single('image'
 
 app.delete('/api/settings/admin/dashboard-bg', requireAdmin, async (req, res) => {
   try {
-    const oldBg = await getSetting('dashboard_bg_image');
-    await setSetting('dashboard_bg_image', '');
+    const key = req.query.variant === 'light' ? 'dashboard_bg_image_light' : 'dashboard_bg_image';
+    const oldBg = await getSetting(key);
+    await setSetting(key, '');
     if (oldBg) {
       const oldFilePath = path.join(UPLOADS_DIR, oldBg);
       if (fs.existsSync(oldFilePath)) {
@@ -2104,14 +2197,15 @@ app.delete('/api/settings/admin/dashboard-bg', requireAdmin, async (req, res) =>
   }
 });
 
-// Upload Login Background (Admin only)
+// Upload Login Background (Admin only) — variant: dark (default) | light
 app.post('/api/settings/admin/login-bg', requireAdmin, upload.single('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
   try {
-    const oldBg = await getSetting('login_bg_image');
-    await setSetting('login_bg_image', req.file.filename);
+    const key = req.query.variant === 'light' ? 'login_bg_image_light' : 'login_bg_image';
+    const oldBg = await getSetting(key);
+    await setSetting(key, req.file.filename);
 
     if (oldBg) {
       const oldFilePath = path.join(UPLOADS_DIR, oldBg);
@@ -2119,7 +2213,7 @@ app.post('/api/settings/admin/login-bg', requireAdmin, upload.single('image'), a
         fs.unlinkSync(oldFilePath);
       }
     }
-    res.json({ success: true, bgUrl: `/api/public/branding/login-bg?t=${Date.now()}` });
+    res.json({ success: true, bgUrl: `/api/public/branding/login-bg?variant=${req.query.variant === 'light' ? 'light' : 'dark'}&t=${Date.now()}` });
   } catch (err) {
     console.error('Error saving login bg:', err);
     if (req.file && fs.existsSync(req.file.path)) {
@@ -2131,8 +2225,9 @@ app.post('/api/settings/admin/login-bg', requireAdmin, upload.single('image'), a
 
 app.delete('/api/settings/admin/login-bg', requireAdmin, async (req, res) => {
   try {
-    const oldBg = await getSetting('login_bg_image');
-    await setSetting('login_bg_image', '');
+    const key = req.query.variant === 'light' ? 'login_bg_image_light' : 'login_bg_image';
+    const oldBg = await getSetting(key);
+    await setSetting(key, '');
     if (oldBg) {
       const oldFilePath = path.join(UPLOADS_DIR, oldBg);
       if (fs.existsSync(oldFilePath)) {
@@ -2167,7 +2262,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
     }
 
     // Get the base file/folder shared
-    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size FROM files WHERE id = $1', [share.file_id]);
     if (baseFileRes.rows.length === 0) {
       return res.status(404).json({ error: 'Shared content no longer exists.' });
     }
@@ -2261,6 +2356,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         id: baseFile.id,
         name: baseFile.name,
         is_folder: baseFile.is_folder,
+        size: baseFile.size,
       },
       currentFolderId,
       files,
@@ -3294,6 +3390,10 @@ const WebSocket = require('ws');
 // Rooms map: fileId -> Set of client sockets
 const collabRooms = new Map();
 
+// Collaboration identity palette: distinct colors + German animal names for anonymous visitors
+const COLLAB_COLORS = ['#00d2ff', '#ff5555', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c', '#8be9fd', '#ff6e6e', '#69ff94', '#d3a4ff', '#ffd166'];
+const COLLAB_ANIMALS = ['Fuchs', 'Luchs', 'Dachs', 'Biber', 'Otter', 'Igel', 'Eule', 'Falke', 'Reh', 'Hirsch', 'Wolf', 'Bär', 'Marder', 'Wiesel', 'Specht', 'Kranich', 'Reiher', 'Storch', 'Pinguin', 'Robbe', 'Delfin', 'Wal', 'Hase', 'Eichhörnchen', 'Murmeltier', 'Steinbock', 'Gämse', 'Waschbär', 'Panda', 'Koala', 'Tiger', 'Löwe', 'Leopard', 'Gepard', 'Elefant', 'Giraffe', 'Zebra', 'Nashorn', 'Flamingo', 'Tukan', 'Papagei', 'Kolibri', 'Schwan', 'Luchskatze', 'Ozelot', 'Erdmännchen'];
+
 function initWebSocket(server) {
   const wss = new WebSocket.Server({ noServer: true });
 
@@ -3317,7 +3417,8 @@ function initWebSocket(server) {
     try {
       const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
       const fileId = parseInt(url.searchParams.get('fileId'));
-      const username = url.searchParams.get('username') || 'Anonym';
+      const isGuest = url.searchParams.get('guest') === '1';
+      let username = url.searchParams.get('username') || '';
       const userId = url.searchParams.get('userId') || `guest_${Math.random().toString(36).substring(2, 11)}`;
 
       if (!fileId) {
@@ -3325,22 +3426,51 @@ function initWebSocket(server) {
         return;
       }
 
-      ws.fileId = fileId;
-      ws.username = username;
-      ws.userId = userId;
-
-      // Assign a neat color
-      const colors = ['#00d2ff', '#ff5555', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c', '#8be9fd'];
-      let hash = 0;
-      for (let i = 0; i < userId.length; i++) {
-        hash = userId.charCodeAt(i) + ((hash << 5) - hash);
-      }
-      ws.color = colors[Math.abs(hash) % colors.length];
-
       if (!collabRooms.has(fileId)) {
         collabRooms.set(fileId, new Set());
       }
       const room = collabRooms.get(fileId);
+
+      // Determine names & colors already taken in this room to avoid duplicates
+      const usedNames = new Set();
+      const usedColors = new Set();
+      for (const client of room) {
+        if (client.username) usedNames.add(client.username);
+        if (client.color) usedColors.add(client.color);
+      }
+
+      // Assign a unique color (prefer an unused one from the palette, hash fallback)
+      let color = COLLAB_COLORS.find(c => !usedColors.has(c));
+      if (!color) {
+        let hash = 0;
+        for (let i = 0; i < userId.length; i++) {
+          hash = userId.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        color = COLLAB_COLORS[Math.abs(hash) % COLLAB_COLORS.length];
+      }
+
+      // Anonymous visitors get a unique random animal name; authenticated users keep theirs (de-duplicated)
+      if (isGuest || !username) {
+        const available = COLLAB_ANIMALS.filter(a => !usedNames.has(a));
+        if (available.length > 0) {
+          username = available[Math.floor(Math.random() * available.length)];
+        } else {
+          const base = COLLAB_ANIMALS[Math.floor(Math.random() * COLLAB_ANIMALS.length)];
+          let n = 2;
+          while (usedNames.has(`${base} ${n}`)) n++;
+          username = `${base} ${n}`;
+        }
+      } else if (usedNames.has(username)) {
+        let n = 2;
+        while (usedNames.has(`${username} (${n})`)) n++;
+        username = `${username} (${n})`;
+      }
+
+      ws.fileId = fileId;
+      ws.username = username;
+      ws.userId = userId;
+      ws.color = color;
+
       room.add(ws);
 
       const getRoomUsersList = () => {
@@ -3365,9 +3495,11 @@ function initWebSocket(server) {
         }
       };
 
-      // Welcome message
+      // Welcome message (includes the identity the server assigned to this client)
       ws.send(JSON.stringify({
         type: 'init',
+        userId: ws.userId,
+        username: ws.username,
         color: ws.color,
         users: getRoomUsersList()
       }));

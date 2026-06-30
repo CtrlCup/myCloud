@@ -375,10 +375,22 @@
 
           <!-- Section 2: Geteilte Links -->
           <section id="shares-settings" class="settings-section">
+            <!-- Bulk-Aktionsleiste (nur sichtbar bei Auswahl) -->
+            <div id="shares-bulk-bar" style="display: none; align-items: center; gap: 0.75rem; padding: 0.6rem 0.9rem; margin-bottom: 0.75rem; background: rgba(255,255,255,0.04); border: 1px solid var(--color-border); border-radius: var(--radius-sm);">
+              <span id="shares-bulk-count" style="font-size: 0.85rem; font-weight: 500;">0 ausgewählt</span>
+              <div style="flex: 1;"></div>
+              <button type="button" class="btn" id="shares-bulk-edit-btn" style="padding: 0.4rem 0.9rem; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 0.35rem;">
+                <i data-lucide="pencil" style="width: 14px; height: 14px;"></i> Bearbeiten
+              </button>
+              <button type="button" class="btn" id="shares-bulk-delete-btn" style="padding: 0.4rem 0.9rem; font-size: 0.85rem; color: #ff5555; border-color: rgba(255,0,0,0.3); display: inline-flex; align-items: center; gap: 0.35rem;">
+                <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i> Löschen
+              </button>
+            </div>
             <div class="table-container">
               <table>
                 <thead>
                   <tr>
+                    <th style="width: 36px; text-align: center;"><input type="checkbox" id="shares-select-all" title="Alle auswählen"></th>
                     <th>Element</th>
                     <th>Typ</th>
                     <th>Link (Slug)</th>
@@ -499,40 +511,74 @@
 
               <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
                 <h3>Hintergrundbilder</h3>
-                
-                <div style="margin-top: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem;">
+                <p style="font-size: 0.78rem; color: var(--color-text-muted); margin-top: 0.35rem;">Je ein Bild für den hellen und den dunklen Modus. Ist nur eins gesetzt, wird es für beide Modi verwendet.</p>
+
+                <div style="margin-top: 1.5rem; display: flex; flex-direction: column; gap: 1.75rem;">
+                  <!-- Dashboard -->
                   <div>
-                    <h4 style="margin: 0 0 0.5rem 0; font-size: 0.95rem;">Dashboard Hintergrundbild</h4>
-                    <div style="display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap;">
-                      <div id="admin-db-bg-preview" style="width: 120px; height: 70px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-muted);">Kein Bild</div>
-                      <div>
-                        <div style="display: flex; gap: 0.5rem;">
-                          <label class="btn btn-primary" style="margin: 0; cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem;">
-                            <i data-lucide="image"></i> Bild hochladen
-                            <input type="file" id="admin-db-bg-upload" style="display: none;" accept="image/*">
-                          </label>
-                          <button type="button" class="btn" id="admin-db-bg-remove" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 0.5rem 1rem; font-size: 0.85rem; display: none;">Entfernen</button>
+                    <h4 style="margin: 0 0 0.75rem 0; font-size: 0.95rem;">Dashboard Hintergrundbild</h4>
+                    <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                      <div style="display: flex; align-items: flex-start; gap: 1rem;">
+                        <div id="admin-db-bg-preview" style="width: 120px; height: 70px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-muted);">Kein Bild</div>
+                        <div>
+                          <span class="badge" style="margin: 0 0 0.5rem 0;"><i data-lucide="moon" style="width:12px;height:12px;"></i> Dunkel</span>
+                          <div style="display: flex; gap: 0.5rem; margin-top: 0.4rem;">
+                            <label class="btn btn-primary" style="margin: 0; cursor: pointer; padding: 0.45rem 0.85rem; font-size: 0.8rem;">
+                              <i data-lucide="image"></i> Hochladen
+                              <input type="file" id="admin-db-bg-upload" style="display: none;" accept="image/*">
+                            </label>
+                            <button type="button" class="btn" id="admin-db-bg-remove" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 0.45rem 0.85rem; font-size: 0.8rem; display: none;">Entfernen</button>
+                          </div>
                         </div>
-                        <p style="font-size: 0.75rem; color: var(--color-text-muted); margin-top: 0.5rem;">Unterstützt PNG, JPG oder WebP. Max. 5 MB.</p>
+                      </div>
+                      <div style="display: flex; align-items: flex-start; gap: 1rem;">
+                        <div id="admin-db-bg-light-preview" style="width: 120px; height: 70px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-muted);">Kein Bild</div>
+                        <div>
+                          <span class="badge" style="margin: 0 0 0.5rem 0;"><i data-lucide="sun" style="width:12px;height:12px;"></i> Hell</span>
+                          <div style="display: flex; gap: 0.5rem; margin-top: 0.4rem;">
+                            <label class="btn btn-primary" style="margin: 0; cursor: pointer; padding: 0.45rem 0.85rem; font-size: 0.8rem;">
+                              <i data-lucide="image"></i> Hochladen
+                              <input type="file" id="admin-db-bg-light-upload" style="display: none;" accept="image/*">
+                            </label>
+                            <button type="button" class="btn" id="admin-db-bg-light-remove" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 0.45rem 0.85rem; font-size: 0.8rem; display: none;">Entfernen</button>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
 
+                  <!-- Login -->
                   <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 1.5rem;">
-                    <h4 style="margin: 0 0 0.5rem 0; font-size: 0.95rem;">Loginseite Hintergrundbild</h4>
-                    <div style="display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap;">
-                      <div id="admin-login-bg-preview" style="width: 120px; height: 70px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-muted);">Kein Bild</div>
-                      <div>
-                        <div style="display: flex; gap: 0.5rem;">
-                          <label class="btn btn-primary" style="margin: 0; cursor: pointer; padding: 0.5rem 1rem; font-size: 0.85rem;">
-                            <i data-lucide="image"></i> Bild hochladen
-                            <input type="file" id="admin-login-bg-upload" style="display: none;" accept="image/*">
-                          </label>
-                          <button type="button" class="btn" id="admin-login-bg-remove" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 0.5rem 1rem; font-size: 0.85rem; display: none;">Entfernen</button>
+                    <h4 style="margin: 0 0 0.75rem 0; font-size: 0.95rem;">Loginseite Hintergrundbild</h4>
+                    <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                      <div style="display: flex; align-items: flex-start; gap: 1rem;">
+                        <div id="admin-login-bg-preview" style="width: 120px; height: 70px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-muted);">Kein Bild</div>
+                        <div>
+                          <span class="badge" style="margin: 0 0 0.5rem 0;"><i data-lucide="moon" style="width:12px;height:12px;"></i> Dunkel</span>
+                          <div style="display: flex; gap: 0.5rem; margin-top: 0.4rem;">
+                            <label class="btn btn-primary" style="margin: 0; cursor: pointer; padding: 0.45rem 0.85rem; font-size: 0.8rem;">
+                              <i data-lucide="image"></i> Hochladen
+                              <input type="file" id="admin-login-bg-upload" style="display: none;" accept="image/*">
+                            </label>
+                            <button type="button" class="btn" id="admin-login-bg-remove" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 0.45rem 0.85rem; font-size: 0.8rem; display: none;">Entfernen</button>
+                          </div>
                         </div>
-                        <p style="font-size: 0.75rem; color: var(--color-text-muted); margin-top: 0.5rem;">Unterstützt PNG, JPG oder WebP. Max. 5 MB.</p>
+                      </div>
+                      <div style="display: flex; align-items: flex-start; gap: 1rem;">
+                        <div id="admin-login-bg-light-preview" style="width: 120px; height: 70px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-muted);">Kein Bild</div>
+                        <div>
+                          <span class="badge" style="margin: 0 0 0.5rem 0;"><i data-lucide="sun" style="width:12px;height:12px;"></i> Hell</span>
+                          <div style="display: flex; gap: 0.5rem; margin-top: 0.4rem;">
+                            <label class="btn btn-primary" style="margin: 0; cursor: pointer; padding: 0.45rem 0.85rem; font-size: 0.8rem;">
+                              <i data-lucide="image"></i> Hochladen
+                              <input type="file" id="admin-login-bg-light-upload" style="display: none;" accept="image/*">
+                            </label>
+                            <button type="button" class="btn" id="admin-login-bg-light-remove" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 0.45rem 0.85rem; font-size: 0.8rem; display: none;">Entfernen</button>
+                          </div>
+                        </div>
                       </div>
                     </div>
+                    <p style="font-size: 0.75rem; color: var(--color-text-muted); margin-top: 0.75rem;">Unterstützt PNG, JPG oder WebP. Max. 5 MB.</p>
                   </div>
                 </div>
               </div>
@@ -777,7 +823,7 @@
             
             <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
               <input type="checkbox" id="share-can-write">
-              <span>Dateien hochladen</span>
+              <span id="share-can-write-label">Dateien hochladen</span>
             </label>
             
             <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
@@ -806,6 +852,127 @@
               <i data-lucide="copy" style="width: 14px; height: 14px;"></i> Kopieren
             </button>
           </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- SHARE EDIT MODAL (Einzelnen oder mehrere Links aus den Einstellungen bearbeiten) -->
+  <div class="modal-overlay" id="share-edit-modal-overlay">
+    <div class="card modal no-scrollbar" style="max-height: 95vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="position: relative; margin-bottom: 0.75rem; padding-left: 2rem;">
+        <button class="btn-icon close-btn" id="close-share-edit-modal-btn" type="button" style="position: absolute; top: 0; left: 0; padding: 0.25rem;" title="Schließen">
+          <i data-lucide="x"></i>
+        </button>
+        <h3 class="modal-title" id="share-edit-title" style="margin: 0; font-size: 1.2rem;">Link bearbeiten</h3>
+      </div>
+      <form id="share-edit-form" style="display: flex; flex-direction: column; gap: 0.75rem;">
+
+        <p id="share-edit-bulk-hint" style="display: none; font-size: 0.8rem; color: var(--color-text-muted); margin: 0; line-height: 1.4;">
+          Aktiviere die Bereiche, die du auf allen ausgewählten Links ändern möchtest. Nicht aktivierte Bereiche bleiben unverändert. Der Link (Slug) kann nicht gemeinsam geändert werden.
+        </p>
+
+        <!-- Slug (nur im Einzelmodus) -->
+        <div class="form-group" id="share-edit-slug-group" style="margin-bottom: 0;">
+          <label for="share-edit-slug" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Freigabe-Link (Slug)</label>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <span style="color: var(--color-text-muted); font-size: 0.85rem;" id="share-edit-url-prefix">http://localhost:3000/s/</span>
+            <input type="text" id="share-edit-slug" class="form-control" placeholder="mein-ordner" pattern="[a-z0-9-_]+" title="Nur Kleinbuchstaben, Zahlen, - und _" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+          </div>
+        </div>
+
+        <!-- Ablauf & Limit -->
+        <div style="border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 0.6rem; background: rgba(255,255,255,0.03);">
+          <label class="share-edit-apply-toggle" style="display: none; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.8rem; margin-bottom: 0.6rem;">
+            <input type="checkbox" id="share-edit-apply-expiry"> <strong>Ablauf & Limit ändern</strong>
+          </label>
+          <div id="share-edit-expiry-fields">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+              <div class="form-group" style="margin-bottom: 0; display: flex; flex-direction: column;">
+                <label for="share-edit-expiry-type" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Ablaufzeitpunkt</label>
+                <select id="share-edit-expiry-type" class="form-control" style="padding: 0.4rem 0.75rem; font-size: 0.85rem; background: var(--input-bg); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-sm); outline: none; cursor: pointer; width: 100%;">
+                  <option value="none">Nie (Unbegrenzt)</option>
+                  <option value="hours">Stunden</option>
+                  <option value="days">Tage</option>
+                  <option value="custom">Datum & Uhrzeit wählen</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="share-edit-max-downloads" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Klicks/Downloads Limit</label>
+                <input type="number" id="share-edit-max-downloads" class="form-control" placeholder="Unbegrenzt" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+              </div>
+            </div>
+            <div id="share-edit-expiry-hours-container" style="display: none; margin-top: 0.5rem;">
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="share-edit-expiry-hours" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">In wie vielen Stunden soll die Freigabe ablaufen?</label>
+                <input type="number" id="share-edit-expiry-hours" class="form-control" placeholder="z.B. 3" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+              </div>
+            </div>
+            <div id="share-edit-expiry-days-container" style="display: none; margin-top: 0.5rem;">
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="share-edit-expiry-days" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">In wie vielen Tagen soll die Freigabe ablaufen?</label>
+                <input type="number" id="share-edit-expiry-days" class="form-control" placeholder="z.B. 7" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+              </div>
+            </div>
+            <div id="share-edit-expiry-custom-container" style="display: none; margin-top: 0.5rem;">
+              <div class="form-group" style="margin-bottom: 0;">
+                <label for="share-edit-expiry-custom" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">Genaue Uhrzeit & Datum auswählen (Kalender)</label>
+                <input type="datetime-local" id="share-edit-expiry-custom" class="form-control" style="padding: 0.4rem 0.75rem; font-size: 0.85rem; color-scheme: dark; background: var(--input-bg); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-sm); width: 100%; box-sizing: border-box;">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Passwort -->
+        <div style="border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 0.6rem; background: rgba(255,255,255,0.03);">
+          <label class="share-edit-apply-toggle" style="display: none; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.8rem; margin-bottom: 0.6rem;">
+            <input type="checkbox" id="share-edit-apply-password"> <strong>Passwort ändern</strong>
+          </label>
+          <div id="share-edit-password-fields">
+            <div class="form-group" style="margin-bottom: 0;">
+              <label for="share-edit-password" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Passwortschutz</label>
+              <input type="password" id="share-edit-password" class="form-control" placeholder="Passwort eingeben/ändern" autocomplete="new-password" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+              <label id="share-edit-password-remove-container" style="display: none; align-items: center; gap: 0.5rem; margin-top: 0.4rem; cursor: pointer; font-size: 0.8rem; color: #ff5555;">
+                <input type="checkbox" id="share-edit-password-remove"> Passwortschutz entfernen
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Berechtigungen -->
+        <div style="border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 0.6rem; background: rgba(255,255,255,0.03);">
+          <label class="share-edit-apply-toggle" style="display: none; align-items: center; gap: 0.5rem; cursor: pointer; font-size: 0.8rem; margin-bottom: 0.6rem;">
+            <input type="checkbox" id="share-edit-apply-perms"> <strong>Berechtigungen ändern</strong>
+          </label>
+          <div id="share-edit-perms-fields" style="display: flex; flex-direction: column; gap: 0.4rem;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 0.75rem;">
+              <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+                <input type="checkbox" id="share-edit-can-read" checked disabled>
+                <span style="color: var(--color-text-muted);">Inhalte anzeigen</span>
+              </label>
+              <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+                <input type="checkbox" id="share-edit-can-download">
+                <span>Herunterladen</span>
+              </label>
+              <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+                <input type="checkbox" id="share-edit-can-write">
+                <span>Dateien hochladen</span>
+              </label>
+              <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+                <input type="checkbox" id="share-edit-can-zip">
+                <span>Als ZIP laden</span>
+              </label>
+            </div>
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; padding-left: 0.25rem; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 0.25rem; padding-top: 0.4rem;">
+              <input type="checkbox" id="share-edit-only-upload">
+              <span>Nur-Hochladen (Besucher sieht keine Inhalte)</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-actions" style="margin-top: 0.25rem; display: flex; gap: 0.5rem;">
+          <button type="button" class="btn" id="cancel-share-edit-btn" style="justify-content: center; flex: 1; padding: 0.5rem 1rem; font-size: 0.85rem;">Abbrechen</button>
+          <button type="submit" class="btn btn-primary" style="justify-content: center; flex: 1; padding: 0.5rem 1rem; font-size: 0.85rem;">Speichern</button>
         </div>
       </form>
     </div>

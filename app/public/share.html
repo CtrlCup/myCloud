@@ -30,9 +30,6 @@
         <i data-lucide="cloud"></i> my<span>Cloud</span> Shared
       </div>
       <div class="user-nav" style="display: flex; align-items: center; gap: 0.75rem;">
-        <button id="share-theme-toggle-btn" class="btn btn-icon" style="border-radius: 50%; width: 38px; height: 38px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--glass-border);" title="Hintergrund wechseln">
-          <i data-lucide="moon" style="width: 18px; height: 18px;"></i>
-        </button>
         <span class="badge" id="share-owner-badge" style="font-weight: 500; margin: 0;">Geteilter Inhalt</span>
       </div>
     </header>
@@ -54,7 +51,15 @@
     </div>
 
     <main class="explorer" id="main-explorer">
-      
+
+      <!-- Einzeldatei-Ansicht (Download / Vorschau) -->
+      <div class="card share-single-card" id="single-file-card" style="display: none;">
+        <div class="share-single-thumb" id="single-file-thumb"></div>
+        <h2 class="share-single-name" id="single-file-name"></h2>
+        <p class="share-single-meta" id="single-file-meta"></p>
+        <div class="share-single-actions" id="single-file-actions"></div>
+      </div>
+
       <!-- Geteilte Ordner Info -->
       <div class="card" id="share-meta-card" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
         <div>
@@ -105,28 +110,74 @@
   </div>
 
   <!-- CODE EDITOR MODAL -->
-  <div class="modal-overlay" id="code-editor-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
+  <div class="modal-overlay" id="code-editor-overlay" style="padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--editor-bg);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
-      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
-        <div style="display: flex; align-items: center; gap: 1rem;">
-          <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="code-editor-title">
-            <i data-lucide="file-code"></i> Code Editor
+
+      <!-- Editor Titlebar (shared design with the dashboard editor) -->
+      <div class="editor-titlebar">
+
+        <!-- Left: file icon + name + collab -->
+        <div class="editor-titlebar-left">
+          <div class="editor-file-badge">
+            <i data-lucide="file-code" style="width:16px;height:16px;"></i>
           </div>
-          <div id="collab-users-container" style="display: flex; align-items: center; gap: 0.5rem; background: rgba(255,255,255,0.05); padding: 0.25rem 0.75rem; border-radius: 20px; font-size: 0.85rem; border: 1px solid var(--color-border);">
-            <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #50fa7b; box-shadow: 0 0 8px #50fa7b;"></span>
-            <span id="collab-users-list" style="font-weight: 500;">Nur du bist online</span>
+          <span id="code-editor-title" style="font-weight:600; font-size:0.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:260px; color:var(--editor-fg);">Editor</span>
+          <div id="collab-users-container" class="editor-collab-pill" style="display:none;">
+            <span class="editor-collab-dot"></span>
+            <span id="collab-users-list" style="font-size:0.75rem; font-weight:500;">Nur du</span>
           </div>
         </div>
-        <div style="display: flex; gap: 0.75rem;">
-          <button class="btn btn-primary" id="save-code-editor-btn" style="justify-content: center;">
-            <i data-lucide="save"></i> Speichern
+
+        <!-- Center: language selector -->
+        <div class="editor-lang-wrap">
+          <i data-lucide="code-2" style="width:13px;height:13px;opacity:0.6;"></i>
+          <select id="monaco-lang-select" class="editor-lang-select" title="Programmiersprache wechseln">
+            <option value="plaintext">Plaintext</option>
+            <option value="javascript">JavaScript</option>
+            <option value="typescript">TypeScript</option>
+            <option value="html">HTML</option>
+            <option value="css">CSS</option>
+            <option value="scss">SCSS</option>
+            <option value="less">Less</option>
+            <option value="json">JSON</option>
+            <option value="xml">XML</option>
+            <option value="markdown">Markdown</option>
+            <option value="python">Python</option>
+            <option value="java">Java</option>
+            <option value="c">C</option>
+            <option value="cpp">C++</option>
+            <option value="csharp">C#</option>
+            <option value="go">Go</option>
+            <option value="rust">Rust</option>
+            <option value="php">PHP</option>
+            <option value="ruby">Ruby</option>
+            <option value="shell">Shell</option>
+            <option value="sql">SQL</option>
+            <option value="yaml">YAML</option>
+            <option value="dockerfile">Dockerfile</option>
+            <option value="graphql">GraphQL</option>
+          </select>
+        </div>
+
+        <!-- Right: save status + buttons -->
+        <div class="editor-titlebar-right">
+          <span id="editor-save-status" class="editor-save-status"></span>
+          <kbd class="editor-kbd">Strg+S</kbd>
+          <button id="share-link-btn" class="editor-btn" title="Freigabe-Link kopieren">
+            <i data-lucide="link" style="width:15px;height:15px;"></i>
+            <span>Link teilen</span>
           </button>
-          <button class="btn" id="close-code-editor-btn" style="justify-content: center;">
-            <i data-lucide="x"></i> Schließen
+          <button id="save-code-editor-btn" class="editor-btn editor-btn-save" title="Speichern (Strg+S)">
+            <i data-lucide="save" style="width:15px;height:15px;"></i>
+            <span>Speichern</span>
+          </button>
+          <div class="editor-divider"></div>
+          <button id="close-code-editor-btn" class="editor-btn editor-btn-close" title="Schließen (ESC)">
+            <i data-lucide="x" style="width:15px;height:15px;"></i>
           </button>
         </div>
       </div>
-      <div id="monaco-editor-container" style="flex: 1; width: 100%; height: 100%; background: #1e1e1e;"></div>
+      <div id="monaco-editor-container" style="flex: 1; width: 100%; height: 100%; background: var(--editor-bg);"></div>
     </div>
   </div>
 
@@ -194,6 +245,54 @@
     let currentFolderId = null;
     let shareConfig = null;
     let breadcrumbsHistory = [];
+    let shareBranding = null;
+    let hasAutoOpened = false;   // only auto-open a single-file viewer once
+
+    // Active theme (explicit override or system preference)
+    function getActiveTheme() {
+      const explicit = document.documentElement.getAttribute('data-theme');
+      if (explicit === 'light' || explicit === 'dark') return explicit;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    // Apply the theme-appropriate dashboard background image (or the CSS gradient + orbs)
+    function applyShareBackground() {
+      const isDark = getActiveTheme() === 'dark';
+      const orbs = document.getElementById('glowing-orbs-container');
+
+      // Custom background colour overrides only the dark theme
+      if (isDark && shareBranding && shareBranding.customColorBg) {
+        document.documentElement.style.setProperty('--color-bg', shareBranding.customColorBg);
+      } else {
+        document.documentElement.style.removeProperty('--color-bg');
+      }
+
+      let chosen = null;
+      if (shareBranding) {
+        const has = shareBranding.hasDashboardBg;
+        const hasLight = shareBranding.hasDashboardBgLight;
+        const base = '/api/public/branding/dashboard-bg';
+        if (!isDark) {
+          if (hasLight) chosen = `${base}?variant=light&t=${Date.now()}`;
+          else if (has) chosen = `${base}?t=${Date.now()}`;
+        } else {
+          if (has) chosen = `${base}?t=${Date.now()}`;
+          else if (hasLight) chosen = `${base}?variant=light&t=${Date.now()}`;
+        }
+      }
+
+      if (chosen) {
+        document.body.style.backgroundImage = `url('${chosen}')`;
+        document.body.style.backgroundSize = 'cover';
+        document.body.style.backgroundPosition = 'center';
+        document.body.style.backgroundAttachment = 'fixed';
+        document.body.style.backgroundRepeat = 'no-repeat';
+        if (orbs) orbs.style.display = 'none';
+      } else {
+        document.body.style.backgroundImage = '';
+        if (orbs) orbs.style.display = 'block';
+      }
+    }
 
     // Toast Helper
     function showToast(message) {
@@ -205,10 +304,11 @@
 
     // Byte-Größen formatieren
     function formatBytes(bytes) {
-      if (bytes === 0 || !bytes) return '0 Bytes';
+      bytes = Number(bytes);
+      if (!bytes || Number.isNaN(bytes) || bytes <= 0) return '0 Bytes';
       const k = 1024;
       const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
       return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
@@ -244,13 +344,38 @@
 
         currentFolderId = data.currentFolderId;
 
+        const isOnlyUpload = shareConfig.only_upload === true;
+        const isFolder = data.baseFile.is_folder;
+        const isSingleFile = !isFolder && !isOnlyUpload;
+
+        const metaCard = document.getElementById('share-meta-card');
+        const toolbar = document.getElementById('share-toolbar');
+        const grid = document.getElementById('public-file-grid');
+        const singleCard = document.getElementById('single-file-card');
+        const dropzone = document.getElementById('public-dropzone');
+
+        if (isSingleFile) {
+          // Clean, download-focused single-file card — no folder chrome
+          metaCard.style.display = 'none';
+          toolbar.style.display = 'none';
+          grid.style.display = 'none';
+          dropzone.style.display = 'none';
+          renderSingleFileCard(data.baseFile);
+          if (!hasAutoOpened) {
+            hasAutoOpened = true;
+            autoOpenViewer(data.baseFile);
+          }
+          lucide.createIcons();
+          return;
+        }
+
+        singleCard.style.display = 'none';
+        metaCard.style.display = 'flex';
+
         // Render Meta Info
         document.getElementById('shared-title').innerHTML = `
-          <i data-lucide="${data.baseFile.is_folder ? 'folder' : 'file'}"></i> ${data.baseFile.name}
+          <i data-lucide="${isFolder ? 'folder' : 'file'}"></i> ${data.baseFile.name}
         `;
-        
-        // Only-Upload / File-Drop check
-        const isOnlyUpload = shareConfig.only_upload === true;
 
         // Badges
         const badges = [];
@@ -265,7 +390,7 @@
         document.getElementById('share-permissions-badges').innerHTML = badges.join('');
 
         // ZIP-Download Button anzeigen
-        if (shareConfig.can_zip && data.baseFile.is_folder && !isOnlyUpload) {
+        if (shareConfig.can_zip && isFolder && !isOnlyUpload) {
           const zipBtn = document.getElementById('download-all-zip-btn');
           zipBtn.style.display = 'inline-flex';
           zipBtn.onclick = () => {
@@ -276,56 +401,109 @@
         }
 
         // Schreibrechte aktivieren
-        if (shareConfig.can_write && data.baseFile.is_folder) {
+        if (shareConfig.can_write && isFolder) {
           document.getElementById('public-upload-label').style.display = 'inline-flex';
-          document.getElementById('public-dropzone').style.display = 'block';
-          if (isOnlyUpload) {
-            document.getElementById('dropzone-text').textContent = 'Dateien ablegen, um sie anonym abzugeben';
-          } else {
-            document.getElementById('dropzone-text').textContent = 'Dateien per Drag & Drop in diese Freigabe hochladen';
-          }
+          dropzone.style.display = 'block';
+          document.getElementById('dropzone-text').textContent = isOnlyUpload
+            ? 'Dateien ablegen, um sie anonym abzugeben'
+            : 'Dateien per Drag & Drop in diese Freigabe hochladen';
         } else {
           document.getElementById('public-upload-label').style.display = 'none';
-          document.getElementById('public-dropzone').style.display = 'none';
+          dropzone.style.display = 'none';
         }
 
         // Layout elements visibility based on Only-Upload
         if (isOnlyUpload) {
-          document.getElementById('share-toolbar').style.display = 'none';
-          document.getElementById('public-file-grid').style.display = 'none';
+          toolbar.style.display = 'none';
+          grid.style.display = 'none';
         } else {
-          document.getElementById('share-toolbar').style.display = 'flex';
-          document.getElementById('public-file-grid').style.display = 'grid';
-          // Update Breadcrumbs
+          toolbar.style.display = 'flex';
+          grid.style.display = 'grid';
           updateBreadcrumbs(data.baseFile, currentFolderId);
-          // Render Files
           renderFiles(data.files);
-
-          // Auto-open single file shares (e.g., Einmalnotizen)
-          if (!data.baseFile.is_folder && data.files.length > 0) {
-            const file = data.files[0];
-            const ext = file.name.split('.').pop().toLowerCase();
-            const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
-            const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
-            const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
-
-            if (imageExts.includes(ext)) {
-              openImageViewer(file.id, file.name, true, slug);
-            } else if (videoExts.includes(ext)) {
-              openVideoViewer(file.id, file.name, true, slug);
-            } else if (ext === 'pdf') {
-              openPdfViewer(file.id, file.name, true, slug);
-            } else if (codeExts.includes(ext)) {
-              openCodeEditor(file.id, file.name, true, slug);
-            }
-          }
         }
-        
+
         lucide.createIcons();
       } catch (err) {
         console.error('Error loading share:', err);
         showToast('Fehler beim Verbinden mit dem Server.');
       }
+    }
+
+    // Categorise an extension for previews
+    const SHARE_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+    const SHARE_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+    const SHARE_CODE_EXTS = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+
+    function shareFileIconName(file) {
+      if (file.is_folder) return 'folder';
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (['docx', 'doc', 'odt', 'rtf', 'pdf'].includes(ext)) return 'file-text';
+      if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) return 'file-spreadsheet';
+      if (['pptx', 'ppt', 'odp'].includes(ext)) return 'presentation';
+      if (SHARE_IMAGE_EXTS.includes(ext)) return 'file-image';
+      if (SHARE_VIDEO_EXTS.includes(ext)) return 'file-video';
+      if (SHARE_CODE_EXTS.includes(ext)) return 'file-code';
+      if (['zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz'].includes(ext)) return 'file-archive';
+      return 'file';
+    }
+
+    function openShareFile(file) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (SHARE_IMAGE_EXTS.includes(ext)) openImageViewer(file.id, file.name, true, slug);
+      else if (SHARE_VIDEO_EXTS.includes(ext)) openVideoViewer(file.id, file.name, true, slug);
+      else if (ext === 'pdf') openPdfViewer(file.id, file.name, true, slug);
+      else if (SHARE_CODE_EXTS.includes(ext)) openCodeEditor(file.id, file.name, true, slug);
+    }
+
+    function autoOpenViewer(file) {
+      const ext = file.name.split('.').pop().toLowerCase();
+      const viewable = SHARE_IMAGE_EXTS.includes(ext) || SHARE_VIDEO_EXTS.includes(ext) || ext === 'pdf' || SHARE_CODE_EXTS.includes(ext);
+      if (viewable) openShareFile(file);
+    }
+
+    // Render the clean single-file download / preview card
+    function renderSingleFileCard(file) {
+      const card = document.getElementById('single-file-card');
+      const thumb = document.getElementById('single-file-thumb');
+      const nameEl = document.getElementById('single-file-name');
+      const metaEl = document.getElementById('single-file-meta');
+      const actions = document.getElementById('single-file-actions');
+
+      const ext = file.name.split('.').pop().toLowerCase();
+      const isImg = SHARE_IMAGE_EXTS.includes(ext);
+      const isVid = SHARE_VIDEO_EXTS.includes(ext);
+      const isPdf = ext === 'pdf';
+      const isCode = SHARE_CODE_EXTS.includes(ext);
+      const viewable = isImg || isVid || isPdf || isCode;
+      const canEdit = isCode && shareConfig.can_write;
+
+      // Thumbnail for images/videos, else a large coloured icon
+      if (isImg || isVid) {
+        thumb.innerHTML = `<img src="/api/public/shares/${slug}/thumbnail/${file.id}" alt="" onerror="this.style.display='none'; this.parentElement.innerHTML='<i data-lucide=&quot;${shareFileIconName(file)}&quot;></i>'; lucide.createIcons();">`;
+      } else {
+        thumb.innerHTML = `<i data-lucide="${shareFileIconName(file)}"></i>`;
+      }
+
+      nameEl.textContent = file.name;
+      const typeLabel = ext ? ext.toUpperCase() : 'Datei';
+      metaEl.textContent = `${typeLabel} · ${formatBytes(file.size)}`;
+
+      const btns = [];
+      if (viewable) {
+        const label = canEdit ? '<i data-lucide="pencil"></i> Bearbeiten' : '<i data-lucide="eye"></i> Vorschau';
+        btns.push(`<button class="btn" id="single-file-open-btn">${label}</button>`);
+      }
+      if (shareConfig.can_download) {
+        btns.push(`<a class="btn btn-primary" href="/api/public/shares/${slug}/download/${file.id}"><i data-lucide="download"></i> Herunterladen</a>`);
+      }
+      actions.innerHTML = btns.join('');
+
+      const openBtn = document.getElementById('single-file-open-btn');
+      if (openBtn) openBtn.onclick = () => openShareFile(file);
+
+      card.style.display = 'flex';
+      lucide.createIcons();
     }
 
     // Unlock form event handler
@@ -557,9 +735,8 @@
         const data = await res.json();
 
         // Apply custom colors
-        if (data.customColorBg) {
-          document.documentElement.style.setProperty('--color-bg', data.customColorBg);
-        }
+        shareBranding = data;
+        // Custom background colour only applies to the dark theme; light mode keeps its gradient
         if (data.customColorAccent) {
           document.documentElement.style.setProperty('--color-accent', data.customColorAccent);
           
@@ -580,19 +757,8 @@
           document.documentElement.style.setProperty('--color-border-active', hexToRgbA(data.customColorAccent, 0.8));
         }
 
-        // Apply background
-        const orbs = document.getElementById('glowing-orbs-container');
-        if (data.hasDashboardBg) {
-          document.body.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
-          document.body.style.backgroundSize = 'cover';
-          document.body.style.backgroundPosition = 'center';
-          document.body.style.backgroundAttachment = 'fixed';
-          document.body.style.backgroundRepeat = 'no-repeat';
-          if (orbs) orbs.style.display = 'none';
-        } else {
-          document.body.style.backgroundImage = '';
-          if (orbs) orbs.style.display = 'block';
-        }
+        // Apply the theme-appropriate background
+        applyShareBackground();
 
         // Update Favicon
         let favicon = document.querySelector('link[rel="icon"]');
@@ -626,67 +792,50 @@
       }
     }
 
-    // Theme management functions
-    function toggleTheme() {
-      const currentTheme = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', newTheme);
-      localStorage.setItem('theme', newTheme);
-      updateThemeIcons();
-    }
-
-    function updateThemeIcons() {
-      const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
-                     (!document.documentElement.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      
-      const shareToggleBtn = document.getElementById('share-theme-toggle-btn');
-      const iconName = isDark ? 'sun' : 'moon';
-      
-      if (shareToggleBtn) {
-        shareToggleBtn.innerHTML = `<i data-lucide="${iconName}" style="width: 18px; height: 18px;"></i>`;
-      }
-      
-      if (typeof lucide !== 'undefined' && lucide.createIcons) {
-        lucide.createIcons();
-      }
-    }
-
     // Start
     window.onload = () => {
-      // Set initial theme
+      // Set initial theme (explicit override from the authenticated app, if any)
       const savedTheme = localStorage.getItem('theme');
       if (savedTheme) {
         document.documentElement.setAttribute('data-theme', savedTheme);
       }
-      updateThemeIcons();
 
-      const shareToggleBtn = document.getElementById('share-theme-toggle-btn');
-      if (shareToggleBtn) {
-        shareToggleBtn.onclick = toggleTheme;
+      // React to system colour-scheme changes when no explicit override is set
+      if (window.matchMedia) {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+          if (!localStorage.getItem('theme')) {
+            applyShareBackground();
+          }
+        });
       }
 
       loadBranding();
       loadShareData();
     };
 
-    // ESC Key to close overlays in share view
+    // ESC Key — close the top-most open overlay in the share view
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        const codeEditor = document.getElementById('code-editor-overlay');
-        if (codeEditor && codeEditor.style.display !== 'none') {
-          document.getElementById('close-code-editor-btn').click();
-          return;
-        }
-        const imageViewer = document.getElementById('image-viewer-overlay');
-        if (imageViewer && imageViewer.style.display !== 'none') {
-          document.getElementById('close-image-viewer-btn').click();
-          return;
-        }
-        const videoViewer = document.getElementById('video-viewer-overlay');
-        if (videoViewer && videoViewer.style.display !== 'none') {
-          document.getElementById('close-video-viewer-btn').click();
-          return;
-        }
+      if (e.key !== 'Escape') return;
+      const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+      if (activeTag === 'input' || activeTag === 'textarea' || (document.activeElement && document.activeElement.closest('.monaco-editor'))) return;
+
+      const isOpen = (el) => {
+        if (!el) return false;
+        const cs = window.getComputedStyle(el);
+        return cs.display !== 'none' && cs.visibility !== 'hidden';
+      };
+      const zOf = (el) => { const z = parseInt(window.getComputedStyle(el).zIndex, 10); return Number.isNaN(z) ? 0 : z; };
+
+      const layers = [
+        { id: 'code-editor-overlay', close: () => document.getElementById('close-code-editor-btn').click() },
+        { id: 'image-viewer-overlay', close: () => document.getElementById('close-image-viewer-btn').click() },
+        { id: 'video-viewer-overlay', close: () => document.getElementById('close-video-viewer-btn').click() },
+        { id: 'pdf-viewer-overlay', close: () => document.getElementById('close-pdf-viewer-btn').click() },
+      ].map(l => ({ ...l, el: document.getElementById(l.id) })).filter(l => isOpen(l.el));
+
+      if (layers.length) {
+        layers.sort((a, b) => zOf(a.el) - zOf(b.el));
+        layers[layers.length - 1].close();
       }
     });
 
@@ -717,6 +866,8 @@
     let collabUserColor = null;
     let collabUserDecorations = {}; // userId -> decoration IDs
     let isApplyingRemoteEdit = false;
+    let myCollabUserId = null;        // identity the server assigned to us
+    let collabUserColorMap = {};      // userId -> color (authoritative, from server)
     let autoSaveDebounceTimeout = null;
 
     function loadMonaco() {
@@ -811,11 +962,14 @@
       if (styleEl) styleEl.remove();
     }
 
-    function initCollabSocket(fileId, username, userId, isPublic = false, slug = '') {
+    function initCollabSocket(fileId, username, userId, isPublic = false, slug = '', isGuest = false) {
       if (collabSocket) {
         collabSocket.close();
         collabSocket = null;
       }
+
+      collabUserColorMap = {};
+      myCollabUserId = userId;
 
       collabUserDecorations = {};
 
@@ -823,6 +977,7 @@
       const wsHost = window.location.host;
       
       let wsUrl = `${wsProto}//${wsHost}/api/collab?fileId=${fileId}&username=${encodeURIComponent(username)}&userId=${userId}`;
+      if (isGuest) wsUrl += `&guest=1`;
       if (isPublic) {
         wsUrl += `&slug=${slug}`;
       }
@@ -839,6 +994,7 @@
 
           if (data.type === 'init') {
             collabUserColor = data.color;
+            if (data.userId) myCollabUserId = data.userId;
             updateCollabUsersListUI(data.users);
           } else if (data.type === 'user_joined') {
             updateCollabUsersListUI(data.users);
@@ -877,12 +1033,8 @@
             const position = data.position;
             const selection = data.selection;
 
-            let color = '#00d2ff';
-            const clientStyle = document.getElementById(`collab-styles-${targetUserId}`);
-            if (clientStyle) {
-              const match = clientStyle.innerHTML.match(/border-left: 2px solid (#[a-fA-F0-9]+)/);
-              if (match) color = match[1];
-            } else {
+            let color = collabUserColorMap[targetUserId];
+            if (!color) {
               const colors = ['#00d2ff', '#ff5555', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c', '#8be9fd'];
               let hash = 0;
               for (let i = 0; i < targetUserId.length; i++) {
@@ -931,6 +1083,11 @@
     function updateCollabUsersListUI(users) {
       const container = document.getElementById('collab-users-container');
       const listEl = document.getElementById('collab-users-list');
+
+      if (Array.isArray(users)) {
+        users.forEach(u => { if (u.userId) collabUserColorMap[u.userId] = u.color; });
+      }
+
       if (!container || !listEl) return;
 
       if (!users || users.length <= 1) {
@@ -939,10 +1096,9 @@
       }
 
       container.style.display = 'flex';
-      const currentUsername = 'Visitor';
-      const otherUsers = users.filter(u => u.username !== currentUsername);
+      const otherUsers = users.filter(u => u.userId !== myCollabUserId);
       const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${u.username}</span>`);
-      listEl.innerHTML = `Andere online: ${names.join(', ')}`;
+      listEl.innerHTML = names.length ? `Andere online: ${names.join(', ')}` : 'Nur du';
     }
 
     let currentEditingFileId = null;
@@ -966,7 +1122,7 @@
 
         await loadMonaco();
 
-        document.getElementById('code-editor-title').innerHTML = `<i data-lucide="file-code"></i> ${fileName}`;
+        document.getElementById('code-editor-title').textContent = fileName;
         lucide.createIcons();
 
         document.getElementById('code-editor-overlay').classList.add('active');
@@ -979,17 +1135,35 @@
         if (isPublic && shareConfig && !shareConfig.can_write) {
           readOnly = true;
         }
-        
+
         const saveBtn = document.getElementById('save-code-editor-btn');
-        if (saveBtn) {
-          saveBtn.style.display = readOnly ? 'none' : 'block';
+        if (saveBtn) saveBtn.style.display = readOnly ? 'none' : '';
+        const kbdHint = document.querySelector('#code-editor-overlay .editor-kbd');
+        if (kbdHint) kbdHint.style.display = readOnly ? 'none' : '';
+
+        // "Link teilen" copies the current share URL to the clipboard
+        const shareLinkBtn = document.getElementById('share-link-btn');
+        if (shareLinkBtn) {
+          shareLinkBtn.style.display = isPublic ? '' : 'none';
+          shareLinkBtn.onclick = async () => {
+            try {
+              await navigator.clipboard.writeText(window.location.href);
+              showToast('Freigabe-Link in die Zwischenablage kopiert!');
+            } catch {
+              showToast('Link konnte nicht kopiert werden.');
+            }
+          };
         }
 
         const container = document.getElementById('monaco-editor-container');
         container.innerHTML = ''; // Clear previous
 
         const language = getMonacoLanguage(fileName);
-        
+
+        // Sync language selector with the detected language
+        const langSelect = document.getElementById('monaco-lang-select');
+        if (langSelect) langSelect.value = language;
+
         monacoEditorInstance = monaco.editor.create(container, {
           value: textContent,
           language: language,
@@ -1005,10 +1179,17 @@
           colorDecorators: true
         });
 
-        // Start Collaboration WebSocket
-        const collabUsername = 'Besucher_' + Math.floor(Math.random() * 900 + 100);
+        // Language selector handler
+        if (langSelect) {
+          langSelect.onchange = () => {
+            const model = monacoEditorInstance.getModel();
+            if (model) monaco.editor.setModelLanguage(model, langSelect.value);
+          };
+        }
+
+        // Start Collaboration WebSocket — the server assigns a unique animal name & colour
         const collabUserId = `guest_${Math.random().toString(36).substring(2, 11)}`;
-        initCollabSocket(fileId, collabUsername, collabUserId, isPublic, slug);
+        initCollabSocket(fileId, '', collabUserId, isPublic, slug, true);
 
         // Send edits to other collaborators in real-time on keypress/change
         monacoEditorInstance.onDidChangeModelContent((event) => {
@@ -1058,15 +1239,15 @@
         monacoEditorInstance.onDidChangeCursorSelection(sendCursorUpdate);
 
         if (!readOnly) {
-          document.getElementById('save-code-editor-btn').onclick = async () => {
+          const doSave = async () => {
             const updatedContent = monacoEditorInstance.getValue();
             showToast('Speichere Datei...');
-            
+
             try {
-              const saveUrl = isPublic 
+              const saveUrl = isPublic
                 ? `/api/public/shares/${slug}/content/${fileId}`
                 : `/api/files/content/${fileId}`;
-                
+
               const saveRes = await fetch(saveUrl, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -1083,6 +1264,10 @@
               showToast('Verbindungsfehler beim Speichern.');
             }
           };
+
+          document.getElementById('save-code-editor-btn').onclick = doSave;
+          // Ctrl/Cmd + S saves from within the editor
+          monacoEditorInstance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, doSave);
         }
       } catch (err) {
         console.error('Error opening code editor:', err);

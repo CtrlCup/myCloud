@@ -5,15 +5,20 @@
 
 /* ─── Light Mode (default) ─── */
 :root {
-  --color-bg: linear-gradient(160deg, #e9f0fb 0%, #f1ecfb 50%, #fdf1ea 100%);
+  --color-bg:
+    radial-gradient(at 18% 12%, rgba(10, 132, 255, 0.12), transparent 46%),
+    radial-gradient(at 82% 8%, rgba(191, 90, 242, 0.11), transparent 46%),
+    radial-gradient(at 88% 88%, rgba(255, 159, 10, 0.11), transparent 48%),
+    radial-gradient(at 12% 90%, rgba(48, 209, 88, 0.10), transparent 48%),
+    linear-gradient(160deg, #eef3fc 0%, #f4f0fb 50%, #fdf4ed 100%);
   --color-accent: #0a84ff;
   --color-accent-rgb: 10, 132, 255;
 
   --color-text: #1c1c22;
   --color-text-muted: rgba(60, 60, 67, 0.62);
-  --color-surface: rgba(255, 255, 255, 0.55);
-  --color-surface-hover: rgba(255, 255, 255, 0.45);
-  --color-border: rgba(255, 255, 255, 0.7);
+  --color-surface: rgba(255, 255, 255, 0.62);
+  --color-surface-hover: rgba(255, 255, 255, 0.5);
+  --color-border: rgba(255, 255, 255, 0.8);
   --color-border-active: #0a84ff;
 
   --glass-blur: blur(30px) saturate(180%);
@@ -25,8 +30,8 @@
   --radius-md: 14px;
   --radius-lg: 24px;
   --radius-xl: 34px;
-  --shadow: 0 8px 24px rgba(31, 41, 71, 0.13);
-  --shadow-lg: 0 24px 70px rgba(31, 41, 71, 0.13);
+  --shadow: 0 1px 2px rgba(31, 41, 71, 0.04), 0 4px 8px rgba(31, 41, 71, 0.05), 0 10px 22px rgba(31, 41, 71, 0.06), 0 22px 48px rgba(31, 41, 71, 0.07);
+  --shadow-lg: 0 2px 6px rgba(31, 41, 71, 0.04), 0 8px 18px rgba(31, 41, 71, 0.05), 0 20px 44px rgba(31, 41, 71, 0.07), 0 40px 90px rgba(31, 41, 71, 0.09);
   --transition: all 0.32s cubic-bezier(0.25, 0.8, 0.25, 1);
 
   --modal-bg: rgba(0, 0, 0, 0.3);
@@ -54,8 +59,8 @@
   --glass-border: rgba(255, 255, 255, 0.13);
   --glass-highlight: linear-gradient(135deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.02) 100%);
 
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.45);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 4px 8px rgba(0, 0, 0, 0.20), 0 10px 22px rgba(0, 0, 0, 0.24), 0 22px 48px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.18), 0 8px 18px rgba(0, 0, 0, 0.22), 0 20px 44px rgba(0, 0, 0, 0.28), 0 40px 90px rgba(0, 0, 0, 0.36);
 
   --modal-bg: rgba(0, 0, 0, 0.45);
   --input-bg: rgba(255, 255, 255, 0.06);
@@ -517,32 +522,52 @@ header {
 }
 
 .file-grid:not(.list-view) .file-item {
-  aspect-ratio: 1.05 / 1;
+  aspect-ratio: 1 / 1.12;
   justify-content: flex-start;
-  padding: 0.75rem 0.6rem 0.6rem;
+  padding: 0.6rem 0.55rem 0.55rem;
   gap: 0;
 }
 
-/* Grid: name at top */
-.file-grid:not(.list-view) .file-info-group {
-  order: 1;
-  width: 100%;
-  margin-bottom: 0.2rem;
-}
-
-/* Grid: icon fills middle */
+/* Grid: thumbnail/icon dominates the tile */
 .file-grid:not(.list-view) .file-icon {
-  order: 2;
+  order: 1;
   flex: 1;
   width: 100%;
   height: auto;
   min-height: 0;
   font-size: 2.2rem;
-  margin: 0;
+  margin: 0 0 0.55rem 0;
   max-height: none;
+  border-radius: var(--radius-sm);
 }
 
-/* Grid: type label below icon */
+.file-grid:not(.list-view) .file-icon svg {
+  width: 54%;
+  height: 54%;
+}
+
+/* Grid: non-image files get a filled, tinted panel so the tile doesn't look empty */
+.file-grid:not(.list-view) .file-icon-placeholder {
+  background:
+    radial-gradient(circle at 50% 38%, color-mix(in srgb, var(--icon-color) 22%, transparent), transparent 70%),
+    var(--glass-bg);
+  border: 1px solid var(--glass-border);
+}
+
+.file-grid:not(.list-view) .file-icon-placeholder svg {
+  width: 46%;
+  height: 46%;
+  filter: drop-shadow(0 2px 8px color-mix(in srgb, var(--icon-color) 45%, transparent));
+}
+
+/* Grid: name sits low, right under the thumbnail */
+.file-grid:not(.list-view) .file-info-group {
+  order: 2;
+  width: 100%;
+  margin-bottom: 0.1rem;
+}
+
+/* Grid: type label below name */
 .file-type-label {
   display: none;
 }
@@ -584,6 +609,67 @@ header {
 
 .file-item:hover .file-actions {
   opacity: 1;
+}
+
+/* ─── Public Share: single-file download card ─── */
+.share-single-card {
+  max-width: 480px;
+  margin: 4rem auto;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 2.5rem 2rem 2rem;
+  gap: 0.35rem;
+}
+
+.share-single-thumb {
+  width: 160px;
+  height: 160px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  margin-bottom: 1.25rem;
+  background: rgba(var(--color-accent-rgb), 0.08);
+  border: 1px solid var(--glass-border);
+}
+.share-single-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.share-single-thumb svg {
+  width: 64px;
+  height: 64px;
+  color: var(--color-accent);
+}
+
+.share-single-name {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  word-break: break-word;
+  line-height: 1.3;
+}
+.share-single-meta {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.share-single-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 1.5rem;
+}
+.share-single-actions .btn {
+  justify-content: center;
+  padding: 0.6rem 1.4rem;
 }
 
 /* ─── Modal (Glass Overlay) ─── */
@@ -957,6 +1043,85 @@ tr:hover td {
 .context-menu .btn-menu-item.delete-action:hover {
   background: rgba(255, 69, 58, 0.1);
   color: #ff453a;
+}
+
+/* ─── Quick Settings (Kachelgröße / Listenabstand Slider) ─── */
+.quick-settings-menu {
+  min-width: 230px;
+  padding: 0.9rem 1rem !important;
+}
+
+.quick-settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.quick-settings-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.quick-settings-value {
+  font-weight: 500;
+  color: var(--color-accent);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.quick-settings-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  margin: 0.2rem 0;
+  border-radius: 999px;
+  background: var(--glass-border);
+  outline: none;
+  cursor: pointer;
+}
+
+.quick-settings-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: 2px solid var(--color-surface);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.quick-settings-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+.quick-settings-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  border: 2px solid var(--color-surface);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.quick-settings-slider::-moz-range-thumb:hover {
+  transform: scale(1.15);
+}
+
+.quick-settings-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--glass-border);
 }
 
 /* ─── Drag & Drop (internal) ─── */
@@ -1344,9 +1509,9 @@ tr:hover td {
 .file-grid.grid-xs .file-name {
   font-size: 0.8rem !important;
 }
-.file-grid.grid-xs .file-icon {
-  width: 32px !important;
-  height: 32px !important;
+.file-grid.grid-xs .file-icon svg {
+  width: 36% !important;
+  height: 36% !important;
 }
 
 .file-grid.grid-sm {
@@ -1358,10 +1523,6 @@ tr:hover td {
 }
 .file-grid.grid-sm .file-name {
   font-size: 0.85rem !important;
-}
-.file-grid.grid-sm .file-icon {
-  width: 40px !important;
-  height: 40px !important;
 }
 
 .file-grid.grid-md {
@@ -1379,9 +1540,9 @@ tr:hover td {
 .file-grid.grid-lg .file-name {
   font-size: 1.05rem !important;
 }
-.file-grid.grid-lg .file-icon {
-  width: 56px !important;
-  height: 56px !important;
+.file-grid.grid-lg .file-icon svg {
+  width: 46% !important;
+  height: 46% !important;
 }
 
 .file-grid.grid-xl {
@@ -1394,9 +1555,9 @@ tr:hover td {
 .file-grid.grid-xl .file-name {
   font-size: 1.15rem !important;
 }
-.file-grid.grid-xl .file-icon {
-  width: 64px !important;
-  height: 64px !important;
+.file-grid.grid-xl .file-icon svg {
+  width: 50% !important;
+  height: 50% !important;
 }
 
 /* List Densities */
@@ -1629,8 +1790,8 @@ tr:hover td {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 1rem;
-  height: 44px;
+  padding: 0 1.1rem;
+  height: 54px;
   flex-shrink: 0;
   background: var(--editor-titlebar);
   border-bottom: 1px solid var(--editor-border);
@@ -1661,9 +1822,9 @@ tr:hover td {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   background: rgba(10,132,255,0.18);
   border: 1px solid rgba(10,132,255,0.3);
   color: #0a84ff;
@@ -1764,14 +1925,14 @@ tr:hover td {
 .editor-btn {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  height: 28px;
-  padding: 0 0.65rem;
+  gap: 0.4rem;
+  height: 34px;
+  padding: 0 0.85rem;
   border: 1px solid var(--editor-border);
-  border-radius: 7px;
+  border-radius: 8px;
   background: rgba(255,255,255,0.05);
   color: var(--editor-fg);
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.18s ease, border-color 0.18s ease, transform 0.15s ease;
@@ -1796,7 +1957,7 @@ tr:hover td {
   color: #80bfff;
 }
 .editor-btn-close {
-  padding: 0 0.45rem;
+  padding: 0 0.55rem;
 }
 .editor-btn-close:hover {
   background: rgba(255,69,58,0.15);

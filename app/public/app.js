@@ -23,6 +23,8 @@ let collabUserColor = null;
 let collabUserDecorations = {}; // userId -> decoration IDs
 let isApplyingRemoteEdit = false;
 let autoSaveDebounceTimeout = null;
+let myCollabUserId = null;            // identity the server assigned to us
+let collabUserColorMap = {};          // userId -> color (authoritative, from server)
 
 
 // DOM Elements
@@ -129,10 +131,11 @@ function showConfirmDialog(title, message) {
 }
 
 function formatBytes(bytes) {
-  if (bytes === 0 || !bytes) return '0 Bytes';
+  bytes = Number(bytes);
+  if (!bytes || Number.isNaN(bytes) || bytes <= 0) return '0 Bytes';
   const k = 1024;
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
@@ -673,6 +676,86 @@ function applyLayoutDensity() {
   }
 }
 
+// Welcher Ansichtstyp das Quick-Settings-Menü aktuell offen hat (null = geschlossen)
+let quickSettingsOpenKind = null;
+let quickSettingsDocListener = null;
+
+// Quick-Settings-Menü schließen und den zugehörigen Dokument-Listener entfernen
+function closeQuickSettingsMenu() {
+  document.querySelectorAll('.quick-settings-menu').forEach(m => m.remove());
+  if (quickSettingsDocListener) {
+    document.removeEventListener('click', quickSettingsDocListener);
+    quickSettingsDocListener = null;
+  }
+  quickSettingsOpenKind = null;
+}
+
+// Quick-Settings-Menü (Kachelgröße / Listenabstand) – öffnet sich beim erneuten Klick
+// auf das aktive Ansichts-Icon in der Toolbar und schließt sich beim erneuten Klick wieder.
+function showQuickSettingsMenu(kind, anchorEl) {
+  // Erneuter Klick auf denselben (aktiven) Button => Menü umschalten und schließen
+  if (quickSettingsOpenKind === kind) {
+    closeQuickSettingsMenu();
+    return;
+  }
+  closeQuickSettingsMenu();
+  quickSettingsOpenKind = kind;
+
+  const isGrid = kind === 'grid';
+  const sizeIndex = isGrid ? gridSizeIndex : listSizeIndex;
+  const sizeNames = isGrid
+    ? ['Sehr klein', 'Klein', 'Mittel', 'Groß', 'Sehr groß']
+    : ['Sehr kompakt', 'Kompakt', 'Normal', 'Bequem', 'Geräumig'];
+  const label = isGrid ? 'Kachelgröße' : 'Listenabstand';
+
+  const menu = document.createElement('div');
+  menu.className = 'card context-menu quick-settings-menu';
+  menu.innerHTML = `
+    <div class="quick-settings-row">
+      <div class="quick-settings-label-row">
+        <span>${label}</span>
+        <span class="quick-settings-value">${sizeNames[sizeIndex]}</span>
+      </div>
+      <input type="range" min="0" max="4" step="1" value="${sizeIndex}" class="quick-settings-slider">
+    </div>
+  `;
+
+  document.body.appendChild(menu);
+
+  const rect = anchorEl.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  let left = rect.left;
+  if (left + menuRect.width > window.innerWidth - 12) {
+    left = window.innerWidth - menuRect.width - 12;
+  }
+  menu.style.left = `${Math.max(12, left)}px`;
+  menu.style.top = `${rect.bottom + 8}px`;
+
+  const slider = menu.querySelector('.quick-settings-slider');
+  const valueLabel = menu.querySelector('.quick-settings-value');
+
+  slider.oninput = () => {
+    const idx = parseInt(slider.value, 10);
+    valueLabel.textContent = sizeNames[idx];
+    if (isGrid) {
+      gridSizeIndex = idx;
+      localStorage.setItem('gridSizeIndex', idx);
+    } else {
+      listSizeIndex = idx;
+      localStorage.setItem('listSizeIndex', idx);
+    }
+    applyLayoutDensity();
+  };
+
+  // Klick außerhalb des Menüs (und nicht auf den Anker-Button) schließt das Menü
+  quickSettingsDocListener = (e) => {
+    if (!menu.contains(e.target) && e.target !== anchorEl) {
+      closeQuickSettingsMenu();
+    }
+  };
+  setTimeout(() => document.addEventListener('click', quickSettingsDocListener), 50);
+}
+
 // Category → [label, color]
 const FILE_TYPE_MAP = {
   // Ordner
@@ -840,8 +923,9 @@ function renderFiles(files) {
     const isVid = !file.is_folder && ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext);
 
     const iconColor = getFileIconColor(file);
+    const isThumb = isImg || isVid;
     let iconHTML = `<i data-lucide="${iconName}" style="color: ${iconColor};"></i>`;
-    if (isImg || isVid) {
+    if (isThumb) {
       const thumbUrl = `/api/files/thumbnail/${file.id}`;
       iconHTML = `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                   <i data-lucide="${iconName}" style="display: none; color: ${iconColor};"></i>`;
@@ -849,6 +933,9 @@ function renderFiles(files) {
 
     const typeLabel = getFileTypeLabel(file);
     const sizeStr = formatBytes(file.size);
+    const iconBoxStyle = viewMode === 'list'
+      ? 'display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;'
+      : 'display: flex; align-items: center; justify-content: center; overflow: hidden;';
 
     item.innerHTML = `
       <div class="file-item-checkbox"></div>
@@ -860,7 +947,7 @@ function renderFiles(files) {
           <span>${sizeStr}</span>
         </div>
       </div>
-      <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
+      <div class="file-icon ${isThumb ? 'file-icon-thumb' : 'file-icon-placeholder'}" style="${iconBoxStyle} --icon-color: ${iconColor};">${iconHTML}</div>
       <div class="file-type-label" style="color: ${iconColor};">${typeLabel}</div>
       <div class="file-info">${sizeStr}</div>
       <div class="file-actions">
@@ -2166,6 +2253,14 @@ async function openShareModal(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   const isCode = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'].includes(ext);
 
+  // The "can_write" flag means "upload" for folders but "edit & save" for an editable file.
+  const writeLabel = document.getElementById('share-can-write-label');
+  if (file.is_folder) {
+    if (writeLabel) writeLabel.textContent = 'Dateien hochladen';
+  } else {
+    if (writeLabel) writeLabel.textContent = 'Bearbeiten & Speichern';
+  }
+
   if (!file.is_folder && !isCode) {
     shareCanWriteCheck.checked = false;
     shareCanWriteCheck.disabled = true;
@@ -2638,31 +2733,25 @@ async function loadAdminSettings() {
       document.getElementById('admin-color-accent').value = colorAccentVal;
       document.getElementById('admin-color-accent-val').textContent = colorAccentVal.toUpperCase();
 
-      // Dashboard BG Preview
-      const dbBgPreview = document.getElementById('admin-db-bg-preview');
-      const dbBgRemove = document.getElementById('admin-db-bg-remove');
-      if (conf.dashboard_bg_image) {
-        dbBgPreview.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
-        dbBgPreview.textContent = '';
-        dbBgRemove.style.display = 'inline-flex';
-      } else {
-        dbBgPreview.style.backgroundImage = '';
-        dbBgPreview.textContent = 'Kein Bild';
-        dbBgRemove.style.display = 'none';
-      }
-
-      // Login BG Preview
-      const loginBgPreview = document.getElementById('admin-login-bg-preview');
-      const loginBgRemove = document.getElementById('admin-login-bg-remove');
-      if (conf.login_bg_image) {
-        loginBgPreview.style.backgroundImage = `url('/api/public/branding/login-bg?t=${Date.now()}')`;
-        loginBgPreview.textContent = '';
-        loginBgRemove.style.display = 'inline-flex';
-      } else {
-        loginBgPreview.style.backgroundImage = '';
-        loginBgPreview.textContent = 'Kein Bild';
-        loginBgRemove.style.display = 'none';
-      }
+      // Background previews (dark + light variants for dashboard & login)
+      const setBgPreview = (previewId, removeId, hasImage, url) => {
+        const preview = document.getElementById(previewId);
+        const remove = document.getElementById(removeId);
+        if (!preview || !remove) return;
+        if (hasImage) {
+          preview.style.backgroundImage = `url('${url}&t=${Date.now()}')`;
+          preview.textContent = '';
+          remove.style.display = 'inline-flex';
+        } else {
+          preview.style.backgroundImage = '';
+          preview.textContent = 'Kein Bild';
+          remove.style.display = 'none';
+        }
+      };
+      setBgPreview('admin-db-bg-preview', 'admin-db-bg-remove', !!conf.dashboard_bg_image, '/api/public/branding/dashboard-bg?');
+      setBgPreview('admin-db-bg-light-preview', 'admin-db-bg-light-remove', !!conf.dashboard_bg_image_light, '/api/public/branding/dashboard-bg?variant=light');
+      setBgPreview('admin-login-bg-preview', 'admin-login-bg-remove', !!conf.login_bg_image, '/api/public/branding/login-bg?');
+      setBgPreview('admin-login-bg-light-preview', 'admin-login-bg-light-remove', !!conf.login_bg_image_light, '/api/public/branding/login-bg?variant=light');
 
       // Systemeinstellungen befüllen
       document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
@@ -2736,109 +2825,58 @@ if (colorAccentPicker) {
   };
 }
 
-// Dashboard Background Image Upload
-const dbBgUpload = document.getElementById('admin-db-bg-upload');
-if (dbBgUpload) {
-  dbBgUpload.onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const formData = new FormData();
-    formData.append('image', file);
-
-    showToast('Lade Dashboard-Hintergrundbild hoch...');
-    try {
-      const res = await fetch('/api/settings/admin/dashboard-bg', {
-        method: 'POST',
-        body: formData
-      });
-      if (res.ok) {
-        showToast('Dashboard-Hintergrund erfolgreich hochgeladen.');
-        await loadBranding();
-        await loadAdminSettings();
-      } else {
-        const err = await res.json();
-        showToast(err.error || 'Fehler beim Hochladen.');
+// Generic background upload/remove wiring (dark + light variants for dashboard & login)
+function wireBgControls(uploadId, removeId, endpoint, variant, label) {
+  const query = variant === 'light' ? '?variant=light' : '';
+  const uploadEl = document.getElementById(uploadId);
+  if (uploadEl) {
+    uploadEl.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append('image', file);
+      showToast(`Lade ${label} hoch...`);
+      try {
+        const res = await fetch(`${endpoint}${query}`, { method: 'POST', body: formData });
+        if (res.ok) {
+          showToast(`${label} erfolgreich hochgeladen.`);
+          await loadBranding();
+          await loadAdminSettings();
+        } else {
+          const err = await res.json();
+          showToast(err.error || 'Fehler beim Hochladen.');
+        }
+      } catch (err) {
+        showToast('Netzwerkfehler beim Upload.');
       }
-    } catch (err) {
-      showToast('Netzwerkfehler beim Upload.');
-    }
-  };
+      e.target.value = '';
+    };
+  }
+
+  const removeEl = document.getElementById(removeId);
+  if (removeEl) {
+    removeEl.onclick = async () => {
+      showToast(`Entferne ${label}...`);
+      try {
+        const res = await fetch(`${endpoint}${query}`, { method: 'DELETE' });
+        if (res.ok) {
+          showToast(`${label} erfolgreich entfernt.`);
+          await loadBranding();
+          await loadAdminSettings();
+        } else {
+          showToast('Fehler beim Entfernen.');
+        }
+      } catch (err) {
+        showToast('Netzwerkfehler.');
+      }
+    };
+  }
 }
 
-// Dashboard Background Image Remove
-const dbBgRemove = document.getElementById('admin-db-bg-remove');
-if (dbBgRemove) {
-  dbBgRemove.onclick = async () => {
-    showToast('Entferne Dashboard-Hintergrundbild...');
-    try {
-      const res = await fetch('/api/settings/admin/dashboard-bg', {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        showToast('Dashboard-Hintergrund erfolgreich entfernt.');
-        await loadBranding();
-        await loadAdminSettings();
-      } else {
-        showToast('Fehler beim Entfernen.');
-      }
-    } catch (err) {
-      showToast('Netzwerkfehler.');
-    }
-  };
-}
-
-// Login Background Image Upload
-const loginBgUpload = document.getElementById('admin-login-bg-upload');
-if (loginBgUpload) {
-  loginBgUpload.onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const formData = new FormData();
-    formData.append('image', file);
-
-    showToast('Lade Login-Hintergrundbild hoch...');
-    try {
-      const res = await fetch('/api/settings/admin/login-bg', {
-        method: 'POST',
-        body: formData
-      });
-      if (res.ok) {
-        showToast('Login-Hintergrund erfolgreich hochgeladen.');
-        await loadBranding();
-        await loadAdminSettings();
-      } else {
-        const err = await res.json();
-        showToast(err.error || 'Fehler beim Hochladen.');
-      }
-    } catch (err) {
-      showToast('Netzwerkfehler beim Upload.');
-    }
-  };
-}
-
-// Login Background Image Remove
-const loginBgRemove = document.getElementById('admin-login-bg-remove');
-if (loginBgRemove) {
-  loginBgRemove.onclick = async () => {
-    showToast('Entferne Login-Hintergrundbild...');
-    try {
-      const res = await fetch('/api/settings/admin/login-bg', {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        showToast('Login-Hintergrund erfolgreich entfernt.');
-        await loadBranding();
-        await loadAdminSettings();
-      } else {
-        showToast('Fehler beim Entfernen.');
-      }
-    } catch (err) {
-      showToast('Netzwerkfehler.');
-    }
-  };
-}
+wireBgControls('admin-db-bg-upload', 'admin-db-bg-remove', '/api/settings/admin/dashboard-bg', 'dark', 'Dashboard-Hintergrund (dunkel)');
+wireBgControls('admin-db-bg-light-upload', 'admin-db-bg-light-remove', '/api/settings/admin/dashboard-bg', 'light', 'Dashboard-Hintergrund (hell)');
+wireBgControls('admin-login-bg-upload', 'admin-login-bg-remove', '/api/settings/admin/login-bg', 'dark', 'Login-Hintergrund (dunkel)');
+wireBgControls('admin-login-bg-light-upload', 'admin-login-bg-light-remove', '/api/settings/admin/login-bg', 'light', 'Login-Hintergrund (hell)');
 
 document.getElementById('admin-system-form').onsubmit = async (e) => {
   e.preventDefault();
@@ -3128,25 +3166,33 @@ async function loadAdminUsers() {
   }
 }
 
+// Aktuell in der Einstellungs-Übersicht ausgewählte Freigabe-Links
+let selectedShareIds = new Set();
+
 // User Geteilte Links auflisten
 async function loadUserShares() {
   try {
     const res = await fetch('/api/shares');
     allShares = await res.json();
 
+    // Auswahl auf weiterhin existierende Links beschränken
+    const existingIds = new Set(allShares.map(s => s.id));
+    selectedShareIds.forEach(id => { if (!existingIds.has(id)) selectedShareIds.delete(id); });
+
     const container = document.getElementById('user-shares-list');
     container.innerHTML = '';
 
     if (allShares.length === 0) {
-      container.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--color-text-muted);">Du hast noch keine Links geteilt.</td></tr>`;
+      container.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--color-text-muted);">Du hast noch keine Links geteilt.</td></tr>`;
+      updateSharesBulkBar();
       return;
     }
 
     allShares.forEach(share => {
       const row = document.createElement('tr');
       const typeText = share.is_folder ? 'Ordner' : 'Datei';
-      const expiresText = share.expires_at 
-        ? new Date(share.expires_at).toLocaleDateString('de-DE') 
+      const expiresText = share.expires_at
+        ? new Date(share.expires_at).toLocaleDateString('de-DE')
         : 'Nie';
 
       const permissions = [];
@@ -3156,17 +3202,31 @@ async function loadUserShares() {
       if (share.can_zip) permissions.push('ZIP');
 
       row.innerHTML = `
+        <td style="text-align: center;"><input type="checkbox" class="share-row-check" data-id="${share.id}"></td>
         <td style="font-weight: 500;">${share.file_name}</td>
         <td>${typeText}</td>
         <td><a href="/s/${share.slug}" target="_blank" style="color: var(--color-accent); text-decoration: none;">/s/${share.slug}</a></td>
         <td><span style="font-size: 0.8rem; color: var(--color-text-muted);">${permissions.join(', ')}</span></td>
         <td>${expiresText}</td>
-        <td>
-          <button class="btn btn-action-delete-share" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 10px;">
-            Löschen
+        <td style="white-space: nowrap;">
+          <button class="btn-icon btn-action-edit-share" title="Bearbeiten" style="padding: 4px 8px;">
+            <i data-lucide="pencil" style="width: 15px; height: 15px;"></i>
+          </button>
+          <button class="btn-icon btn-action-delete-share" title="Löschen" style="padding: 4px 8px; color: #ff5555;">
+            <i data-lucide="trash-2" style="width: 15px; height: 15px;"></i>
           </button>
         </td>
       `;
+
+      const checkbox = row.querySelector('.share-row-check');
+      checkbox.checked = selectedShareIds.has(share.id);
+      checkbox.onchange = () => {
+        if (checkbox.checked) selectedShareIds.add(share.id);
+        else selectedShareIds.delete(share.id);
+        renderSharesSelectionState();
+      };
+
+      row.querySelector('.btn-action-edit-share').onclick = () => openShareEditModal([share.id]);
 
       row.querySelector('.btn-action-delete-share').onclick = async () => {
         if (!await showConfirmDialog('Freigabe löschen', 'Diesen Freigabelink wirklich löschen?')) return;
@@ -3174,7 +3234,8 @@ async function loadUserShares() {
           const r = await fetch(`/api/shares/${share.id}`, { method: 'DELETE' });
           if (r.ok) {
             showToast('Freigabe gelöscht.');
-            loadSettings();
+            selectedShareIds.delete(share.id);
+            loadUserShares();
           }
         } catch (err) {
           showToast('Fehler beim Löschen.');
@@ -3183,17 +3244,302 @@ async function loadUserShares() {
 
       container.appendChild(row);
     });
+
+    renderSharesSelectionState();
+    lucide.createIcons();
   } catch (err) {
     console.error('Error loading shares:', err);
   }
 }
 
+// Auswahl-Status (Zeilen-Highlights, Checkboxen, Aktionsleiste) ohne erneutes Laden synchronisieren
+function renderSharesSelectionState() {
+  document.querySelectorAll('.share-row-check').forEach(cb => {
+    const id = parseInt(cb.dataset.id);
+    cb.checked = selectedShareIds.has(id);
+    const tr = cb.closest('tr');
+    if (tr) tr.style.background = cb.checked ? 'rgba(0,210,255,0.06)' : '';
+  });
+  updateSharesBulkBar();
+}
+
+function updateSharesBulkBar() {
+  const bar = document.getElementById('shares-bulk-bar');
+  if (!bar) return;
+  const count = selectedShareIds.size;
+  document.getElementById('shares-bulk-count').textContent = `${count} ausgewählt`;
+  bar.style.display = count > 0 ? 'flex' : 'none';
+
+  const selectAll = document.getElementById('shares-select-all');
+  if (selectAll) {
+    const total = allShares.length;
+    selectAll.checked = total > 0 && count === total;
+    selectAll.indeterminate = count > 0 && count < total;
+  }
+}
+
+// "Alle auswählen"-Checkbox im Tabellenkopf
+const sharesSelectAll = document.getElementById('shares-select-all');
+if (sharesSelectAll) {
+  sharesSelectAll.onchange = () => {
+    if (sharesSelectAll.checked) allShares.forEach(s => selectedShareIds.add(s.id));
+    else selectedShareIds.clear();
+    renderSharesSelectionState();
+  };
+}
+
+// Bulk-Aktionsleiste: Löschen
+document.getElementById('shares-bulk-delete-btn').onclick = async () => {
+  const ids = [...selectedShareIds];
+  if (ids.length === 0) return;
+  if (!await showConfirmDialog('Freigaben löschen', `${ids.length} Freigabe-Link(s) wirklich löschen?`)) return;
+  try {
+    const r = await fetch('/api/shares/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (r.ok) {
+      showToast('Freigaben gelöscht.');
+      selectedShareIds.clear();
+      loadUserShares();
+    } else {
+      showToast('Fehler beim Löschen.');
+    }
+  } catch (err) {
+    showToast('Fehler beim Löschen.');
+  }
+};
+
+// Bulk-Aktionsleiste: Bearbeiten
+document.getElementById('shares-bulk-edit-btn').onclick = () => {
+  const ids = [...selectedShareIds];
+  if (ids.length === 0) return;
+  openShareEditModal(ids);
+};
+
+/* ==========================================================================
+   SHARE EDIT MODAL (Einzel- & Mehrfachbearbeitung aus den Einstellungen)
+   ========================================================================== */
+const shareEditOverlay = document.getElementById('share-edit-modal-overlay');
+const shareEditExpiryType = document.getElementById('share-edit-expiry-type');
+let shareEditIds = [];
+
+function updateShareEditExpiryUI() {
+  const type = shareEditExpiryType.value;
+  document.getElementById('share-edit-expiry-hours-container').style.display = type === 'hours' ? 'block' : 'none';
+  document.getElementById('share-edit-expiry-days-container').style.display = type === 'days' ? 'block' : 'none';
+  document.getElementById('share-edit-expiry-custom-container').style.display = type === 'custom' ? 'block' : 'none';
+}
+shareEditExpiryType.onchange = updateShareEditExpiryUI;
+
+// Einen Feldbereich (im Bulk-Modus) aktivieren/deaktivieren
+function setShareEditFieldsetEnabled(containerId, enabled) {
+  const c = document.getElementById(containerId);
+  if (!c) return;
+  c.style.opacity = enabled ? '1' : '0.4';
+  c.style.pointerEvents = enabled ? 'auto' : 'none';
+  c.querySelectorAll('input, select').forEach(el => {
+    if (el.id === 'share-edit-can-read') return; // bleibt immer deaktiviert
+    el.disabled = !enabled;
+  });
+}
+
+// Ablaufzeitpunkt aus den Modal-Feldern in einen ISO-String (oder null) übersetzen
+function collectShareEditExpiry() {
+  const type = shareEditExpiryType.value;
+  if (type === 'hours' && document.getElementById('share-edit-expiry-hours').value) {
+    const d = new Date();
+    d.setHours(d.getHours() + parseInt(document.getElementById('share-edit-expiry-hours').value));
+    return d.toISOString();
+  } else if (type === 'days' && document.getElementById('share-edit-expiry-days').value) {
+    const d = new Date();
+    d.setDate(d.getDate() + parseInt(document.getElementById('share-edit-expiry-days').value));
+    return d.toISOString();
+  } else if (type === 'custom' && document.getElementById('share-edit-expiry-custom').value) {
+    return new Date(document.getElementById('share-edit-expiry-custom').value).toISOString();
+  }
+  return null; // "Nie" oder unvollständige Eingabe => Ablauf entfernen
+}
+
+function openShareEditModal(ids) {
+  shareEditIds = ids;
+  const isBulk = ids.length > 1;
+  const single = isBulk ? null : allShares.find(s => s.id === ids[0]);
+  if (!isBulk && !single) return;
+
+  document.getElementById('share-edit-title').textContent = isBulk ? `${ids.length} Links bearbeiten` : 'Link bearbeiten';
+  document.getElementById('share-edit-bulk-hint').style.display = isBulk ? 'block' : 'none';
+  document.getElementById('share-edit-slug-group').style.display = isBulk ? 'none' : 'block';
+  document.querySelectorAll('.share-edit-apply-toggle').forEach(el => { el.style.display = isBulk ? 'flex' : 'none'; });
+
+  const applyExpiry = document.getElementById('share-edit-apply-expiry');
+  const applyPassword = document.getElementById('share-edit-apply-password');
+  const applyPerms = document.getElementById('share-edit-apply-perms');
+  applyExpiry.checked = false;
+  applyPassword.checked = false;
+  applyPerms.checked = false;
+
+  const syncGroups = () => {
+    setShareEditFieldsetEnabled('share-edit-expiry-fields', !isBulk || applyExpiry.checked);
+    setShareEditFieldsetEnabled('share-edit-password-fields', !isBulk || applyPassword.checked);
+    setShareEditFieldsetEnabled('share-edit-perms-fields', !isBulk || applyPerms.checked);
+  };
+  applyExpiry.onchange = syncGroups;
+  applyPassword.onchange = syncGroups;
+  applyPerms.onchange = syncGroups;
+
+  // Slug
+  const prefix = appBrandingUrl || window.location.origin;
+  document.getElementById('share-edit-url-prefix').textContent = prefix.endsWith('/') ? `${prefix}s/` : `${prefix}/s/`;
+  document.getElementById('share-edit-slug').value = single ? single.slug : '';
+
+  // Ablauf & Limit
+  shareEditExpiryType.value = 'none';
+  document.getElementById('share-edit-expiry-hours').value = '';
+  document.getElementById('share-edit-expiry-days').value = '';
+  document.getElementById('share-edit-expiry-custom').value = '';
+  document.getElementById('share-edit-max-downloads').value = '';
+  if (single) {
+    if (single.expires_at) {
+      const d = new Date(single.expires_at);
+      const pad = n => String(n).padStart(2, '0');
+      document.getElementById('share-edit-expiry-custom').value =
+        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      shareEditExpiryType.value = 'custom';
+    }
+    if (single.max_downloads) document.getElementById('share-edit-max-downloads').value = single.max_downloads;
+  }
+  updateShareEditExpiryUI();
+
+  // Passwort
+  document.getElementById('share-edit-password').value = '';
+  document.getElementById('share-edit-password-remove').checked = false;
+  const removeContainer = document.getElementById('share-edit-password-remove-container');
+  // Entfernen-Option anzeigen, wenn (einzeln) ein Passwort gesetzt ist, oder generell im Bulk-Modus
+  removeContainer.style.display = (isBulk || (single && single.password_hash)) ? 'flex' : 'none';
+
+  // Berechtigungen
+  document.getElementById('share-edit-can-download').checked = single ? single.can_download : true;
+  document.getElementById('share-edit-can-write').checked = single ? single.can_write : false;
+  document.getElementById('share-edit-can-zip').checked = single ? single.can_zip : true;
+  document.getElementById('share-edit-only-upload').checked = single ? single.only_upload : false;
+
+  syncGroups();
+  shareEditOverlay.classList.add('active');
+  lucide.createIcons();
+}
+
+document.getElementById('close-share-edit-modal-btn').onclick = () => shareEditOverlay.classList.remove('active');
+document.getElementById('cancel-share-edit-btn').onclick = () => shareEditOverlay.classList.remove('active');
+
+document.getElementById('share-edit-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const isBulk = shareEditIds.length > 1;
+  const maxDlVal = document.getElementById('share-edit-max-downloads').value;
+  const removePassword = document.getElementById('share-edit-password-remove').checked;
+  const passwordVal = document.getElementById('share-edit-password').value;
+
+  if (isBulk) {
+    const applyExpiry = document.getElementById('share-edit-apply-expiry').checked;
+    const applyPassword = document.getElementById('share-edit-apply-password').checked;
+    const applyPerms = document.getElementById('share-edit-apply-perms').checked;
+
+    if (!applyExpiry && !applyPassword && !applyPerms) {
+      showToast('Bitte mindestens einen Bereich zum Ändern aktivieren.');
+      return;
+    }
+
+    const updates = {};
+    if (applyExpiry) {
+      updates.expiresAt = collectShareEditExpiry();
+      updates.maxDownloads = maxDlVal ? parseInt(maxDlVal) : null;
+    }
+    if (applyPassword) {
+      if (removePassword) {
+        updates.removePassword = true;
+      } else if (passwordVal) {
+        updates.password = passwordVal;
+      } else {
+        showToast('Passwort eingeben oder "Passwortschutz entfernen" wählen.');
+        return;
+      }
+    }
+    if (applyPerms) {
+      updates.canRead = true;
+      updates.canDownload = document.getElementById('share-edit-can-download').checked;
+      updates.canWrite = document.getElementById('share-edit-can-write').checked;
+      updates.canZip = document.getElementById('share-edit-can-zip').checked;
+      updates.onlyUpload = document.getElementById('share-edit-only-upload').checked;
+    }
+
+    try {
+      const res = await fetch('/api/shares/bulk-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: shareEditIds, updates }),
+      });
+      if (res.ok) {
+        showToast('Links aktualisiert.');
+        shareEditOverlay.classList.remove('active');
+        selectedShareIds.clear();
+        loadUserShares();
+      } else {
+        const err = await res.json();
+        showToast(err.error || 'Fehler beim Speichern.');
+      }
+    } catch (err) {
+      showToast('Fehler beim Speichern.');
+    }
+  } else {
+    const payload = {
+      customSlug: document.getElementById('share-edit-slug').value.trim(),
+      canRead: true,
+      canWrite: document.getElementById('share-edit-can-write').checked,
+      canDownload: document.getElementById('share-edit-can-download').checked,
+      canZip: document.getElementById('share-edit-can-zip').checked,
+      onlyUpload: document.getElementById('share-edit-only-upload').checked,
+      expiresAt: collectShareEditExpiry(),
+      maxDownloads: maxDlVal ? parseInt(maxDlVal) : null,
+    };
+    if (removePassword) payload.removePassword = true;
+    else if (passwordVal) payload.password = passwordVal;
+
+    try {
+      const res = await fetch(`/api/shares/${shareEditIds[0]}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        showToast('Link aktualisiert.');
+        shareEditOverlay.classList.remove('active');
+        loadUserShares();
+      } else {
+        const err = await res.json();
+        showToast(err.error || 'Fehler beim Speichern.');
+      }
+    } catch (err) {
+      showToast('Fehler beim Speichern.');
+    }
+  }
+};
+
 let brandingCache = null;
 let currentViewName = 'auth';
 
+// Determine the theme that is currently active (explicit override or system preference)
+function getActiveTheme() {
+  const explicit = document.documentElement.getAttribute('data-theme');
+  if (explicit === 'light' || explicit === 'dark') return explicit;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
 function applyBackgrounds(viewName) {
   if (!brandingCache) return;
-  
+
+  const isDark = getActiveTheme() === 'dark';
+
   // Clean default body background style properties
   document.body.style.backgroundImage = '';
   document.body.style.backgroundSize = 'cover';
@@ -3201,23 +3547,49 @@ function applyBackgrounds(viewName) {
   document.body.style.backgroundAttachment = 'fixed';
   document.body.style.backgroundRepeat = 'no-repeat';
 
+  // Custom background colour only overrides the dark theme; light mode keeps its CSS gradient
+  if (isDark && brandingCache.customColorBg) {
+    document.documentElement.style.setProperty('--color-bg', brandingCache.customColorBg);
+  } else {
+    document.documentElement.style.removeProperty('--color-bg');
+  }
+
   const orbs = document.getElementById('glowing-orbs-container');
 
+  // Pick the background image for the current view + theme (with fallback to the other variant)
+  let hasBg, hasBgLight, baseUrl;
   if (viewName === 'auth') {
-    if (brandingCache.hasLoginBg) {
-      document.body.style.backgroundImage = `url('/api/public/branding/login-bg?t=${Date.now()}')`;
-      if (orbs) orbs.style.display = 'none';
-    } else {
-      if (orbs) orbs.style.display = 'block';
-    }
+    hasBg = brandingCache.hasLoginBg;
+    hasBgLight = brandingCache.hasLoginBgLight;
+    baseUrl = '/api/public/branding/login-bg';
   } else {
-    if (brandingCache.hasDashboardBg) {
-      document.body.style.backgroundImage = `url('/api/public/branding/dashboard-bg?t=${Date.now()}')`;
-      if (orbs) orbs.style.display = 'none';
-    } else {
-      if (orbs) orbs.style.display = 'block';
-    }
+    hasBg = brandingCache.hasDashboardBg;
+    hasBgLight = brandingCache.hasDashboardBgLight;
+    baseUrl = '/api/public/branding/dashboard-bg';
   }
+
+  let chosen = null;
+  if (!isDark) {
+    if (hasBgLight) chosen = `${baseUrl}?variant=light&t=${Date.now()}`;
+    else if (hasBg) chosen = `${baseUrl}?t=${Date.now()}`;
+  } else {
+    if (hasBg) chosen = `${baseUrl}?t=${Date.now()}`;
+    else if (hasBgLight) chosen = `${baseUrl}?variant=light&t=${Date.now()}`;
+  }
+
+  if (chosen) {
+    document.body.style.backgroundImage = `url('${chosen}')`;
+    if (orbs) orbs.style.display = 'none';
+  } else {
+    if (orbs) orbs.style.display = 'block';
+  }
+}
+
+// Re-apply theme-dependent backgrounds when the system colour scheme changes
+if (window.matchMedia) {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (brandingCache) applyBackgrounds(currentViewName);
+  });
 }
 
 // Load Branding configurations dynamically
@@ -3229,10 +3601,8 @@ async function loadBranding() {
     brandingCache = data;
     appBrandingUrl = data.appUrl || '';
 
-    // Apply custom colors
-    if (data.customColorBg) {
-      document.documentElement.style.setProperty('--color-bg', data.customColorBg);
-    }
+    // Custom background color only applies to the dark theme; light mode keeps its
+    // designed gradient (handled in applyBackgrounds()).
     if (data.customColorAccent) {
       document.documentElement.style.setProperty('--color-accent', data.customColorAccent);
       
@@ -3336,31 +3706,29 @@ window.onload = () => {
 
   if (gridBtn && listBtn) {
     updateViewModeButtons();
-    gridBtn.onclick = () => {
+    gridBtn.onclick = (e) => {
+      e.stopPropagation();
       if (viewMode === 'grid') {
-        gridSizeIndex = (gridSizeIndex + 1) % 5;
-        localStorage.setItem('gridSizeIndex', gridSizeIndex);
-        const sizeNames = ['Sehr klein', 'Klein', 'Mittel', 'Groß', 'Sehr groß'];
-        showToast(`Kachelgröße: ${sizeNames[gridSizeIndex]}`);
+        showQuickSettingsMenu('grid', gridBtn);
       } else {
+        closeQuickSettingsMenu();
         viewMode = 'grid';
         localStorage.setItem('viewMode', 'grid');
         updateViewModeButtons();
+        renderFiles(renderedFilesList);
       }
-      renderFiles(renderedFilesList);
     };
-    listBtn.onclick = () => {
+    listBtn.onclick = (e) => {
+      e.stopPropagation();
       if (viewMode === 'list') {
-        listSizeIndex = (listSizeIndex + 1) % 5;
-        localStorage.setItem('listSizeIndex', listSizeIndex);
-        const spacingNames = ['Sehr kompakt', 'Kompakt', 'Normal', 'Bequem', 'Geräumig'];
-        showToast(`Listenabstand: ${spacingNames[listSizeIndex]}`);
+        showQuickSettingsMenu('list', listBtn);
       } else {
+        closeQuickSettingsMenu();
         viewMode = 'list';
         localStorage.setItem('viewMode', 'list');
         updateViewModeButtons();
+        renderFiles(renderedFilesList);
       }
-      renderFiles(renderedFilesList);
     };
   }
 
@@ -3736,55 +4104,50 @@ window.addEventListener('keydown', (e) => {
       loadFiles(currentFolderId);
       return;
     }
-    // 1. Close Office Editor
+    // Collect every currently-open overlay and close ONLY the top-most one,
+    // so stacked windows close one layer per ESC press (newest first).
+    const isOverlayOpen = (el) => {
+      if (!el) return false;
+      const cs = window.getComputedStyle(el);
+      return cs.display !== 'none' && cs.visibility !== 'hidden';
+    };
+    const zIndexOf = (el) => {
+      const z = parseInt(window.getComputedStyle(el).zIndex, 10);
+      return Number.isNaN(z) ? 0 : z;
+    };
+
+    const candidates = [];
+    const pushIf = (el, close) => { if (isOverlayOpen(el)) candidates.push({ el, close }); };
+
     const officeEditor = document.getElementById('office-editor-overlay');
-    if (officeEditor && officeEditor.style.display !== 'none') {
-      if (docEditorInstance) {
-        docEditorInstance.destroyEditor();
-        docEditorInstance = null;
-      }
+    pushIf(officeEditor, () => {
+      if (docEditorInstance) { docEditorInstance.destroyEditor(); docEditorInstance = null; }
       officeEditor.style.display = 'none';
       loadFiles(currentFolderId);
-      return;
-    }
+    });
+    pushIf(document.getElementById('code-editor-overlay'), () => document.getElementById('close-code-editor-btn').click());
+    pushIf(document.getElementById('image-viewer-overlay'), () => document.getElementById('close-image-viewer-btn').click());
+    pushIf(document.getElementById('video-viewer-overlay'), () => document.getElementById('close-video-viewer-btn').click());
+    pushIf(document.getElementById('pdf-viewer-overlay'), () => document.getElementById('close-pdf-viewer-btn').click());
 
-    // 1b. Close Code Editor, Image Viewer, Video Viewer
-    const codeEditor = document.getElementById('code-editor-overlay');
-    if (codeEditor && codeEditor.style.display !== 'none') {
-      document.getElementById('close-code-editor-btn').click();
-      return;
-    }
-    const imageViewer = document.getElementById('image-viewer-overlay');
-    if (imageViewer && imageViewer.style.display !== 'none') {
-      document.getElementById('close-image-viewer-btn').click();
-      return;
-    }
-    const videoViewer = document.getElementById('video-viewer-overlay');
-    if (videoViewer && videoViewer.style.display !== 'none') {
-      document.getElementById('close-video-viewer-btn').click();
-      return;
-    }
-    const pdfViewer = document.getElementById('pdf-viewer-overlay');
-    if (pdfViewer && pdfViewer.classList.contains('active')) {
-      document.getElementById('close-pdf-viewer-btn').click();
-      return;
-    }
-
-    // 2. Close other overlays (except the main settings/admin views themselves)
-    const activeOverlays = Array.from(document.querySelectorAll('.modal-overlay.active'))
-      .filter(o => o.id !== 'settings-view' && o.id !== 'admin-view');
-      
-    if (activeOverlays.length > 0) {
-      activeOverlays.forEach(overlay => {
-        overlay.classList.remove('active');
-        if (overlay.id === 'totp-setup-overlay') {
-          cancelTotpSetup();
-        }
+    // Generic glass modals (share, create-file, totp, confirm, input, …)
+    const handledIds = new Set(['settings-view', 'admin-view', 'office-editor-overlay', 'code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay']);
+    document.querySelectorAll('.modal-overlay.active').forEach(o => {
+      if (handledIds.has(o.id)) return;
+      pushIf(o, () => {
+        o.classList.remove('active');
+        if (o.id === 'totp-setup-overlay') cancelTotpSetup();
       });
+    });
+
+    if (candidates.length > 0) {
+      // Highest z-index wins; sort is stable so later-collected layers win ties
+      candidates.sort((a, b) => zIndexOf(a.el) - zIndexOf(b.el));
+      candidates[candidates.length - 1].close();
       return;
     }
 
-    // 3. Close settings or admin (go back to dashboard)
+    // No overlay open → close settings or admin (go back to dashboard)
     if (window.location.hash === '#settings' || window.location.hash === '#admin') {
       closeSettingsOrAdmin();
       return;
@@ -3929,18 +4292,21 @@ function removeCollabUserStyles(userId) {
   if (styleEl) styleEl.remove();
 }
 
-function initCollabSocket(fileId, username, userId, isPublic = false, slug = '') {
+function initCollabSocket(fileId, username, userId, isPublic = false, slug = '', isGuest = false) {
   if (collabSocket) {
     collabSocket.close();
     collabSocket = null;
   }
 
   collabUserDecorations = {};
+  collabUserColorMap = {};
+  myCollabUserId = userId;
 
   const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsHost = window.location.host;
-  
+
   let wsUrl = `${wsProto}//${wsHost}/api/collab?fileId=${fileId}&username=${encodeURIComponent(username)}&userId=${userId}`;
+  if (isGuest) wsUrl += `&guest=1`;
   if (isPublic) {
     wsUrl += `&slug=${slug}`;
   }
@@ -3957,6 +4323,7 @@ function initCollabSocket(fileId, username, userId, isPublic = false, slug = '')
 
       if (data.type === 'init') {
         collabUserColor = data.color;
+        if (data.userId) myCollabUserId = data.userId;
         updateCollabUsersListUI(data.users);
       } else if (data.type === 'user_joined') {
         updateCollabUsersListUI(data.users);
@@ -3995,14 +4362,9 @@ function initCollabSocket(fileId, username, userId, isPublic = false, slug = '')
         const position = data.position;
         const selection = data.selection;
 
-        let color = '#00d2ff';
-        const clientStyle = document.getElementById(`collab-styles-${targetUserId}`);
-        if (clientStyle) {
-          const match = clientStyle.innerHTML.match(/border-left: 2px solid (#[a-fA-F0-9]+)/);
-          if (match) color = match[1];
-        } else {
-          // Find matching user from room to fetch color
-          // We'll hash color just like server if style is new
+        // Prefer the authoritative colour the server assigned to this user
+        let color = collabUserColorMap[targetUserId];
+        if (!color) {
           const colors = ['#00d2ff', '#ff5555', '#50fa7b', '#ffb86c', '#ff79c6', '#bd93f9', '#f1fa8c', '#8be9fd'];
           let hash = 0;
           for (let i = 0; i < targetUserId.length; i++) {
@@ -4051,6 +4413,12 @@ function initCollabSocket(fileId, username, userId, isPublic = false, slug = '')
 function updateCollabUsersListUI(users) {
   const container = document.getElementById('collab-users-container');
   const listEl = document.getElementById('collab-users-list');
+
+  // Keep the authoritative colour map in sync with the room roster
+  if (Array.isArray(users)) {
+    users.forEach(u => { if (u.userId) collabUserColorMap[u.userId] = u.color; });
+  }
+
   if (!container || !listEl) return;
 
   if (!users || users.length <= 1) {
@@ -4059,10 +4427,9 @@ function updateCollabUsersListUI(users) {
   }
 
   container.style.display = 'flex';
-  const currentUsername = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.username : 'Visitor';
-  const otherUsers = users.filter(u => u.username !== currentUsername);
+  const otherUsers = users.filter(u => u.userId !== myCollabUserId);
   const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${u.username}</span>`);
-  listEl.innerHTML = `Andere online: ${names.join(', ')}`;
+  listEl.innerHTML = names.length ? `Andere online: ${names.join(', ')}` : 'Nur du';
 }
 
 let currentEditingFileId = null;
@@ -4086,7 +4453,7 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
 
     await loadMonaco();
 
-    document.getElementById('code-editor-title').innerHTML = `<i data-lucide="file-code"></i> ${fileName}`;
+    document.getElementById('code-editor-title').textContent = fileName;
     lucide.createIcons();
 
     document.getElementById('code-editor-overlay').classList.add('active');
@@ -4102,7 +4469,7 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     
     const saveBtn = document.getElementById('save-code-editor-btn');
     if (saveBtn) {
-      saveBtn.style.display = readOnly ? 'none' : 'block';
+      saveBtn.style.display = readOnly ? 'none' : '';
     }
 
     const container = document.getElementById('monaco-editor-container');
@@ -4187,9 +4554,10 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     }
 
     // Start Collaboration WebSocket
-    const collabUsername = (typeof currentUser !== 'undefined' && currentUser) ? currentUser.username : ('Gast_' + Math.floor(Math.random() * 900 + 100));
-    const collabUserId = (typeof currentUser !== 'undefined' && currentUser) ? `${currentUser.id}` : `guest_${Math.random().toString(36).substring(2, 11)}`;
-    initCollabSocket(fileId, collabUsername, collabUserId, isPublic, slug);
+    const isAuthed = (typeof currentUser !== 'undefined' && currentUser);
+    const collabUsername = isAuthed ? currentUser.username : '';
+    const collabUserId = isAuthed ? `${currentUser.id}` : `guest_${Math.random().toString(36).substring(2, 11)}`;
+    initCollabSocket(fileId, collabUsername, collabUserId, isPublic, slug, !isAuthed);
 
     // Send edits to other collaborators in real-time on keypress/change
     monacoEditorInstance.onDidChangeModelContent((event) => {
