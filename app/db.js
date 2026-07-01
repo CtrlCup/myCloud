@@ -43,6 +43,46 @@ async function initDb() {
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_quota BIGINT DEFAULT NULL');
 
+    // Roles Table — named roles with a permission map and an optional group-wide storage quota
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS roles (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(50) UNIQUE NOT NULL,
+        is_default BOOLEAN DEFAULT FALSE,
+        is_system BOOLEAN DEFAULT FALSE,
+        permissions JSONB DEFAULT '{}',
+        storage_quota BIGINT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Seed the two built-in roles (admin = everything, user = default for new sign-ups)
+    const ALL_PERMS = {
+      admin: true, upload: true, create_folder: true, delete: true,
+      rename: true, share: true, download: true, edit_files: true,
+    };
+    const USER_PERMS = {
+      admin: false, upload: true, create_folder: true, delete: true,
+      rename: true, share: true, download: true, edit_files: true,
+    };
+    await client.query(
+      `INSERT INTO roles (name, is_default, is_system, permissions)
+       VALUES ('admin', false, true, $1)
+       ON CONFLICT (name) DO UPDATE SET is_system = true, permissions = $1`,
+      [JSON.stringify(ALL_PERMS)]
+    );
+    await client.query(
+      `INSERT INTO roles (name, is_default, is_system, permissions)
+       VALUES ('user', true, true, $1)
+       ON CONFLICT (name) DO UPDATE SET is_system = true`,
+      [JSON.stringify(USER_PERMS)]
+    );
+    // Guarantee exactly one default role exists
+    const defCount = await client.query('SELECT COUNT(*) FROM roles WHERE is_default = true');
+    if (parseInt(defCount.rows[0].count) === 0) {
+      await client.query(`UPDATE roles SET is_default = true WHERE name = 'user'`);
+    }
+
     // Passkeys Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS passkeys (

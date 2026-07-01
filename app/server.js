@@ -120,11 +120,49 @@ function requireAuth(req, res, next) {
   res.status(401).json({ error: 'Unauthorized' });
 }
 
-function requireAdmin(req, res, next) {
-  if (req.session.userId && req.session.role === 'admin') {
-    return next();
+// Resolve the permission map for a role name (empty object if the role is gone)
+async function getRolePermissions(roleName) {
+  if (!roleName) return {};
+  try {
+    const r = await pool.query('SELECT permissions FROM roles WHERE name = $1', [roleName]);
+    if (r.rows.length === 0) return {};
+    return r.rows[0].permissions || {};
+  } catch (err) {
+    console.error('getRolePermissions error:', err);
+    return {};
   }
-  res.status(403).json({ error: 'Forbidden: Admin access required' });
+}
+
+// Admin = legacy 'admin' role name OR any role carrying the `admin` permission
+async function requireAdmin(req, res, next) {
+  try {
+    if (!req.session.userId) {
+      return res.status(403).json({ error: 'Forbidden: Admin access required' });
+    }
+    if (req.session.role === 'admin') return next();
+    const perms = await getRolePermissions(req.session.role);
+    if (perms.admin === true) return next();
+    return res.status(403).json({ error: 'Forbidden: Admin access required' });
+  } catch (err) {
+    console.error('requireAdmin error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+// Gate an action behind a single permission key (admins always pass)
+function requirePermission(key) {
+  return async (req, res, next) => {
+    try {
+      if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
+      if (req.session.role === 'admin') return next();
+      const perms = await getRolePermissions(req.session.role);
+      if (perms.admin === true || perms[key] === true) return next();
+      return res.status(403).json({ error: 'Für diese Aktion fehlt deiner Rolle die Berechtigung.' });
+    } catch (err) {
+      console.error('requirePermission error:', err);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  };
 }
 
 // WebAuthn configuration variables
@@ -192,7 +230,12 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(403).json({ error: 'Registration is currently disabled.' });
     }
 
-    const role = userCount === 0 ? 'admin' : 'user';
+    // First user is admin; everyone else gets the configured default role
+    let role = 'admin';
+    if (userCount !== 0) {
+      const defRes = await pool.query('SELECT name FROM roles WHERE is_default = true LIMIT 1');
+      role = (defRes.rows[0] && defRes.rows[0].name) || 'user';
+    }
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Generate standard username based on email prefix
@@ -934,7 +977,7 @@ app.get('/api/files/list', requireAuth, async (req, res) => {
 });
 
 // Create new folder
-app.post('/api/files/folder', requireAuth, async (req, res) => {
+app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), async (req, res) => {
   const { name, parentId } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId ? parseInt(parentId) : null;
@@ -962,7 +1005,7 @@ app.post('/api/files/folder', requireAuth, async (req, res) => {
 });
 
 // Upload file
-app.post('/api/files/upload', requireAuth, upload.single('file'), async (req, res) => {
+app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.single('file'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -971,16 +1014,34 @@ app.post('/api/files/upload', requireAuth, upload.single('file'), async (req, re
   const userId = req.session.userId;
 
   try {
-    // Check storage quota
-    const userRes = await pool.query('SELECT storage_quota FROM users WHERE id = $1', [userId]);
+    // Check per-user storage quota
+    const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [userId]);
     const quotaBytes = userRes.rows[0].storage_quota ? parseInt(userRes.rows[0].storage_quota) : null;
-    
+
     if (quotaBytes !== null) {
       const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [userId]);
       const usedBytes = parseInt(usedRes.rows[0].total || 0);
       if (usedBytes + req.file.size > quotaBytes) {
         fs.unlinkSync(req.file.path);
         return res.status(413).json({ error: 'Speicherplatzlimit überschritten! Bitte lösche Dateien oder wende dich an einen Admin.' });
+      }
+    }
+
+    // Check group (role) storage quota — combined usage of all members of the role
+    const roleName = userRes.rows[0].role;
+    const roleQuotaRes = await pool.query('SELECT storage_quota FROM roles WHERE name = $1', [roleName]);
+    const roleQuotaBytes = (roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota) ? parseInt(roleQuotaRes.rows[0].storage_quota) : null;
+    if (roleQuotaBytes !== null) {
+      const groupUsedRes = await pool.query(
+        `SELECT COALESCE(SUM(f.size), 0) as total
+         FROM files f JOIN users u ON f.owner_id = u.id
+         WHERE u.role = $1 AND f.is_folder = false`,
+        [roleName]
+      );
+      const groupUsed = parseInt(groupUsedRes.rows[0].total || 0);
+      if (groupUsed + req.file.size > roleQuotaBytes) {
+        fs.unlinkSync(req.file.path);
+        return res.status(413).json({ error: 'Das gemeinsame Speicherkontingent deiner Gruppe ist erschöpft. Bitte wende dich an einen Admin.' });
       }
     }
 
@@ -1012,7 +1073,7 @@ app.post('/api/files/upload', requireAuth, upload.single('file'), async (req, re
 });
 
 // Download single file
-app.get('/api/files/download/:id', requireAuth, async (req, res) => {
+app.get('/api/files/download/:id', requireAuth, requirePermission('download'), async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
 
@@ -1133,7 +1194,7 @@ async function deleteFolderRecursive(folderId, userId) {
 }
 
 // Delete file/folder
-app.delete('/api/files/:id', requireAuth, async (req, res) => {
+app.delete('/api/files/:id', requireAuth, requirePermission('delete'), async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
 
@@ -1166,7 +1227,7 @@ app.delete('/api/files/:id', requireAuth, async (req, res) => {
 });
 
 // Move multiple files/folders to a target folder
-app.post('/api/files/move-multiple', requireAuth, async (req, res) => {
+app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), async (req, res) => {
   const { fileIds, targetFolderId } = req.body;
   const userId = req.session.userId;
 
@@ -1261,7 +1322,7 @@ app.post('/api/files/copy-multiple', requireAuth, async (req, res) => {
 });
 
 // Delete multiple files/folders
-app.post('/api/files/delete-multiple', requireAuth, async (req, res) => {
+app.post('/api/files/delete-multiple', requireAuth, requirePermission('delete'), async (req, res) => {
   const { ids } = req.body;
   const userId = req.session.userId;
   
@@ -1340,7 +1401,7 @@ app.get('/api/files/download-zip-multiple', requireAuth, async (req, res) => {
 });
 
 // Create new empty file
-app.post('/api/files/create-empty', requireAuth, async (req, res) => {
+app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), async (req, res) => {
   const { name, parentId, type } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId ? parseInt(parentId) : null;
@@ -1515,7 +1576,7 @@ app.get('/api/files/content/:id', requireAuth, async (req, res) => {
 });
 
 // Save text file content
-app.put('/api/files/content/:id', requireAuth, async (req, res) => {
+app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
   const { content } = req.body;
@@ -1635,7 +1696,7 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
    ========================================================================== */
 
 // Create a share link
-app.post('/api/shares', requireAuth, async (req, res) => {
+app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res) => {
   const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload } = req.body;
   const userId = req.session.userId;
 
@@ -3240,6 +3301,115 @@ app.get('/api/settings/admin/users', requireAdmin, async (req, res) => {
   }
 });
 
+// The permission keys the UI exposes (single source of truth)
+const ROLE_PERMISSION_KEYS = ['admin', 'upload', 'create_folder', 'delete', 'rename', 'share', 'download', 'edit_files'];
+
+// Admin Role-Management: list roles with member counts & combined storage usage
+app.get('/api/settings/admin/roles', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.name, r.is_default, r.is_system, r.permissions, r.storage_quota,
+              (SELECT COUNT(*) FROM users u WHERE u.role = r.name) as member_count,
+              (SELECT COALESCE(SUM(f.size), 0) FROM files f JOIN users u ON f.owner_id = u.id
+                 WHERE u.role = r.name AND f.is_folder = false) as storage_used
+       FROM roles r ORDER BY r.is_system DESC, r.name ASC`
+    );
+    res.json({ roles: result.rows, permissionKeys: ROLE_PERMISSION_KEYS });
+  } catch (err) {
+    console.error('Admin list roles error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin Role-Management: create a new role
+app.post('/api/settings/admin/roles', requireAdmin, async (req, res) => {
+  const { name, permissions, storageQuota } = req.body;
+  const cleanName = (name || '').trim().toLowerCase();
+  if (!cleanName || !/^[a-z0-9_-]{2,30}$/.test(cleanName)) {
+    return res.status(400).json({ error: 'Ungültiger Rollenname (2–30 Zeichen: a–z, 0–9, _ und -).' });
+  }
+  try {
+    const exists = await pool.query('SELECT id FROM roles WHERE name = $1', [cleanName]);
+    if (exists.rows.length > 0) return res.status(400).json({ error: 'Diese Rolle existiert bereits.' });
+
+    const perms = {};
+    for (const k of ROLE_PERMISSION_KEYS) perms[k] = !!(permissions && permissions[k]);
+    const quota = storageQuota ? parseInt(storageQuota) : null;
+
+    const result = await pool.query(
+      `INSERT INTO roles (name, is_default, is_system, permissions, storage_quota)
+       VALUES ($1, false, false, $2, $3) RETURNING *`,
+      [cleanName, JSON.stringify(perms), quota]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Admin create role error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin Role-Management: update a role's permissions / quota
+app.put('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
+  const roleId = parseInt(req.params.id);
+  const { permissions, storageQuota } = req.body;
+  try {
+    const roleRes = await pool.query('SELECT * FROM roles WHERE id = $1', [roleId]);
+    if (roleRes.rows.length === 0) return res.status(404).json({ error: 'Rolle nicht gefunden.' });
+    const role = roleRes.rows[0];
+
+    const perms = {};
+    for (const k of ROLE_PERMISSION_KEYS) perms[k] = !!(permissions && permissions[k]);
+    // The built-in admin role must always keep full access
+    if (role.name === 'admin') for (const k of ROLE_PERMISSION_KEYS) perms[k] = true;
+
+    const quota = (storageQuota !== undefined && storageQuota !== null && storageQuota !== '')
+      ? parseInt(storageQuota) : null;
+
+    await pool.query('UPDATE roles SET permissions = $1, storage_quota = $2 WHERE id = $3',
+      [JSON.stringify(perms), quota, roleId]);
+    res.json({ success: true, message: 'Rolle aktualisiert.' });
+  } catch (err) {
+    console.error('Admin update role error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin Role-Management: set a role as the default for new sign-ups
+app.post('/api/settings/admin/roles/:id/default', requireAdmin, async (req, res) => {
+  const roleId = parseInt(req.params.id);
+  try {
+    const roleRes = await pool.query('SELECT name FROM roles WHERE id = $1', [roleId]);
+    if (roleRes.rows.length === 0) return res.status(404).json({ error: 'Rolle nicht gefunden.' });
+    await pool.query('UPDATE roles SET is_default = false');
+    await pool.query('UPDATE roles SET is_default = true WHERE id = $1', [roleId]);
+    res.json({ success: true, message: `Standardrolle auf "${roleRes.rows[0].name}" gesetzt.` });
+  } catch (err) {
+    console.error('Admin set default role error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin Role-Management: delete a role (members fall back to the default role)
+app.delete('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
+  const roleId = parseInt(req.params.id);
+  try {
+    const roleRes = await pool.query('SELECT * FROM roles WHERE id = $1', [roleId]);
+    if (roleRes.rows.length === 0) return res.status(404).json({ error: 'Rolle nicht gefunden.' });
+    const role = roleRes.rows[0];
+    if (role.is_system) return res.status(400).json({ error: 'System-Rollen können nicht gelöscht werden.' });
+
+    // Reassign members to the current default role
+    const defRes = await pool.query('SELECT name FROM roles WHERE is_default = true LIMIT 1');
+    const fallback = (defRes.rows[0] && defRes.rows[0].name) || 'user';
+    await pool.query('UPDATE users SET role = $1 WHERE role = $2', [fallback, role.name]);
+    await pool.query('DELETE FROM roles WHERE id = $1', [roleId]);
+    res.json({ success: true, message: `Rolle gelöscht. Mitglieder wurden auf "${fallback}" verschoben.` });
+  } catch (err) {
+    console.error('Admin delete role error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Admin User-Management: Create a new user
 app.post('/api/settings/admin/users', requireAdmin, async (req, res) => {
   const { username, email, password, role } = req.body;
@@ -3255,10 +3425,16 @@ app.post('/api/settings/admin/users', requireAdmin, async (req, res) => {
     
     const saltRounds = 10;
     const password_hash = await bcrypt.hash(password, saltRounds);
-    const targetRole = role === 'admin' ? 'admin' : 'user';
-    
+    // Accept any existing role; fall back to the default role
+    let targetRole = (role || '').trim();
+    const roleCheck = await pool.query('SELECT name FROM roles WHERE name = $1', [targetRole]);
+    if (roleCheck.rows.length === 0) {
+      const defRes = await pool.query('SELECT name FROM roles WHERE is_default = true LIMIT 1');
+      targetRole = (defRes.rows[0] && defRes.rows[0].name) || 'user';
+    }
+
     const result = await pool.query(
-      `INSERT INTO users (username, email, password_hash, role, is_verified, is_active) 
+      `INSERT INTO users (username, email, password_hash, role, is_verified, is_active)
        VALUES ($1, $2, $3, $4, true, true) RETURNING id, username, role, email`,
       [username, email, password_hash, targetRole]
     );
@@ -3297,6 +3473,8 @@ app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
       await pool.query('UPDATE users SET storage_quota = $1 WHERE id = $2', [quotaBytes, targetUserId]);
       return res.json({ success: true, message: 'Speicherplatzlimit aktualisiert.' });
     } else if (action === 'role' && role) {
+      const roleCheck = await pool.query('SELECT name FROM roles WHERE name = $1', [role]);
+      if (roleCheck.rows.length === 0) return res.status(400).json({ error: 'Diese Rolle existiert nicht.' });
       await pool.query('UPDATE users SET role = $1 WHERE id = $2', [role, targetUserId]);
       return res.json({ success: true, message: 'Benutzerrolle aktualisiert.' });
     } else if (action === 'toggle-status') {

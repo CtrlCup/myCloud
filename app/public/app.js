@@ -17,6 +17,20 @@ let clickTimeoutFileId = null;
 let clipboardFileIds = [];
 let clipboardAction = null; // 'copy' or 'cut'
 
+// Admin roles cache + permission labels
+let adminRolesCache = [];
+let adminPermissionKeys = [];
+const PERM_LABELS = {
+  admin: 'Admin-Zugriff',
+  upload: 'Hochladen',
+  create_folder: 'Ordner erstellen',
+  delete: 'Löschen',
+  rename: 'Umbenennen / Verschieben',
+  share: 'Freigaben erstellen',
+  download: 'Herunterladen',
+  edit_files: 'Dateien bearbeiten',
+};
+
 // Real-time collaboration state
 let collabSocket = null;
 let collabUserColor = null;
@@ -201,10 +215,19 @@ async function checkAuthStatus() {
 
 const adminView = document.getElementById('admin-view');
 
+// Restart the subtle fade-in animation on a view container
+function playViewEnter(el) {
+  if (!el) return;
+  el.classList.remove('view-enter');
+  void el.offsetWidth; // force reflow so the animation re-triggers
+  el.classList.add('view-enter');
+}
+
 function showView(viewName) {
   currentViewName = viewName;
   applyBackgrounds(viewName);
   if (viewName === 'auth') {
+    playViewEnter(authView);
     authView.style.display = 'flex';
     dashboardView.style.display = 'none';
     settingsView.style.display = 'none';
@@ -215,6 +238,7 @@ function showView(viewName) {
     }
   } else if (viewName === 'dashboard') {
     authView.style.display = 'none';
+    playViewEnter(dashboardView);
     dashboardView.style.display = 'flex';
     settingsView.style.display = 'none';
     settingsView.classList.remove('active');
@@ -800,10 +824,10 @@ const FILE_TYPE_MAP = {
   css:          ['CSS',           '#2980b9'], scss: ['CSS','#2980b9'], less: ['CSS','#2980b9'],
   py:           ['Python',        '#3498db'], json: ['JSON','#95a5a6'],
   yaml:         ['YAML',          '#95a5a6'], yml:  ['YAML','#95a5a6'],
-  sh:           ['Shell',         '#2c3e50'], bash: ['Shell','#2c3e50'],
+  sh:           ['Shell',         '#5b7ba6'], bash: ['Shell','#5b7ba6'],
   php:          ['PHP',           '#8e44ad'], rb: ['Ruby','#c0392b'],
   sql:          ['SQL',           '#16a085'],
-  c:            ['C-Code',        '#2c3e50'], cpp: ['C++','#2c3e50'],
+  c:            ['C-Code',        '#5b7ba6'], cpp: ['C++','#5b7ba6'],
   h:            ['Header',        '#7f8c8d'], hpp: ['Header','#7f8c8d'],
   cs:           ['C#',            '#27ae60'], go: ['Go','#1abc9c'],
   rs:           ['Rust',          '#e67e22'], java: ['Java','#e74c3c'],
@@ -924,6 +948,8 @@ function renderFiles(files) {
 
     const iconColor = getFileIconColor(file);
     const isThumb = isImg || isVid;
+    // Kacheln mit echtem Vorschaubild bekommen mehr Platz fürs Bild (siehe .has-thumb CSS)
+    if (isThumb) item.classList.add('has-thumb');
     let iconHTML = `<i data-lucide="${iconName}" style="color: ${iconColor};"></i>`;
     if (isThumb) {
       const thumbUrl = `/api/files/thumbnail/${file.id}`;
@@ -2965,64 +2991,168 @@ document.getElementById('test-smtp-btn').onclick = async () => {
 };
 
 // Admin: Load Users List
+// Load & render the role-management UI, and keep the role cache fresh for selects
+async function loadAdminRoles() {
+  try {
+    const res = await fetch('/api/settings/admin/roles');
+    if (!res.ok) return;
+    const data = await res.json();
+    adminRolesCache = data.roles || [];
+    adminPermissionKeys = data.permissionKeys || Object.keys(PERM_LABELS);
+
+    // Populate the "create user" role select
+    const newRoleSelect = document.getElementById('admin-new-role');
+    if (newRoleSelect) {
+      const prev = newRoleSelect.value;
+      newRoleSelect.innerHTML = adminRolesCache
+        .map(r => `<option value="${r.name}">${r.name}</option>`).join('');
+      if (adminRolesCache.some(r => r.name === prev)) newRoleSelect.value = prev;
+      else { const def = adminRolesCache.find(r => r.is_default); if (def) newRoleSelect.value = def.name; }
+    }
+
+    const list = document.getElementById('admin-roles-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    adminRolesCache.forEach(role => {
+      const perms = role.permissions || {};
+      const quotaGb = role.storage_quota ? (role.storage_quota / (1024 ** 3)).toFixed(1) : '';
+      const usedStr = formatBytes(role.storage_used);
+      const quotaStr = role.storage_quota ? formatBytes(role.storage_quota) : 'unbegrenzt';
+
+      const row = document.createElement('div');
+      row.className = 'admin-role-row';
+      row.innerHTML = `
+        <div class="admin-role-row-head">
+          <span class="admin-role-name">${role.name}</span>
+          ${role.is_default ? '<span class="role-badge default">Standard</span>' : ''}
+          ${role.is_system ? '<span class="role-badge system">System</span>' : ''}
+          <span class="role-info">${role.member_count} Mitglied(er) · ${usedStr} / ${quotaStr}</span>
+        </div>
+        <div class="admin-role-perms">
+          ${adminPermissionKeys.map(k => `
+            <label>
+              <input type="checkbox" data-perm="${k}" ${perms[k] ? 'checked' : ''} ${role.name === 'admin' ? 'disabled' : ''}>
+              <span>${PERM_LABELS[k] || k}</span>
+            </label>`).join('')}
+        </div>
+        <div class="admin-role-footer">
+          <div class="admin-role-quota-field">
+            <label>Gruppen-Speicherkontingent (GB, leer = unbegrenzt)</label>
+            <input type="number" min="0" step="0.1" class="form-control role-quota-input" value="${quotaGb}" placeholder="unbegrenzt">
+          </div>
+          <div class="admin-role-actions">
+            ${!role.is_default ? '<button class="btn btn-role-default" style="color: var(--color-accent); border-color: rgba(var(--color-accent-rgb),0.3);">Als Standard</button>' : ''}
+            <button class="btn btn-primary btn-role-save">Speichern</button>
+            ${!role.is_system ? '<button class="btn btn-role-delete" style="color:#ff5555; border-color: rgba(255,0,0,0.25);">Löschen</button>' : ''}
+          </div>
+        </div>
+      `;
+
+      row.querySelector('.btn-role-save').onclick = async () => {
+        const permissions = {};
+        row.querySelectorAll('input[data-perm]').forEach(cb => { permissions[cb.getAttribute('data-perm')] = cb.checked; });
+        const qv = row.querySelector('.role-quota-input').value;
+        const storageQuota = (qv && parseFloat(qv) > 0) ? Math.round(parseFloat(qv) * (1024 ** 3)) : null;
+        try {
+          const r = await fetch(`/api/settings/admin/roles/${role.id}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ permissions, storageQuota }),
+          });
+          const d = await r.json();
+          if (r.ok) { showToast('Rolle gespeichert.'); loadAdminRoles(); }
+          else showToast(d.error || 'Fehler beim Speichern.');
+        } catch { showToast('Verbindungsfehler.'); }
+      };
+
+      const defBtn = row.querySelector('.btn-role-default');
+      if (defBtn) defBtn.onclick = async () => {
+        try {
+          const r = await fetch(`/api/settings/admin/roles/${role.id}/default`, { method: 'POST' });
+          const d = await r.json();
+          if (r.ok) { showToast(d.message || 'Standardrolle gesetzt.'); loadAdminRoles(); }
+          else showToast(d.error || 'Fehler.');
+        } catch { showToast('Verbindungsfehler.'); }
+      };
+
+      const delBtn = row.querySelector('.btn-role-delete');
+      if (delBtn) delBtn.onclick = async () => {
+        if (!await showConfirmDialog('Rolle löschen', `Rolle "${role.name}" wirklich löschen? Mitglieder werden auf die Standardrolle verschoben.`)) return;
+        try {
+          const r = await fetch(`/api/settings/admin/roles/${role.id}`, { method: 'DELETE' });
+          const d = await r.json();
+          if (r.ok) { showToast(d.message || 'Rolle gelöscht.'); loadAdminRoles(); loadAdminUsers(); }
+          else showToast(d.error || 'Fehler beim Löschen.');
+        } catch { showToast('Verbindungsfehler.'); }
+      };
+
+      list.appendChild(row);
+    });
+  } catch (err) {
+    console.error('Error loading admin roles:', err);
+  }
+}
+
 async function loadAdminUsers() {
   try {
+    await loadAdminRoles();
+
     const res = await fetch('/api/settings/admin/users');
     const users = await res.json();
 
     const container = document.getElementById('admin-user-list');
     container.innerHTML = '';
 
+    const roleOptions = (selected) => adminRolesCache
+      .map(r => `<option value="${r.name}" ${r.name === selected ? 'selected' : ''}>${r.name}</option>`).join('');
+
     users.forEach(user => {
-      const row = document.createElement('tr');
-      row.style.borderBottom = '1px solid var(--color-border)';
-      
+      const row = document.createElement('div');
+      row.className = 'admin-user-row';
+
       const ssoText = user.sso_provider ? `Authentik (${user.sso_provider})` : 'Nein';
       const realName = (user.first_name || user.last_name) ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : '';
       const emailText = user.email || 'Keine E-Mail';
-      
-      const statusBadge = user.is_active ? '' : ' <span class="badge" style="background: rgba(255, 85, 85, 0.2); color: #ff5555; font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; margin-left: 0.5rem; font-weight: 500;">Gesperrt</span>';
-      
-      // Determine lock button text/style
+
+      const statusBadge = user.is_active ? '' : ' <span class="badge" style="background: rgba(255, 85, 85, 0.2); color: #ff5555; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; font-weight: 500;">Gesperrt</span>';
       const lockText = user.is_active ? 'Sperren' : 'Entsperren';
       const lockColor = user.is_active ? '#ffaa00' : '#00d2ff';
       const lockBorder = user.is_active ? 'rgba(255,170,0,0.2)' : 'rgba(0,210,255,0.2)';
-      
+
       row.innerHTML = `
-        <td style="padding: 1rem 0.5rem;">
-          <div style="font-weight: 600; display: flex; align-items: center;">${user.username}${statusBadge}</div>
-          ${realName ? `<div style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.15rem;">${realName}</div>` : ''}
-          <div style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.15rem;">${emailText}</div>
-        </td>
-        <td style="padding: 1rem 0.5rem;">
-          <select class="form-control select-role" style="padding: 4px 8px; font-size: 0.85rem; width: auto; background: var(--color-surface); cursor: pointer;">
-            <option value="user" ${user.role === 'user' ? 'selected' : ''}>User</option>
-            <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin</option>
-          </select>
-        </td>
-        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${ssoText}</td>
-        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">${user.file_count}</td>
-        <td style="padding: 1rem 0.5rem; font-size: 0.9rem;">
-          <div style="display: flex; align-items: center; gap: 0.5rem;">
-            <span>${formatBytes(user.storage_used)} / ${user.storage_quota ? formatBytes(user.storage_quota) : 'unbegrenzt'}</span>
-            <button class="btn btn-icon btn-action-edit-quota" style="padding: 2px; border: none; background: transparent; color: var(--color-accent);" title="Speicherlimit ändern">
-              <i data-lucide="edit-3" style="width: 14px; height: 14px;"></i>
-            </button>
+        <div class="admin-user-main">
+          <div class="admin-user-name">${user.username}${statusBadge}</div>
+          ${realName ? `<div class="admin-user-sub">${realName}</div>` : ''}
+          <div class="admin-user-sub">${emailText}</div>
+        </div>
+        <div class="admin-user-meta">
+          <div>
+            <span class="meta-label">Rolle</span>
+            <select class="admin-role-select select-role">${roleOptions(user.role)}</select>
           </div>
-        </td>
-        <td style="padding: 1rem 0.5rem; text-align: right;">
-          <div style="display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center;">
-            <button class="btn btn-action-lock-user" style="color: ${lockColor}; border-color: ${lockBorder}; padding: 4px 8px; font-size: 0.8rem;" title="${lockText}">
-              ${lockText}
-            </button>
-            <button class="btn btn-action-reset-user" style="color: #00d2ff; border-color: rgba(0,210,255,0.2); padding: 4px 8px; font-size: 0.8rem;" title="Passwort per Mail zurücksetzen" ${isEmailConfigured ? '' : 'disabled style="opacity: 0.4;"'}>
-              Reset PW
-            </button>
-            <button class="btn btn-action-delete-user" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 8px; font-size: 0.8rem;" title="Benutzer löschen">
-              Löschen
-            </button>
+          <div>
+            <span class="meta-label">SSO</span>
+            <span class="meta-value">${ssoText}</span>
           </div>
-        </td>
+          <div>
+            <span class="meta-label">Dateien</span>
+            <span class="meta-value">${user.file_count}</span>
+          </div>
+          <div>
+            <span class="meta-label">Speicher</span>
+            <span class="meta-value" style="display:inline-flex; align-items:center; gap:0.35rem;">
+              ${formatBytes(user.storage_used)} / ${user.storage_quota ? formatBytes(user.storage_quota) : 'unbegrenzt'}
+              <button class="btn btn-icon btn-action-edit-quota" style="padding: 2px; border: none; background: transparent; color: var(--color-accent);" title="Speicherlimit ändern">
+                <i data-lucide="edit-3" style="width: 14px; height: 14px;"></i>
+              </button>
+            </span>
+          </div>
+        </div>
+        <div class="admin-user-actions">
+          <button class="btn btn-action-lock-user" style="color: ${lockColor}; border-color: ${lockBorder};" title="${lockText}">${lockText}</button>
+          <button class="btn btn-action-reset-user" style="color: #00d2ff; border-color: rgba(0,210,255,0.2);" title="Passwort per Mail zurücksetzen" ${isEmailConfigured ? '' : 'disabled'}>Reset PW</button>
+          <button class="btn btn-action-delete-user" style="color: #ff5555; border-color: rgba(255,0,0,0.2);" title="Benutzer löschen">Löschen</button>
+        </div>
       `;
 
       // Handle edit quota
@@ -3202,17 +3332,17 @@ async function loadUserShares() {
       if (share.can_zip) permissions.push('ZIP');
 
       row.innerHTML = `
-        <td style="text-align: center;"><input type="checkbox" class="share-row-check" data-id="${share.id}"></td>
+        <td style="text-align: center;"><input type="checkbox" class="checkbox-modern share-row-check" data-id="${share.id}"></td>
         <td style="font-weight: 500;">${share.file_name}</td>
         <td>${typeText}</td>
         <td><a href="/s/${share.slug}" target="_blank" style="color: var(--color-accent); text-decoration: none;">/s/${share.slug}</a></td>
         <td><span style="font-size: 0.8rem; color: var(--color-text-muted);">${permissions.join(', ')}</span></td>
         <td>${expiresText}</td>
         <td style="white-space: nowrap;">
-          <button class="btn-icon btn-action-edit-share" title="Bearbeiten" style="padding: 4px 8px;">
+          <button class="btn-icon btn-action-edit-share" title="Bearbeiten" style="padding: 5px; background: transparent; border: none; color: var(--color-text-muted);">
             <i data-lucide="pencil" style="width: 15px; height: 15px;"></i>
           </button>
-          <button class="btn-icon btn-action-delete-share" title="Löschen" style="padding: 4px 8px; color: #ff5555;">
+          <button class="btn-icon btn-action-delete-share" title="Löschen" style="padding: 5px; background: transparent; border: none; color: #ff5555;">
             <i data-lucide="trash-2" style="width: 15px; height: 15px;"></i>
           </button>
         </td>
@@ -3258,7 +3388,7 @@ function renderSharesSelectionState() {
     const id = parseInt(cb.dataset.id);
     cb.checked = selectedShareIds.has(id);
     const tr = cb.closest('tr');
-    if (tr) tr.style.background = cb.checked ? 'rgba(0,210,255,0.06)' : '';
+    if (tr) tr.style.background = cb.checked ? 'rgba(var(--color-accent-rgb), 0.08)' : '';
   });
   updateSharesBulkBar();
 }
@@ -4007,6 +4137,23 @@ async function triggerPasteAction() {
   }
 }
 
+// Dashboard-Suche ein-/ausklappen (modulweit, damit Hotkeys & Setup-Block sie nutzen können)
+function expandDashboardSearch(focus = true) {
+  const c = document.getElementById('search-container');
+  const input = document.getElementById('dashboard-search-input');
+  if (c) c.classList.add('search-expanded');
+  if (focus && input) setTimeout(() => { input.focus(); input.select(); }, 60);
+}
+function collapseDashboardSearch(force = false) {
+  const c = document.getElementById('search-container');
+  const input = document.getElementById('dashboard-search-input');
+  if (!c) return;
+  // Nur einklappen, wenn keine aktive Sucheingabe vorliegt (außer erzwungen)
+  if (!force && input && input.value.trim()) return;
+  c.classList.remove('search-expanded');
+  if (input) input.blur();
+}
+
 // Keyboard ESC listener & Modal overlay backdrop click listener & Admin toggle auto-save & Desktop Explorer Hotkeys
 window.addEventListener('keydown', (e) => {
   // Check if user is typing in an input, textarea, select, or Monaco/Office editor
@@ -4073,14 +4220,10 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Ctrl + F / Ctrl + S (Focus Search)
+  // Ctrl + F / Ctrl + S (Suchfeld ausklappen & fokussieren)
   if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'f' || e.key.toLowerCase() === 's')) {
-    const searchInput = document.getElementById('dashboard-search-input');
-    if (searchInput) {
-      e.preventDefault();
-      searchInput.focus();
-      searchInput.select();
-    }
+    e.preventDefault();
+    expandDashboardSearch(true);
     return;
   }
 
@@ -4089,6 +4232,7 @@ window.addEventListener('keydown', (e) => {
     const searchInput = document.getElementById('dashboard-search-input');
     if (searchInput) {
       e.preventDefault();
+      expandDashboardSearch(false);
       searchInput.focus();
       searchInput.value = e.key;
       searchInput.dispatchEvent(new Event('input'));
@@ -4928,6 +5072,35 @@ if (adminCreateUserForm) {
   };
 }
 
+// Create a new role
+const adminCreateRoleForm = document.getElementById('admin-create-role-form');
+if (adminCreateRoleForm) {
+  adminCreateRoleForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const nameInput = document.getElementById('admin-new-role-name');
+    const name = nameInput.value.trim();
+    if (!name) return;
+    try {
+      const res = await fetch('/api/settings/admin/roles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // New roles start with sensible baseline permissions (everything except admin)
+        body: JSON.stringify({ name, permissions: { upload: true, create_folder: true, delete: true, rename: true, share: true, download: true, edit_files: true, admin: false } })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(`Rolle "${data.name}" erstellt.`);
+        nameInput.value = '';
+        loadAdminRoles();
+      } else {
+        showToast(data.error || 'Fehler beim Anlegen der Rolle.');
+      }
+    } catch {
+      showToast('Netzwerkfehler.');
+    }
+  };
+}
+
 function showCreateNoteModal(defaultName) {
   return new Promise((resolve) => {
     const overlay = document.getElementById('create-note-modal-overlay');
@@ -5144,16 +5317,27 @@ if (searchInput && searchDeepCheck) {
   };
 
   searchInput.addEventListener('keydown', (e) => {
+    // Strg + Leertaste => Intelligente (Tiefen-)Suche umschalten
+    if (e.ctrlKey && (e.code === 'Space' || e.key === ' ')) {
+      e.preventDefault();
+      e.stopPropagation();
+      searchDeepCheck.checked = !searchDeepCheck.checked;
+      searchDeepCheck.dispatchEvent(new Event('change'));
+      showToast(searchDeepCheck.checked ? 'Intelligente Suche aktiviert' : 'Intelligente Suche deaktiviert');
+      return;
+    }
     if (e.key === 'Enter') {
       e.preventDefault();
+      e.stopPropagation();
       clearTimeout(searchTimeout);
       triggerSearch();
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      e.stopPropagation();
       searchInput.value = '';
       updateSearchClearBtn();
-      searchInput.blur();
       loadFiles(currentFolderId);
+      collapseDashboardSearch(true); // erzwungen einklappen (blur inklusive)
     }
   });
 
@@ -5162,4 +5346,24 @@ if (searchInput && searchDeepCheck) {
       triggerSearch();
     }
   };
+
+  // Lupe-Button: Suchfeld umschalten (aus-/einklappen)
+  const searchContainer = document.getElementById('search-container');
+  const searchToggleBtn = document.getElementById('search-toggle-btn');
+  if (searchToggleBtn) {
+    searchToggleBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (searchContainer && searchContainer.classList.contains('search-expanded')) {
+        collapseDashboardSearch(); // nur einklappen, wenn leer
+      } else {
+        expandDashboardSearch(true);
+      }
+    };
+  }
+
+  // Klick außerhalb des Suchfelds klappt es ein (sofern kein Suchtext vorhanden)
+  document.addEventListener('click', (e) => {
+    if (!searchContainer || !searchContainer.classList.contains('search-expanded')) return;
+    if (!searchContainer.contains(e.target)) collapseDashboardSearch();
+  });
 }

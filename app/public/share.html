@@ -339,7 +339,11 @@
           return;
         } else {
           document.getElementById('password-block-view').style.display = 'none';
-          document.getElementById('main-explorer').style.display = 'block';
+          const explorer = document.getElementById('main-explorer');
+          explorer.style.display = 'block';
+          explorer.classList.remove('view-enter');
+          void explorer.offsetWidth; // reflow so the fade-in re-triggers
+          explorer.classList.add('view-enter');
         }
 
         currentFolderId = data.currentFolderId;
