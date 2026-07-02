@@ -147,6 +147,19 @@ function showConfirmDialog(title, message) {
   });
 }
 
+// Escapes untrusted strings (filenames, usernames, ...) before they're interpolated into
+// innerHTML — those values routinely come from other users (shared/uploaded file names, other
+// people's display names) and were previously inserted unescaped, allowing stored XSS.
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function formatBytes(bytes) {
   bytes = Number(bytes);
   if (!bytes || Number.isNaN(bytes) || bytes <= 0) return '0 Bytes';
@@ -608,6 +621,7 @@ document.getElementById('logo-btn').onclick = (e) => {
   e.preventDefault();
   currentFolderId = null;
   breadcrumbsHistory = [];
+  clearSelection();
   window.location.hash = '#dashboard';
   showView('dashboard');
 };
@@ -661,6 +675,7 @@ function renderBreadcrumbs() {
   homeLink.onclick = (e) => {
     e.preventDefault();
     breadcrumbsHistory = [];
+    clearSelection();
     loadFiles(null);
   };
   container.appendChild(homeLink);
@@ -684,6 +699,7 @@ function renderBreadcrumbs() {
       link.onclick = (e) => {
         e.preventDefault();
         breadcrumbsHistory = breadcrumbsHistory.slice(0, index + 1);
+        clearSelection();
         loadFiles(crumb.id);
       };
       container.appendChild(link);
@@ -1103,7 +1119,7 @@ function renderFiles(files) {
     item.innerHTML = `
       <div class="file-item-checkbox"></div>
       <div class="file-info-group" style="display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px;">
-        <div class="file-name" title="${file.name}" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${file.name}</div>
+        <div class="file-name" title="${escapeHtml(file.name)}" style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(file.name)}</div>
         <div class="file-meta-list" style="display: none; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: var(--color-text-muted);">
           <span class="file-ext-label" style="text-transform: uppercase; font-weight: 600; font-size: 0.7rem; background: rgba(var(--color-accent-rgb), 0.1); color: var(--color-accent); padding: 1px 4px; border-radius: 3px;">${typeLabel}</span>
           <span>•</span>
@@ -1849,7 +1865,7 @@ function updateUploadUI() {
 
     row.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; gap: 0.5rem;">
-        <span style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 200px;" title="${item.name}">${item.name}</span>
+        <span style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 200px;" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
         <div style="display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0;">
           <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 500;">${statusText}</span>
           <button class="delete-upload-item-btn" data-index="${index}" style="border: none; background: transparent; cursor: pointer; padding: 0.1rem; display: flex; align-items: center; justify-content: center; opacity: 0.6; transition: opacity 0.2s;" title="Aus Liste entfernen">
@@ -3390,15 +3406,15 @@ async function loadAdminUsers() {
     container.innerHTML = '';
 
     const roleOptions = (selected) => adminRolesCache
-      .map(r => `<option value="${r.name}" ${r.name === selected ? 'selected' : ''}>${r.name}</option>`).join('');
+      .map(r => `<option value="${escapeHtml(r.name)}" ${r.name === selected ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
 
     users.forEach(user => {
       const row = document.createElement('div');
       row.className = 'admin-user-row';
 
-      const ssoText = user.sso_provider ? `Authentik (${user.sso_provider})` : 'Nein';
-      const realName = (user.first_name || user.last_name) ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : '';
-      const emailText = user.email || 'Keine E-Mail';
+      const ssoText = user.sso_provider ? `Authentik (${escapeHtml(user.sso_provider)})` : 'Nein';
+      const realName = (user.first_name || user.last_name) ? escapeHtml(`${user.first_name || ''} ${user.last_name || ''}`.trim()) : '';
+      const emailText = escapeHtml(user.email) || 'Keine E-Mail';
 
       const statusBadge = user.is_active ? '' : ' <span class="badge" style="background: rgba(255, 85, 85, 0.2); color: #ff5555; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; font-weight: 500;">Gesperrt</span>';
       const lockText = user.is_active ? 'Sperren' : 'Entsperren';
@@ -3407,7 +3423,7 @@ async function loadAdminUsers() {
 
       row.innerHTML = `
         <div class="admin-user-main">
-          <div class="admin-user-name">${user.username}${statusBadge}</div>
+          <div class="admin-user-name">${escapeHtml(user.username)}${statusBadge}</div>
           ${realName ? `<div class="admin-user-sub">${realName}</div>` : ''}
           <div class="admin-user-sub">${emailText}</div>
         </div>
@@ -4700,8 +4716,21 @@ function getMonacoLanguage(fileName) {
   return mapping[ext] || 'plaintext';
 }
 
+// userId/username come from other collaborators over the WebSocket (the server relays
+// whatever a connecting client claims, without validating the format) — sanitize before
+// building CSS class selectors / interpolating into a CSS string, or a malicious collaborator
+// could break out of the `content: "..."` declaration and inject arbitrary CSS into every
+// other participant's page.
+function collabClassToken(id) {
+  return String(id).replace(/[^a-zA-Z0-9_-]/g, '');
+}
+function escapeCssString(str) {
+  return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 function addCollabUserStyles(userId, color, username) {
-  const styleId = `collab-styles-${userId}`;
+  const safeId = collabClassToken(userId);
+  const styleId = `collab-styles-${safeId}`;
   let styleEl = document.getElementById(styleId);
   if (!styleEl) {
     styleEl = document.createElement('style');
@@ -4709,16 +4738,16 @@ function addCollabUserStyles(userId, color, username) {
     document.head.appendChild(styleEl);
   }
   styleEl.innerHTML = `
-    .collab-selection-${userId} {
+    .collab-selection-${safeId} {
       background-color: ${color}33 !important;
     }
-    .collab-cursor-${userId} {
+    .collab-cursor-${safeId} {
       border-left: 2px solid ${color} !important;
       margin-left: -1px;
       position: relative;
     }
-    .collab-cursor-tooltip-${userId}::after {
-      content: "${username}";
+    .collab-cursor-tooltip-${safeId}::after {
+      content: "${escapeCssString(username)}";
       position: absolute;
       top: -14px;
       left: 2px;
@@ -4737,7 +4766,7 @@ function addCollabUserStyles(userId, color, username) {
 }
 
 function removeCollabUserStyles(userId) {
-  const styleEl = document.getElementById(`collab-styles-${userId}`);
+  const styleEl = document.getElementById(`collab-styles-${collabClassToken(userId)}`);
   if (styleEl) styleEl.remove();
 }
 
@@ -4824,12 +4853,13 @@ function initCollabSocket(fileId, username, userId, isPublic = false, slug = '',
 
         addCollabUserStyles(targetUserId, color, targetUsername);
 
+        const safeTargetId = collabClassToken(targetUserId);
         const decorations = [];
         if (selection && (selection.startLineNumber !== selection.endLineNumber || selection.startColumn !== selection.endColumn)) {
           decorations.push({
             range: new monaco.Range(selection.startLineNumber, selection.startColumn, selection.endLineNumber, selection.endColumn),
             options: {
-              className: `collab-selection-${targetUserId}`,
+              className: `collab-selection-${safeTargetId}`,
               hoverMessage: { value: targetUsername }
             }
           });
@@ -4839,8 +4869,8 @@ function initCollabSocket(fileId, username, userId, isPublic = false, slug = '',
           decorations.push({
             range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
             options: {
-              className: `collab-cursor-${targetUserId}`,
-              afterContentClassName: `collab-cursor-tooltip-${targetUserId}`,
+              className: `collab-cursor-${safeTargetId}`,
+              afterContentClassName: `collab-cursor-tooltip-${safeTargetId}`,
               hoverMessage: { value: targetUsername }
             }
           });
@@ -4877,7 +4907,7 @@ function updateCollabUsersListUI(users) {
 
   container.style.display = 'flex';
   const otherUsers = users.filter(u => u.userId !== myCollabUserId);
-  const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${u.username}</span>`);
+  const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${escapeHtml(u.username)}</span>`);
   listEl.innerHTML = names.length ? `Andere online: ${names.join(', ')}` : 'Nur du';
 }
 

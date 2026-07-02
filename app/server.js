@@ -41,7 +41,44 @@ const storage = multer.diskStorage({
     cb(null, uniqueSuffix + path.extname(file.originalname));
   }
 });
-const upload = multer({ storage: storage });
+// Without a limit, multer will happily write an unbounded request body to disk before the
+// app-level storage-quota check (further down) ever runs — a single oversized upload could
+// fill the disk regardless of any quota. This is a generous ceiling (not the per-user quota),
+// just a backstop against a genuinely unbounded request.
+const MAX_UPLOAD_SIZE_BYTES = parseInt(process.env.MAX_UPLOAD_SIZE_BYTES) || 100 * 1024 * 1024 * 1024; // 100GB
+const upload = multer({ storage: storage, limits: { fileSize: MAX_UPLOAD_SIZE_BYTES } });
+
+// The browser/client freely chooses the Content-Type it reports for an uploaded file (multer's
+// req.file.mimetype) — trusting it let an uploader store e.g. a .txt file with mimetype
+// "text/html", which was then served with that same Content-Type on inline view/download,
+// letting the browser render it as HTML/script (stored XSS). Deriving the type from the file
+// extension instead means we always decide what gets served how, never the uploader. Anything
+// not explicitly listed (notably svg/html/xhtml, which a browser can execute) falls back to
+// application/octet-stream, which browsers download rather than render.
+const SAFE_MIME_TYPES = {
+  txt: 'text/plain', csv: 'text/csv', md: 'text/markdown', log: 'text/plain',
+  json: 'application/json', xml: 'application/xml', yaml: 'text/plain', yml: 'text/plain',
+  js: 'text/plain', mjs: 'text/plain', ts: 'text/plain', css: 'text/plain', py: 'text/plain',
+  java: 'text/plain', c: 'text/plain', cpp: 'text/plain', h: 'text/plain', go: 'text/plain',
+  rs: 'text/plain', sh: 'text/plain', sql: 'text/plain', php: 'text/plain', rb: 'text/plain',
+  pdf: 'application/pdf',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+  bmp: 'image/bmp', ico: 'image/x-icon', heic: 'image/heic', heif: 'image/heif',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', avi: 'video/x-msvideo', mkv: 'video/x-matroska',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+  zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar',
+  rar: 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+  doc: 'application/msword', xls: 'application/vnd.ms-excel', ppt: 'application/vnd.ms-powerpoint',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  odt: 'application/vnd.oasis.opendocument.text', ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+};
+function getSafeMimeType(filename) {
+  const ext = (filename.split('.').pop() || '').toLowerCase();
+  return SAFE_MIME_TYPES[ext] || 'application/octet-stream';
+}
 
 const pdfParse = require('pdf-parse');
 
@@ -1106,12 +1143,13 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.s
       }
     }
 
-    const textContent = await extractTextContent(req.file.path, req.file.mimetype, req.file.originalname);
+    const safeMimeType = getSafeMimeType(req.file.originalname);
+    const textContent = await extractTextContent(req.file.path, safeMimeType, req.file.originalname);
 
     const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content) 
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, false, parentId, userId, textContent]
+      [req.file.originalname, req.file.filename, safeMimeType, req.file.size, false, parentId, userId, textContent]
     );
 
     res.status(201).json(result.rows[0]);
@@ -1293,6 +1331,20 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
     if (targetFolderId !== null) {
       const isOwner = await verifyFileOwner(targetFolderId, userId);
       if (!isOwner) return res.status(403).json({ error: 'Access denied to target folder' });
+
+      // Reject moving a folder into itself or one of its own subfolders — that creates a
+      // parent_id cycle, which sends the recursive folder-size CTE (list/search) and the
+      // recursive folder delete into an infinite loop.
+      const movingIds = fileIds.map(Number);
+      let checkId = targetFolderId;
+      while (checkId !== null) {
+        if (movingIds.includes(checkId)) {
+          return res.status(400).json({ error: 'Cannot move a folder into itself or one of its own subfolders.' });
+        }
+        const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
+        if (checkRes.rows.length === 0) break;
+        checkId = checkRes.rows[0].parent_id;
+      }
     }
 
     // Update parent_id for all these files belonging to the user
@@ -1724,8 +1776,10 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
 
-    // Standard web images are served directly
-    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+    // Standard web images are served directly. SVG is deliberately excluded — it's an XML
+    // format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
+    // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
+    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
     if (webImageExts.includes(ext)) {
       return res.sendFile(filePath);
     }
@@ -2763,8 +2817,10 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
 
-    // Standard web images are served directly
-    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+    // Standard web images are served directly. SVG is deliberately excluded — it's an XML
+    // format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
+    // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
+    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
     if (webImageExts.includes(ext)) {
       return res.sendFile(filePath);
     }
@@ -2894,9 +2950,9 @@ app.post('/api/public/shares/:slug/upload', upload.single('file'), async (req, r
     }
 
     const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id) 
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, false, targetFolderId, baseFile.owner_id]
+      [req.file.originalname, req.file.filename, getSafeMimeType(req.file.originalname), req.file.size, false, targetFolderId, baseFile.owner_id]
     );
 
     res.status(201).json(result.rows[0]);
@@ -3694,6 +3750,18 @@ app.get('*', (req, res) => {
     return res.status(404).send('Not Found');
   }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Multer errors (e.g. exceeding MAX_UPLOAD_SIZE_BYTES) otherwise fall through to Express's
+// default HTML error page instead of a clean JSON response.
+app.use((err, req, res, next) => {
+  if (err && err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'File is too large.' });
+    }
+    return res.status(400).json({ error: err.message });
+  }
+  next(err);
 });
 
 // Background cleanup task for expired shares and self-destruct notes

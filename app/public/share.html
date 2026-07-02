@@ -318,6 +318,19 @@
       setTimeout(() => toast.classList.remove('show'), 3000);
     }
 
+    // Escapes untrusted strings (filenames, uploader-chosen names, ...) before they're
+    // interpolated into innerHTML — this page shows files/names contributed by whoever holds
+    // the link, so they must never be trusted enough to render as raw HTML.
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     // Byte-Größen formatieren
     function formatBytes(bytes) {
       bytes = Number(bytes);
@@ -394,7 +407,7 @@
 
         // Render Meta Info
         document.getElementById('shared-title').innerHTML = `
-          <i data-lucide="${isFolder ? 'folder' : 'file'}"></i> ${data.baseFile.name}
+          <i data-lucide="${isFolder ? 'folder' : 'file'}"></i> ${escapeHtml(data.baseFile.name)}
         `;
 
         // Badges
@@ -638,7 +651,7 @@
 
         item.innerHTML = `
           <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
-          <div class="file-name" title="${file.name}">${file.name}</div>
+          <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
           <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
         `;
 
@@ -949,8 +962,20 @@
       return mapping[ext] || 'plaintext';
     }
 
+    // userId/username come from other collaborators over the WebSocket (the server relays
+    // whatever a connecting client claims, without validating the format) — sanitize before
+    // building CSS class selectors / interpolating into a CSS string, or a malicious
+    // collaborator could break out of `content: "..."` and inject CSS into every viewer.
+    function collabClassToken(id) {
+      return String(id).replace(/[^a-zA-Z0-9_-]/g, '');
+    }
+    function escapeCssString(str) {
+      return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    }
+
     function addCollabUserStyles(userId, color, username) {
-      const styleId = `collab-styles-${userId}`;
+      const safeId = collabClassToken(userId);
+      const styleId = `collab-styles-${safeId}`;
       let styleEl = document.getElementById(styleId);
       if (!styleEl) {
         styleEl = document.createElement('style');
@@ -958,16 +983,16 @@
         document.head.appendChild(styleEl);
       }
       styleEl.innerHTML = `
-        .collab-selection-${userId} {
+        .collab-selection-${safeId} {
           background-color: ${color}33 !important;
         }
-        .collab-cursor-${userId} {
+        .collab-cursor-${safeId} {
           border-left: 2px solid ${color} !important;
           margin-left: -1px;
           position: relative;
         }
-        .collab-cursor-tooltip-${userId}::after {
-          content: "${username}";
+        .collab-cursor-tooltip-${safeId}::after {
+          content: "${escapeCssString(username)}";
           position: absolute;
           top: -14px;
           left: 2px;
@@ -986,7 +1011,7 @@
     }
 
     function removeCollabUserStyles(userId) {
-      const styleEl = document.getElementById(`collab-styles-${userId}`);
+      const styleEl = document.getElementById(`collab-styles-${collabClassToken(userId)}`);
       if (styleEl) styleEl.remove();
     }
 
@@ -1073,12 +1098,13 @@
 
             addCollabUserStyles(targetUserId, color, targetUsername);
 
+            const safeTargetId = collabClassToken(targetUserId);
             const decorations = [];
             if (selection && (selection.startLineNumber !== selection.endLineNumber || selection.startColumn !== selection.endColumn)) {
               decorations.push({
                 range: new monaco.Range(selection.startLineNumber, selection.startColumn, selection.endLineNumber, selection.endColumn),
                 options: {
-                  className: `collab-selection-${targetUserId}`,
+                  className: `collab-selection-${safeTargetId}`,
                   hoverMessage: { value: targetUsername }
                 }
               });
@@ -1088,8 +1114,8 @@
               decorations.push({
                 range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
                 options: {
-                  className: `collab-cursor-${targetUserId}`,
-                  afterContentClassName: `collab-cursor-tooltip-${targetUserId}`,
+                  className: `collab-cursor-${safeTargetId}`,
+                  afterContentClassName: `collab-cursor-tooltip-${safeTargetId}`,
                   hoverMessage: { value: targetUsername }
                 }
               });
@@ -1125,7 +1151,7 @@
 
       container.style.display = 'flex';
       const otherUsers = users.filter(u => u.userId !== myCollabUserId);
-      const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${u.username}</span>`);
+      const names = otherUsers.map(u => `<span style="color: ${u.color}; font-weight: bold;">${escapeHtml(u.username)}</span>`);
       listEl.innerHTML = names.length ? `Andere online: ${names.join(', ')}` : 'Nur du';
     }
 
