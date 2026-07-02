@@ -4745,6 +4745,96 @@ function getMonacoLanguage(fileName) {
   return mapping[ext] || 'plaintext';
 }
 
+// Custom language-picker dropdown for the code editor toolbar — replaces a native <select>,
+// which kept a visible browser focus ring after being opened/closed (it doesn't lose focus just
+// because its own popup closed), giving the impression the control was "stuck".
+const MONACO_LANGUAGES = [
+  { value: 'plaintext', label: 'Plaintext' },
+  { value: 'javascript', label: 'JavaScript' },
+  { value: 'typescript', label: 'TypeScript' },
+  { value: 'html', label: 'HTML' },
+  { value: 'css', label: 'CSS' },
+  { value: 'scss', label: 'SCSS' },
+  { value: 'less', label: 'Less' },
+  { value: 'json', label: 'JSON' },
+  { value: 'xml', label: 'XML' },
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'python', label: 'Python' },
+  { value: 'java', label: 'Java' },
+  { value: 'c', label: 'C' },
+  { value: 'cpp', label: 'C++' },
+  { value: 'csharp', label: 'C#' },
+  { value: 'go', label: 'Go' },
+  { value: 'rust', label: 'Rust' },
+  { value: 'php', label: 'PHP' },
+  { value: 'ruby', label: 'Ruby' },
+  { value: 'shell', label: 'Shell' },
+  { value: 'sql', label: 'SQL' },
+  { value: 'yaml', label: 'YAML' },
+  { value: 'dockerfile', label: 'Dockerfile' },
+  { value: 'graphql', label: 'GraphQL' },
+];
+
+let currentEditorLanguage = 'plaintext';
+
+function setEditorLanguageLabel(value) {
+  const opt = MONACO_LANGUAGES.find(o => o.value === value);
+  const labelEl = document.getElementById('monaco-lang-btn-label');
+  if (labelEl) labelEl.textContent = opt ? opt.label : value;
+}
+
+let languageMenuDocListener = null;
+
+function closeLanguageMenu() {
+  document.querySelectorAll('.editor-lang-menu').forEach(m => m.remove());
+  if (languageMenuDocListener) {
+    document.removeEventListener('click', languageMenuDocListener);
+    languageMenuDocListener = null;
+  }
+}
+
+function showLanguageMenu(anchorEl, onSelect) {
+  if (document.querySelector('.editor-lang-menu')) {
+    closeLanguageMenu();
+    return;
+  }
+
+  const menu = document.createElement('div');
+  menu.className = 'card context-menu editor-lang-menu';
+  menu.innerHTML = MONACO_LANGUAGES.map(opt => `
+    <button type="button" class="btn-menu-item ${opt.value === currentEditorLanguage ? 'active' : ''}" data-lang="${opt.value}">
+      <span>${opt.label}</span>
+    </button>
+  `).join('');
+  document.body.appendChild(menu);
+
+  const rect = anchorEl.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  let left = rect.left;
+  if (left + menuRect.width > window.innerWidth - 12) {
+    left = window.innerWidth - menuRect.width - 12;
+  }
+  menu.style.left = `${Math.max(12, left)}px`;
+  menu.style.top = `${rect.bottom + 8}px`;
+
+  menu.querySelectorAll('[data-lang]').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      currentEditorLanguage = btn.dataset.lang;
+      setEditorLanguageLabel(currentEditorLanguage);
+      closeLanguageMenu();
+      onSelect(currentEditorLanguage);
+    };
+  });
+
+  languageMenuDocListener = (e) => {
+    if (!menu.contains(e.target) && e.target !== anchorEl && !anchorEl.contains(e.target)) {
+      closeLanguageMenu();
+    }
+  };
+  setTimeout(() => document.addEventListener('click', languageMenuDocListener), 50);
+}
+
 // userId/username come from other collaborators over the WebSocket (the server relays
 // whatever a connecting client claims, without validating the format) — sanitize before
 // building CSS class selectors / interpolating into a CSS string, or a malicious collaborator
@@ -4993,8 +5083,9 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     const language = getMonacoLanguage(fileName);
 
     // Sync language selector
-    const langSelect = document.getElementById('monaco-lang-select');
-    if (langSelect) langSelect.value = language;
+    currentEditorLanguage = language;
+    setEditorLanguageLabel(language);
+    closeLanguageMenu();
 
     monacoEditorInstance = monaco.editor.create(container, {
       value: textContent,
@@ -5061,10 +5152,14 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     }
 
     // Language selector handler
-    if (langSelect) {
-      langSelect.onchange = () => {
-        const model = monacoEditorInstance.getModel();
-        if (model) monaco.editor.setModelLanguage(model, langSelect.value);
+    const langBtn = document.getElementById('monaco-lang-btn');
+    if (langBtn) {
+      langBtn.onclick = (e) => {
+        e.stopPropagation();
+        showLanguageMenu(langBtn, (value) => {
+          const model = monacoEditorInstance.getModel();
+          if (model) monaco.editor.setModelLanguage(model, value);
+        });
       };
     }
 
@@ -5176,6 +5271,7 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
 }
 
 document.getElementById('close-code-editor-btn').onclick = () => {
+  closeLanguageMenu();
   if (collabSocket) {
     collabSocket.close();
     collabSocket = null;

@@ -1257,38 +1257,15 @@
         <!-- Center: language selector -->
         <div class="editor-lang-wrap">
           <i data-lucide="code-2" style="width:13px;height:13px;opacity:0.6;"></i>
-          <select id="monaco-lang-select" class="editor-lang-select" title="Programmiersprache wechseln">
-            <option value="plaintext">Plaintext</option>
-            <option value="javascript">JavaScript</option>
-            <option value="typescript">TypeScript</option>
-            <option value="html">HTML</option>
-            <option value="css">CSS</option>
-            <option value="scss">SCSS</option>
-            <option value="less">Less</option>
-            <option value="json">JSON</option>
-            <option value="xml">XML</option>
-            <option value="markdown">Markdown</option>
-            <option value="python">Python</option>
-            <option value="java">Java</option>
-            <option value="c">C</option>
-            <option value="cpp">C++</option>
-            <option value="csharp">C#</option>
-            <option value="go">Go</option>
-            <option value="rust">Rust</option>
-            <option value="php">PHP</option>
-            <option value="ruby">Ruby</option>
-            <option value="shell">Shell</option>
-            <option value="sql">SQL</option>
-            <option value="yaml">YAML</option>
-            <option value="dockerfile">Dockerfile</option>
-            <option value="graphql">GraphQL</option>
-          </select>
+          <button type="button" id="monaco-lang-btn" class="editor-lang-select" title="Programmiersprache wechseln">
+            <span id="monaco-lang-btn-label">Plaintext</span>
+            <i data-lucide="chevron-down" style="width:12px;height:12px;opacity:0.7;"></i>
+          </button>
         </div>
 
         <!-- Right: save status + buttons -->
         <div class="editor-titlebar-right">
           <span id="editor-save-status" class="editor-save-status"></span>
-          <kbd class="editor-kbd">Strg+S</kbd>
           <button id="save-code-editor-btn" class="editor-btn editor-btn-save" title="Speichern (Strg+S)">
             <i data-lucide="save" style="width:15px;height:15px;"></i>
             <span>Speichern</span>
@@ -1467,6 +1444,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.7"></script>
+  <script src="/app.js?v=1.1.8"></script>
 </body>
 </html>
