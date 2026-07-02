@@ -2411,3 +2411,56 @@ tbody tr {
 #monaco-editor-container {
   background: var(--editor-bg);
 }
+
+/* ─── Image/Video viewer info panel ─── */
+.viewer-info-panel {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  bottom: 1rem;
+  width: 280px;
+  max-width: calc(100% - 2rem);
+  padding: 1.25rem;
+  overflow-y: auto;
+  transform: translateX(calc(-100% - 1.5rem));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.28s ease;
+  z-index: 2;
+}
+.viewer-info-panel-right {
+  left: auto;
+  right: 1rem;
+  transform: translateX(calc(100% + 1.5rem));
+}
+.viewer-info-panel.active {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: all;
+}
+.viewer-info-panel h4 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+  margin: 0 0 0.9rem 0;
+}
+.viewer-info-panel dl {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+  margin: 0;
+}
+.viewer-info-panel dt {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 0.15rem;
+}
+.viewer-info-panel dd {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-text);
+  word-break: break-word;
+}

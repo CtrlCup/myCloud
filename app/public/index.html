@@ -1293,9 +1293,14 @@
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="image-viewer-title">
           <i data-lucide="image"></i> Bild-Vorschau
         </div>
-        <button class="btn btn-icon close-btn" id="close-image-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
-          <i data-lucide="x"></i>
-        </button>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-icon" id="image-viewer-info-btn" title="Informationen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
+            <i data-lucide="info"></i>
+          </button>
+          <button class="btn btn-icon close-btn" id="close-image-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
       </div>
       <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden; position: relative;">
         <div id="image-viewer-container" style="width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; background: transparent; overflow: hidden; padding: 0.5rem;">
@@ -1305,6 +1310,7 @@
             <span>Lade Bild...</span>
           </div>
         </div>
+        <div id="image-viewer-info-panel" class="card viewer-info-panel viewer-info-panel-right"></div>
       </div>
     </div>
   </div>
@@ -1316,12 +1322,18 @@
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="video-viewer-title">
           <i data-lucide="video"></i> Video-Vorschau
         </div>
-        <button class="btn btn-icon close-btn" id="close-video-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
-          <i data-lucide="x"></i>
-        </button>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-icon" id="video-viewer-info-btn" title="Informationen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
+            <i data-lucide="info"></i>
+          </button>
+          <button class="btn btn-icon close-btn" id="close-video-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
       </div>
-      <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 0.75rem; overflow: hidden;">
+      <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 0.75rem; overflow: hidden; position: relative;">
         <video id="video-viewer-player" controls autoplay style="width: 100%; height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
+        <div id="video-viewer-info-panel" class="card viewer-info-panel viewer-info-panel-right"></div>
       </div>
     </div>
   </div>
@@ -1444,6 +1456,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.10"></script>
+  <script src="/app.js?v=1.1.11"></script>
 </body>
 </html>

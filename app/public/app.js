@@ -5372,15 +5372,58 @@ function loadHeicLib() {
 
 let currentImageObjectUrl = null;
 
+function formatDuration(seconds) {
+  if (!seconds || !isFinite(seconds)) return null;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function renderViewerInfoPanel(file, extra) {
+  const rows = [
+    ['Name', file.name],
+    ['Größe', formatBytes(file.size)],
+    ['Typ', file.mime_type || '–'],
+  ];
+  if (file.created_at) rows.push(['Erstellt am', new Date(file.created_at).toLocaleString('de-DE')]);
+  if (extra.resolution) rows.push(['Auflösung', extra.resolution]);
+  if (extra.duration) rows.push(['Dauer', extra.duration]);
+  return `<h4>Informationen</h4><dl>${rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd></div>`).join('')}</dl>`;
+}
+
+async function toggleViewerInfoPanel(panel, fileId, isPublic, slug, getExtra) {
+  if (panel.classList.contains('active')) {
+    panel.classList.remove('active');
+    return;
+  }
+  panel.innerHTML = '<h4>Informationen</h4><div style="opacity:0.6;font-size:0.85rem;">Lade...</div>';
+  panel.classList.add('active');
+  try {
+    const url = isPublic ? `/api/public/shares/${slug}/meta/${fileId}` : `/api/files/${fileId}`;
+    const res = await fetch(url);
+    const file = await res.json();
+    if (!res.ok) throw new Error(file.error || 'Fehler beim Laden');
+    panel.innerHTML = renderViewerInfoPanel(file, getExtra ? getExtra() : {});
+  } catch (err) {
+    panel.innerHTML = '<h4>Informationen</h4><div style="opacity:0.6;font-size:0.85rem;">Konnte nicht geladen werden.</div>';
+  }
+}
+
 async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
   const overlay = document.getElementById('image-viewer-overlay');
   const img = document.getElementById('image-viewer-img');
   const loading = document.getElementById('image-viewer-loading');
   const title = document.getElementById('image-viewer-title');
 
-  title.innerHTML = `<i data-lucide="image"></i> ${fileName}`;
+  title.innerHTML = `<i data-lucide="image"></i> ${escapeHtml(fileName)}`;
   lucide.createIcons();
-  
+
+  const infoPanel = document.getElementById('image-viewer-info-panel');
+  infoPanel.classList.remove('active');
+  document.getElementById('image-viewer-info-btn').onclick = () => toggleViewerInfoPanel(infoPanel, fileId, isPublic, slug, () => ({
+    resolution: img.naturalWidth && img.naturalHeight ? `${img.naturalWidth} × ${img.naturalHeight}px` : null
+  }));
+
   img.style.display = 'none';
   loading.style.display = 'flex';
   overlay.classList.add('active');
@@ -5452,10 +5495,17 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
   const player = document.getElementById('video-viewer-player');
   const title = document.getElementById('video-viewer-title');
 
-  title.innerHTML = `<i data-lucide="video"></i> ${fileName}`;
+  title.innerHTML = `<i data-lucide="video"></i> ${escapeHtml(fileName)}`;
   lucide.createIcons();
 
-  const sourceUrl = isPublic 
+  const infoPanel = document.getElementById('video-viewer-info-panel');
+  infoPanel.classList.remove('active');
+  document.getElementById('video-viewer-info-btn').onclick = () => toggleViewerInfoPanel(infoPanel, fileId, isPublic, slug, () => ({
+    resolution: player.videoWidth && player.videoHeight ? `${player.videoWidth} × ${player.videoHeight}px` : null,
+    duration: formatDuration(player.duration)
+  }));
+
+  const sourceUrl = isPublic
     ? `/api/public/shares/${slug}/download/${fileId}`
     : `/api/files/download/${fileId}`;
 

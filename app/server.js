@@ -1842,6 +1842,22 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
   }
 });
 
+// Single-file metadata, used by the image/video viewer's info panel. Registered after every
+// other literal-segment /api/files/... GET route above so this catch-all :id pattern can't
+// shadow them.
+app.get('/api/files/:id', requireAuth, async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+  try {
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fileId, userId]);
+    if (fileRes.rows.length === 0) return res.status(404).json({ error: 'File not found' });
+    res.json(fileRes.rows[0]);
+  } catch (err) {
+    console.error('Error fetching file metadata:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 
 /* ==========================================================================
    SHARING SYSTEM ROUTES
@@ -2759,6 +2775,19 @@ app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     });
   } catch (err) {
     console.error('Public content fetch error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Single-file metadata for a publicly shared file, used by the image/video viewer's info panel.
+app.get('/api/public/shares/:slug/meta/:fileId', async (req, res) => {
+  const { slug, fileId } = req.params;
+  try {
+    const access = await verifyPublicShareAccess(slug, fileId, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    res.json(access.file);
+  } catch (err) {
+    console.error('Public metadata fetch error:', err);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
