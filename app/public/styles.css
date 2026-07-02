@@ -1698,6 +1698,11 @@ tr:hover td {
   margin-left: 0.35rem;
 }
 
+.search-container.search-expanded .search-shortcut-hint {
+  opacity: 1 !important;
+  transition-delay: 0.15s;
+}
+
 .search-toggle-btn {
   flex-shrink: 0;
   cursor: pointer;
