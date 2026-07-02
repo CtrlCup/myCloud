@@ -2270,6 +2270,7 @@ const shareSlugInput = document.getElementById('share-slug');
 const shareCanWriteCheck = document.getElementById('share-can-write');
 const shareCanDownloadCheck = document.getElementById('share-can-download');
 const shareCanZipCheck = document.getElementById('share-can-zip');
+const shareCanCollabCheck = document.getElementById('share-can-collab');
 const shareExpiryType = document.getElementById('share-expiry-type');
 const shareExpiryHoursInput = document.getElementById('share-expiry-hours');
 const shareExpiryDaysInput = document.getElementById('share-expiry-days');
@@ -2300,6 +2301,7 @@ async function openShareModal(file) {
   shareCanWriteCheck.checked = false;
   shareCanDownloadCheck.checked = true;
   shareCanZipCheck.checked = true;
+  shareCanCollabCheck.checked = false;
   if (shareExpiryType) shareExpiryType.value = 'none';
   if (shareExpiryHoursInput) shareExpiryHoursInput.value = '';
   if (shareExpiryDaysInput) shareExpiryDaysInput.value = '';
@@ -2319,6 +2321,7 @@ async function openShareModal(file) {
   const onlyUploadContainer = document.getElementById('share-only-upload-container');
   const ext = file.name.split('.').pop().toLowerCase();
   const isCode = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'].includes(ext);
+  const isOffice = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'].includes(ext);
 
   // The "can_write" flag means "upload" for folders but "edit & save" for an editable file.
   const writeLabel = document.getElementById('share-can-write-label');
@@ -2328,7 +2331,7 @@ async function openShareModal(file) {
     if (writeLabel) writeLabel.textContent = 'Bearbeiten & Speichern';
   }
 
-  if (!file.is_folder && !isCode) {
+  if (!file.is_folder && !isCode && !isOffice) {
     shareCanWriteCheck.checked = false;
     shareCanWriteCheck.disabled = true;
     if (onlyUploadContainer) onlyUploadContainer.style.display = 'none';
@@ -2336,6 +2339,10 @@ async function openShareModal(file) {
     shareCanWriteCheck.disabled = false;
     if (onlyUploadContainer) onlyUploadContainer.style.display = file.is_folder ? 'flex' : 'none';
   }
+
+  // Collab Container: only relevant for folders (may contain Office docs) or a directly-shared Office file
+  const collabContainer = document.getElementById('share-can-collab-container');
+  if (collabContainer) collabContainer.style.display = (file.is_folder || isOffice) ? 'flex' : 'none';
 
   // Check if already shared
   try {
@@ -2349,6 +2356,7 @@ async function openShareModal(file) {
       shareCanWriteCheck.checked = existing.can_write;
       shareCanDownloadCheck.checked = existing.can_download;
       shareCanZipCheck.checked = existing.can_zip;
+      shareCanCollabCheck.checked = existing.can_collab;
       
       if (existing.expires_at) {
         const expiryDate = new Date(existing.expires_at);
@@ -2440,7 +2448,8 @@ shareForm.onsubmit = async (e) => {
     password: document.getElementById('share-password').value || null,
     maxDownloads: document.getElementById('share-max-downloads').value ? parseInt(document.getElementById('share-max-downloads').value) : null,
     onlyUpload: document.getElementById('share-only-upload').checked,
-    removePassword: document.getElementById('share-password-remove').checked
+    removePassword: document.getElementById('share-password-remove').checked,
+    canCollab: shareCanCollabCheck.checked
   };
 
   const url = existingId ? `/api/shares/${existingId}` : '/api/shares';
@@ -4001,7 +4010,9 @@ async function openOfficeEditor(fileId, fileName) {
     container.innerHTML = '<div id="office-iframe-placeholder" style="width:100%; height:100%;"></div>';
 
     // Show editor UI overlay
-    document.getElementById('office-editor-overlay').style.display = 'block';
+    const officeOverlayEl = document.getElementById('office-editor-overlay');
+    officeOverlayEl.style.display = 'block';
+    officeOverlayEl.classList.add('active');
 
     // Initialize DocsAPI Editor
     docEditorInstance = new DocsAPI.DocEditor("office-iframe-placeholder", config);
@@ -4018,7 +4029,9 @@ document.getElementById('close-office-editor-btn').onclick = () => {
     docEditorInstance.destroyEditor();
     docEditorInstance = null;
   }
-  document.getElementById('office-editor-overlay').style.display = 'none';
+  const officeOverlayEl = document.getElementById('office-editor-overlay');
+  officeOverlayEl.style.display = 'none';
+  officeOverlayEl.classList.remove('active');
   // Reload files to reflect changes
   loadFiles(currentFolderId);
 };
@@ -4308,6 +4321,7 @@ window.addEventListener('keydown', (e) => {
     pushIf(officeEditor, () => {
       if (docEditorInstance) { docEditorInstance.destroyEditor(); docEditorInstance = null; }
       officeEditor.style.display = 'none';
+      officeEditor.classList.remove('active');
       loadFiles(currentFolderId);
     });
     pushIf(document.getElementById('code-editor-overlay'), () => document.getElementById('close-code-editor-btn').click());

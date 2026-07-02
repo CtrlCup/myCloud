@@ -238,6 +238,18 @@
     </div>
   </div>
 
+  <!-- EUROOFFICE MODAL (FULLSCREEN COLLAB EDITOR) -->
+  <div class="modal-overlay" id="office-editor-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
+    <div style="position: relative; width: 100%; height: 100%;">
+      <button class="btn" id="close-office-editor-btn" style="position: absolute; top: 10px; right: 10px; z-index: 10002; background: #ff5555; border-color: #ff5555; color: #fff; border-radius: 50%; width: 36px; height: 36px; padding: 0; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: pointer;" title="Beenden">
+        <i data-lucide="x" style="width: 18px; height: 18px;"></i>
+      </button>
+      <div id="office-iframe-container" style="width: 100%; height: 100%; background: #fff;">
+        <!-- Initialisiert EuroOffice DocsAPI -->
+      </div>
+    </div>
+  </div>
+
   <!-- Client-side Logic Script for public share page -->
   <script>
     // Config und State
@@ -438,6 +450,7 @@
     const SHARE_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
     const SHARE_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
     const SHARE_CODE_EXTS = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+    const SHARE_OFFICE_EXTS = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
 
     function shareFileIconName(file) {
       if (file.is_folder) return 'folder';
@@ -458,11 +471,13 @@
       else if (SHARE_VIDEO_EXTS.includes(ext)) openVideoViewer(file.id, file.name, true, slug);
       else if (ext === 'pdf') openPdfViewer(file.id, file.name, true, slug);
       else if (SHARE_CODE_EXTS.includes(ext)) openCodeEditor(file.id, file.name, true, slug);
+      else if (SHARE_OFFICE_EXTS.includes(ext) && shareConfig.can_collab) openOfficeEditorPublic(file.id, file.name, slug);
     }
 
     function autoOpenViewer(file) {
       const ext = file.name.split('.').pop().toLowerCase();
-      const viewable = SHARE_IMAGE_EXTS.includes(ext) || SHARE_VIDEO_EXTS.includes(ext) || ext === 'pdf' || SHARE_CODE_EXTS.includes(ext);
+      const viewable = SHARE_IMAGE_EXTS.includes(ext) || SHARE_VIDEO_EXTS.includes(ext) || ext === 'pdf' || SHARE_CODE_EXTS.includes(ext)
+        || (SHARE_OFFICE_EXTS.includes(ext) && shareConfig.can_collab);
       if (viewable) openShareFile(file);
     }
 
@@ -479,8 +494,9 @@
       const isVid = SHARE_VIDEO_EXTS.includes(ext);
       const isPdf = ext === 'pdf';
       const isCode = SHARE_CODE_EXTS.includes(ext);
-      const viewable = isImg || isVid || isPdf || isCode;
-      const canEdit = isCode && shareConfig.can_write;
+      const isOffice = SHARE_OFFICE_EXTS.includes(ext) && shareConfig.can_collab;
+      const viewable = isImg || isVid || isPdf || isCode || isOffice;
+      const canEdit = (isCode || isOffice) && shareConfig.can_write;
 
       // Thumbnail for images/videos, else a large coloured icon
       if (isImg || isVid) {
@@ -635,6 +651,7 @@
             const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
             const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
             const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+            const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
 
             if (imageExts.includes(ext)) {
               openImageViewer(file.id, file.name, true, slug);
@@ -644,6 +661,8 @@
               openPdfViewer(file.id, file.name, true, slug);
             } else if (codeExts.includes(ext)) {
               openCodeEditor(file.id, file.name, true, slug);
+            } else if (officeExts.includes(ext) && shareConfig.can_collab) {
+              openOfficeEditorPublic(file.id, file.name, slug);
             } else {
               if (shareConfig.can_download) {
                 window.location.href = `/api/public/shares/${slug}/download/${file.id}`;
@@ -835,6 +854,7 @@
         { id: 'image-viewer-overlay', close: () => document.getElementById('close-image-viewer-btn').click() },
         { id: 'video-viewer-overlay', close: () => document.getElementById('close-video-viewer-btn').click() },
         { id: 'pdf-viewer-overlay', close: () => document.getElementById('close-pdf-viewer-btn').click() },
+        { id: 'office-editor-overlay', close: () => document.getElementById('close-office-editor-btn').click() },
       ].map(l => ({ ...l, el: document.getElementById(l.id) })).filter(l => isOpen(l.el));
 
       if (layers.length) {
@@ -1435,6 +1455,76 @@
       overlay.classList.remove('active');
       overlay.style.display = 'none';
       document.getElementById('pdf-viewer-iframe').src = '';
+    };
+
+    // EuroOffice collaborative editor (public share) — only available when the
+    // share link has the "Gemeinsames Bearbeiten" permission enabled
+    let docEditorInstance = null;
+
+    function loadOfficeScript(publicUrl) {
+      return new Promise((resolve, reject) => {
+        if (window.DocsAPI) return resolve();
+        const script = document.createElement('script');
+        script.src = `${publicUrl}/web-apps/apps/api/documents/api.js`;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('EuroOffice Script konnte nicht geladen werden.'));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function openOfficeEditorPublic(fileId, fileName, slug) {
+      showToast('Bereite Office-Editor vor...');
+
+      try {
+        const guestName = localStorage.getItem('shareGuestName') || `Gast-${Math.random().toString(36).substring(2, 6)}`;
+        localStorage.setItem('shareGuestName', guestName);
+
+        const res = await fetch(`/api/public/shares/${slug}/eurooffice/config/${fileId}?name=${encodeURIComponent(guestName)}`);
+        if (!res.ok) {
+          const err = await res.json();
+          showToast(err.error || 'Fehler beim Laden der Office-Konfiguration.');
+          return;
+        }
+
+        let { publicUrl, config } = await res.json();
+
+        // Adjust the document server's public hostname to match the browser's,
+        // to avoid cross-origin/DNS mismatches (e.g. localhost vs. the real host).
+        try {
+          const parsedPublicUrl = new URL(publicUrl);
+          if (parsedPublicUrl.hostname === 'localhost' || parsedPublicUrl.hostname === '127.0.0.1') {
+            const browserUrl = new URL(window.location.href);
+            parsedPublicUrl.hostname = browserUrl.hostname;
+            publicUrl = parsedPublicUrl.toString().replace(/\/$/, '');
+          }
+        } catch (e) {
+          console.error('Error adjusting EuroOffice publicUrl hostname:', e);
+        }
+
+        await loadOfficeScript(publicUrl);
+
+        const container = document.getElementById('office-iframe-container');
+        container.innerHTML = '<div id="office-iframe-placeholder" style="width:100%; height:100%;"></div>';
+
+        const officeOverlayEl = document.getElementById('office-editor-overlay');
+        officeOverlayEl.style.display = 'block';
+        officeOverlayEl.classList.add('active');
+
+        docEditorInstance = new DocsAPI.DocEditor('office-iframe-placeholder', config);
+      } catch (err) {
+        console.error('Error opening public office editor:', err);
+        showToast('EuroOffice Server ist momentan nicht erreichbar.');
+      }
+    }
+
+    document.getElementById('close-office-editor-btn').onclick = () => {
+      if (docEditorInstance) {
+        docEditorInstance.destroyEditor();
+        docEditorInstance = null;
+      }
+      const officeOverlayEl = document.getElementById('office-editor-overlay');
+      officeOverlayEl.style.display = 'none';
+      officeOverlayEl.classList.remove('active');
     };
 
     // Backdrop click close for public overlays

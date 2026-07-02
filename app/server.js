@@ -1697,7 +1697,7 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
 
 // Create a share link
 app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res) => {
-  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload } = req.body;
+  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, canCollab } = req.body;
   const userId = req.session.userId;
 
   try {
@@ -1729,9 +1729,9 @@ app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res
     const onlyUploadVal = onlyUpload === true;
 
     const result = await pool.query(
-      `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, password_hash, max_downloads, only_upload) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal]
+      `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, password_hash, max_downloads, only_upload, can_collab)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal, canCollab === true]
     );
 
     res.status(201).json(result.rows[0]);
@@ -1744,7 +1744,7 @@ app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res
 // Update an existing share link
 app.put('/api/shares/:id', requireAuth, async (req, res) => {
   const shareId = parseInt(req.params.id);
-  const { customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, removePassword } = req.body;
+  const { customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, removePassword, canCollab } = req.body;
   const userId = req.session.userId;
 
   try {
@@ -1794,17 +1794,21 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
       ? (maxDownloads ? parseInt(maxDownloads) : null) 
       : share.max_downloads;
 
-    const onlyUploadVal = (onlyUpload !== undefined) 
-      ? (onlyUpload === true) 
+    const onlyUploadVal = (onlyUpload !== undefined)
+      ? (onlyUpload === true)
       : share.only_upload;
 
+    const canCollabVal = (canCollab !== undefined)
+      ? (canCollab === true)
+      : share.can_collab;
+
     const result = await pool.query(
-      `UPDATE shares 
+      `UPDATE shares
        SET slug = $1, can_read = $2, can_write = $3, can_download = $4, can_zip = $5, expires_at = $6,
-           password_hash = $7, max_downloads = $8, only_upload = $9 
-       WHERE id = $10 RETURNING *`,
-      [slug, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, 
-       passwordHash, maxDownloadsVal, onlyUploadVal, shareId]
+           password_hash = $7, max_downloads = $8, only_upload = $9, can_collab = $10
+       WHERE id = $11 RETURNING *`,
+      [slug, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt,
+       passwordHash, maxDownloadsVal, onlyUploadVal, canCollabVal, shareId]
     );
 
     res.json(result.rows[0]);
@@ -1893,6 +1897,7 @@ app.post('/api/shares/bulk-update', requireAuth, async (req, res) => {
     if (updates.canDownload !== undefined) addSet('can_download', updates.canDownload !== false);
     if (updates.canZip !== undefined) addSet('can_zip', updates.canZip !== false);
     if (updates.onlyUpload !== undefined) addSet('only_upload', updates.onlyUpload === true);
+    if (updates.canCollab !== undefined) addSet('can_collab', updates.canCollab === true);
 
     if (updates.expiresAt !== undefined) {
       addSet('expires_at', updates.expiresAt ? new Date(updates.expiresAt) : null);
@@ -2412,6 +2417,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         can_zip: share.can_zip,
         expires_at: share.expires_at,
         only_upload: share.only_upload,
+        can_collab: share.can_collab,
       },
       baseFile: {
         id: baseFile.id,
@@ -2582,6 +2588,64 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
   } catch (err) {
     console.error('Public content save error:', err);
     res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Get EuroOffice config for collaborative editing via a public share link
+app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) => {
+  const { slug, fileId } = req.params;
+
+  try {
+    const access = await verifyPublicShareAccess(slug, fileId, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+
+    const { file, share } = access;
+    if (!share.can_collab) return res.status(403).json({ error: 'Collaborative editing is not enabled for this share.' });
+    if (file.is_folder) return res.status(400).json({ error: 'Cannot open folder in editor' });
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    const supportedExts = ['docx', 'xlsx', 'pptx', 'txt', 'odt', 'ods', 'odp'];
+    if (!supportedExts.includes(ext)) {
+      return res.status(400).json({ error: 'Unsupported file format for editing' });
+    }
+
+    const guestId = `guest_${crypto.randomBytes(4).toString('hex')}`;
+    const guestName = (req.query.name ? String(req.query.name) : '').trim().slice(0, 40) || `Gast-${guestId.slice(-4)}`;
+
+    const token = crypto.randomBytes(16).toString('hex');
+    officeTokens.set(token, {
+      fileId: file.id,
+      userId: null,
+      expires: Date.now() + 10 * 60 * 1000
+    });
+
+    const docType = getOfficeDocType(ext);
+    const internalAppUrl = 'http://app:3000';
+    const publicOfficeUrl = process.env.EURO_OFFICE_PUBLIC_URL || 'http://localhost:8080';
+
+    const config = {
+      document: {
+        fileType: ext,
+        key: `file_${file.id}`,
+        title: file.name,
+        url: `${internalAppUrl}/api/eurooffice/download/${file.id}?token=${token}`
+      },
+      documentType: docType,
+      editorConfig: {
+        callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}`,
+        user: {
+          id: guestId,
+          name: guestName
+        },
+        mode: share.can_write ? 'edit' : 'view',
+        lang: 'de'
+      }
+    };
+
+    res.json({ publicUrl: publicOfficeUrl, config });
+  } catch (err) {
+    console.error('Error generating public office config:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

@@ -132,6 +132,7 @@ async function initDb() {
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS max_downloads INTEGER');
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS download_count INTEGER DEFAULT 0');
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS only_upload BOOLEAN DEFAULT FALSE');
+    await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS can_collab BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS is_one_time_note BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS content TEXT');
 
