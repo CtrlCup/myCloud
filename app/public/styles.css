@@ -466,7 +466,8 @@ header {
 .file-grid.list-view .file-item {
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 1rem;
   padding: 0.7rem 1rem !important;
   border-radius: var(--radius-sm);
   text-align: left;
@@ -484,7 +485,6 @@ header {
   font-size: 1.3rem;
   height: auto;
   margin-bottom: 0;
-  margin-right: 0.9rem;
 }
 
 .file-grid.list-view .file-item .file-icon svg {
@@ -497,31 +497,47 @@ header {
   text-align: left;
   font-weight: 500;
   font-size: 0.95rem;
+}
+
+.file-grid.list-view .file-item .file-info-group {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.file-grid.list-view .file-item .file-info {
+.file-grid.list-view .file-item .file-meta-list {
   display: none !important;
 }
 
-/* Endung + Größe: an den rechten Rand der Info-Spalte geschoben statt direkt unter dem Namen */
-.file-grid.list-view .file-item .file-info-group {
-  flex-direction: row !important;
-  align-items: center !important;
-  justify-content: space-between !important;
-  gap: 1rem !important;
+/* Typ / Größe / Erstellt am: feste Spalten, an die Header-Zeile angeglichen */
+.file-grid.list-view .file-item .file-type-label {
+  display: block;
+  width: 100px;
+  flex: 0 0 100px;
+  margin-top: 0;
+  text-align: left;
+  font-size: 0.78rem;
 }
 
-.file-grid.list-view .file-item .file-meta-list {
-  display: flex !important;
-  flex-shrink: 0;
+.file-grid.list-view .file-item .file-info {
+  display: block !important;
+  width: 90px;
+  flex: 0 0 90px;
   font-size: 0.8rem;
+}
+
+.file-grid.list-view .file-item .file-date {
+  display: block;
+  width: 130px;
+  flex: 0 0 130px;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .file-grid.list-view .file-item .file-item-checkbox {
   position: static;
-  margin-right: 0.75rem;
   transform: none;
   opacity: 1 !important;
 }
@@ -529,7 +545,89 @@ header {
 .file-grid.list-view .file-item .file-actions {
   position: static;
   opacity: 1 !important;
-  margin-left: 0.5rem;
+}
+
+/* ─── Sortable list column headers ─── */
+.file-list-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0 1rem 0.35rem;
+  margin-top: -0.5rem;
+}
+
+.file-list-header .flh-spacer-checkbox {
+  width: 20px;
+  flex: 0 0 20px;
+}
+
+.file-list-header .flh-spacer-icon {
+  width: 48px;
+  flex: 0 0 48px;
+}
+
+.file-list-header .flh-spacer-actions {
+  width: 32px;
+  flex: 0 0 32px;
+}
+
+.file-list-header .flh-col {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-muted);
+  transition: color 0.15s ease;
+}
+
+.file-list-header .flh-col:first-of-type {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.file-list-header .flh-type {
+  width: 100px;
+  flex: 0 0 100px;
+}
+
+.file-list-header .flh-size {
+  width: 90px;
+  flex: 0 0 90px;
+}
+
+.file-list-header .flh-date {
+  width: 130px;
+  flex: 0 0 130px;
+}
+
+.file-list-header .flh-col:hover {
+  color: var(--color-text);
+}
+
+.file-list-header .flh-col.active {
+  color: var(--color-accent);
+}
+
+.file-list-header .flh-arrow {
+  width: 13px;
+  height: 13px;
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.file-list-header .flh-col.active .flh-arrow {
+  opacity: 1;
+}
+
+.file-list-header .flh-col.active[data-dir="desc"] .flh-arrow {
+  transform: rotate(180deg);
 }
 
 /* ─── Tile View ─── */
@@ -593,6 +691,10 @@ header {
 
 /* Grid: type label below name */
 .file-type-label {
+  display: none;
+}
+
+.file-date {
   display: none;
 }
 .file-grid:not(.list-view) .file-type-label {
@@ -825,6 +927,11 @@ header {
   backdrop-filter: blur(0px);
   -webkit-backdrop-filter: blur(0px);
   transition: opacity 0.3s ease, backdrop-filter 0.3s ease;
+}
+
+/* Above the code/office editor overlays (z-index 10000) so "Teilen" can be opened from inside the editor */
+#share-modal-overlay {
+  z-index: 10010;
 }
 
 .modal-overlay.active {

@@ -208,6 +208,29 @@
         </div>
       </div>
 
+      <!-- Sortierbare Spaltenüberschriften (nur Listenansicht) -->
+      <div class="file-list-header" id="file-list-header" style="display: none;">
+        <span class="flh-spacer-checkbox"></span>
+        <span class="flh-spacer-icon"></span>
+        <button type="button" class="flh-col" data-sort="name">
+          <span>Name</span>
+          <i data-lucide="chevron-up" class="flh-arrow"></i>
+        </button>
+        <button type="button" class="flh-col flh-type" data-sort="type">
+          <span>Typ</span>
+          <i data-lucide="chevron-up" class="flh-arrow"></i>
+        </button>
+        <button type="button" class="flh-col flh-size" data-sort="size">
+          <span>Größe</span>
+          <i data-lucide="chevron-up" class="flh-arrow"></i>
+        </button>
+        <button type="button" class="flh-col flh-date" data-sort="date">
+          <span>Erstellt am</span>
+          <i data-lucide="chevron-up" class="flh-arrow"></i>
+        </button>
+        <span class="flh-spacer-actions"></span>
+      </div>
+
       <!-- Dateiliste -->
       <div class="file-grid" id="file-grid" style="position: relative; min-height: 400px;">
         <!-- Dynamisch generiert -->
@@ -1209,6 +1232,10 @@
           <button id="save-code-editor-btn" class="editor-btn editor-btn-save" title="Speichern (Strg+S)">
             <i data-lucide="save" style="width:15px;height:15px;"></i>
             <span>Speichern</span>
+          </button>
+          <button id="share-code-editor-btn" class="editor-btn" title="Datei teilen">
+            <i data-lucide="share-2" style="width:15px;height:15px;"></i>
+            <span>Teilen</span>
           </button>
           <div class="editor-divider"></div>
           <button id="close-code-editor-btn" class="editor-btn editor-btn-close" title="Schließen (ESC)">

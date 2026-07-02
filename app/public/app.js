@@ -17,6 +17,9 @@ let clickTimeoutFileId = null;
 let clipboardFileIds = [];
 let clipboardAction = null; // 'copy' or 'cut'
 
+let sortColumn = null; // 'name' | 'type' | 'size' | 'date' | null (server order)
+let sortDirection = 'asc'; // 'asc' | 'desc'
+
 // Admin roles cache + permission labels
 let adminRolesCache = [];
 let adminPermissionKeys = [];
@@ -899,8 +902,60 @@ function getFileIconColor(file) {
   return FILE_TYPE_MAP[ext]?.[1] || 'var(--color-accent)';
 }
 
+// Compares two files by the currently active sort column; folders and files are mixed together
+// (no special folders-first grouping) since the user explicitly picked a column to sort by.
+function compareFilesBySort(a, b) {
+  let result = 0;
+  switch (sortColumn) {
+    case 'name':
+      result = a.name.localeCompare(b.name, 'de', { sensitivity: 'base' });
+      break;
+    case 'type':
+      result = getFileTypeLabel(a).localeCompare(getFileTypeLabel(b), 'de', { sensitivity: 'base' });
+      break;
+    case 'size':
+      result = (a.size || 0) - (b.size || 0);
+      break;
+    case 'date':
+      result = new Date(a.created_at || 0) - new Date(b.created_at || 0);
+      break;
+  }
+  return sortDirection === 'asc' ? result : -result;
+}
+
+// Sets (or toggles asc/desc on) the active sort column and re-renders the current file list.
+function setSortColumn(column) {
+  if (sortColumn === column) {
+    sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortColumn = column;
+    sortDirection = 'asc';
+  }
+  renderFiles(renderedFilesList);
+}
+
+// Refreshes the sortable header row: visible only in list view, arrow shown on the active column.
+function updateSortHeaderUI() {
+  const header = document.getElementById('file-list-header');
+  if (!header) return;
+  header.style.display = viewMode === 'list' ? 'flex' : 'none';
+  header.querySelectorAll('.flh-col').forEach(btn => {
+    if (btn.dataset.sort === sortColumn) {
+      btn.classList.add('active');
+      btn.setAttribute('data-dir', sortDirection);
+    } else {
+      btn.classList.remove('active');
+      btn.removeAttribute('data-dir');
+    }
+  });
+}
+
 function renderFiles(files) {
+  if (sortColumn) {
+    files = [...files].sort(compareFilesBySort);
+  }
   renderedFilesList = files;
+  updateSortHeaderUI();
   const grid = document.getElementById('file-grid');
   grid.innerHTML = '';
 
@@ -963,6 +1018,9 @@ function renderFiles(files) {
 
     const typeLabel = getFileTypeLabel(file);
     const sizeStr = formatBytes(file.size);
+    const dateStr = file.created_at
+      ? new Date(file.created_at).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      : '';
     const iconBoxStyle = viewMode === 'list'
       ? 'display: flex; align-items: center; justify-content: center; overflow: hidden; width: 48px; height: 48px;'
       : 'display: flex; align-items: center; justify-content: center; overflow: hidden;';
@@ -980,6 +1038,7 @@ function renderFiles(files) {
       <div class="file-icon ${isThumb ? 'file-icon-thumb' : 'file-icon-placeholder'}" style="${iconBoxStyle} --icon-color: ${iconColor};">${iconHTML}</div>
       <div class="file-type-label" style="color: ${iconColor};">${typeLabel}</div>
       <div class="file-info">${sizeStr}</div>
+      <div class="file-date">${dateStr}</div>
       <div class="file-actions">
         <button class="btn btn-icon btn-action-more" style="padding: 4px; background: var(--color-surface); border-radius: 4px;" title="Optionen">
           <i data-lucide="more-vertical" style="width: 16px; height: 16px;"></i>
@@ -3912,6 +3971,11 @@ window.onload = () => {
     };
   }
 
+  // Sortable list column headers
+  document.querySelectorAll('#file-list-header .flh-col').forEach(btn => {
+    btn.onclick = () => setSortColumn(btn.dataset.sort);
+  });
+
   // Admin back button
   const adminBackBtn = document.getElementById('admin-back-to-dashboard-btn');
   if (adminBackBtn) {
@@ -4669,6 +4733,13 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     const saveBtn = document.getElementById('save-code-editor-btn');
     if (saveBtn) {
       saveBtn.style.display = readOnly ? 'none' : '';
+    }
+
+    // "Teilen" is only available in the authenticated app (creating a share requires ownership)
+    const shareBtn = document.getElementById('share-code-editor-btn');
+    if (shareBtn) {
+      shareBtn.style.display = isPublic ? 'none' : '';
+      shareBtn.onclick = () => openShareModal({ id: fileId, name: fileName, is_folder: false });
     }
 
     const container = document.getElementById('monaco-editor-container');
