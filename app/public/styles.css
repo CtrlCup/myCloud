@@ -467,7 +467,7 @@ header {
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
-  padding: 0.55rem 1rem !important;
+  padding: 0.7rem 1rem !important;
   border-radius: var(--radius-sm);
   text-align: left;
   transform: none !important;
@@ -484,21 +484,39 @@ header {
   font-size: 1.3rem;
   height: auto;
   margin-bottom: 0;
-  margin-right: 0.75rem;
+  margin-right: 0.9rem;
+}
+
+.file-grid.list-view .file-item .file-icon svg {
+  width: 60%;
+  height: 60%;
 }
 
 .file-grid.list-view .file-item .file-name {
   margin-bottom: 0;
   text-align: left;
   font-weight: 500;
+  font-size: 0.95rem;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .file-grid.list-view .file-item .file-info {
   display: none !important;
 }
 
+/* Endung + Größe: an den rechten Rand der Info-Spalte geschoben statt direkt unter dem Namen */
+.file-grid.list-view .file-item .file-info-group {
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 1rem !important;
+}
+
 .file-grid.list-view .file-item .file-meta-list {
   display: flex !important;
+  flex-shrink: 0;
+  font-size: 0.8rem;
 }
 
 .file-grid.list-view .file-item .file-item-checkbox {
@@ -522,15 +540,14 @@ header {
 }
 
 .file-grid:not(.list-view) .file-item {
-  aspect-ratio: 1 / 1.12;
+  aspect-ratio: 1 / 1.15;
   justify-content: flex-start;
   padding: 0.6rem 0.55rem 0.55rem;
   gap: 0;
 }
 
-/* Kacheln mit Vorschaubild: mehr vertikaler Raum fürs Bild (höhere Kachel, weniger Rand oben/unten) */
+/* Kacheln mit Vorschaubild: etwas weniger Rand oben/unten, damit das Bild mehr Platz bekommt (gleiche Kachelgröße wie ohne Vorschaubild) */
 .file-grid:not(.list-view) .file-item.has-thumb {
-  aspect-ratio: 1 / 1.22;
   padding: 0.4rem 0.4rem 0.5rem;
 }
 
@@ -1809,7 +1826,7 @@ tr:hover td {
   gap: 0.3rem !important;
 }
 .file-grid.list-md .file-item {
-  padding: 0.55rem 1rem !important;
+  padding: 0.7rem 1rem !important;
   font-size: 0.9rem !important;
 }
 

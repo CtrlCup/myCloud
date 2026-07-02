@@ -960,7 +960,7 @@ function renderFiles(files) {
     const typeLabel = getFileTypeLabel(file);
     const sizeStr = formatBytes(file.size);
     const iconBoxStyle = viewMode === 'list'
-      ? 'display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;'
+      ? 'display: flex; align-items: center; justify-content: center; overflow: hidden; width: 48px; height: 48px;'
       : 'display: flex; align-items: center; justify-content: center; overflow: hidden;';
 
     item.innerHTML = `
