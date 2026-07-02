@@ -5445,6 +5445,14 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
       shareBtn.onclick = () => openShareModal({ id: fileId, name: fileName, is_folder: false });
     }
 
+    // "Verlauf" (autosave version history) is likewise authenticated-only
+    const historyBtn = document.getElementById('editor-history-btn');
+    document.getElementById('editor-history-panel')?.classList.remove('active');
+    if (historyBtn) {
+      historyBtn.style.display = isPublic ? 'none' : '';
+      historyBtn.onclick = () => toggleEditorHistoryPanel(fileId);
+    }
+
     const container = document.getElementById('monaco-editor-container');
     container.innerHTML = '';
 
@@ -5635,6 +5643,82 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
   } catch (err) {
     console.error('Error opening code editor:', err);
     showToast('Code-Editor konnte nicht geladen werden.');
+  }
+}
+
+function formatRelativeTime(dateStr) {
+  const date = new Date(dateStr);
+  const diffMs = Date.now() - date.getTime();
+  const diffMin = Math.round(diffMs / 60000);
+  if (diffMin < 1) return 'gerade eben';
+  if (diffMin < 60) return `vor ${diffMin} Min.`;
+  const diffH = Math.round(diffMin / 60);
+  if (diffH < 24) return `vor ${diffH} Std.`;
+  return date.toLocaleString('de-DE');
+}
+
+async function toggleEditorHistoryPanel(fileId) {
+  const panel = document.getElementById('editor-history-panel');
+  if (!panel) return;
+  if (panel.classList.contains('active')) {
+    panel.classList.remove('active');
+    return;
+  }
+  panel.classList.add('active');
+  await loadEditorHistory(fileId);
+}
+
+async function loadEditorHistory(fileId) {
+  const list = document.getElementById('editor-history-list');
+  if (!list) return;
+  list.innerHTML = '<p style="font-size: 0.82rem; color: var(--color-text-muted);">Lade Verlauf...</p>';
+
+  try {
+    const res = await fetch(`/api/files/${fileId}/versions`);
+    if (!res.ok) { list.innerHTML = '<p style="font-size: 0.82rem; color: var(--color-text-muted);">Verlauf konnte nicht geladen werden.</p>'; return; }
+    const versions = await res.json();
+
+    if (versions.length === 0) {
+      list.innerHTML = '<p style="font-size: 0.82rem; color: var(--color-text-muted);">Noch keine gespeicherten Versionen. Beim Bearbeiten wird automatisch alle paar Minuten ein Checkpoint angelegt.</p>';
+      return;
+    }
+
+    list.innerHTML = versions.map(v => `
+      <div class="editor-history-entry" data-version-id="${v.id}">
+        <div>
+          <div class="editor-history-entry-time">${formatRelativeTime(v.created_at)}</div>
+          <div class="editor-history-entry-meta">${new Date(v.created_at).toLocaleString('de-DE')} · ${formatBytes(v.size)}</div>
+        </div>
+        <button type="button" class="btn-icon editor-history-restore-btn" title="Wiederherstellen">
+          <i data-lucide="rotate-ccw"></i>
+        </button>
+      </div>
+    `).join('');
+
+    list.querySelectorAll('.editor-history-restore-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const versionId = btn.closest('.editor-history-entry').dataset.versionId;
+        if (!await showConfirmDialog('Version wiederherstellen', 'Der aktuelle Inhalt wird durch diese Version ersetzt (der jetzige Stand wird selbst als Checkpoint gesichert).')) return;
+        try {
+          const r = await fetch(`/api/files/${fileId}/versions/${versionId}/restore`, { method: 'POST' });
+          const data = await r.json();
+          if (r.ok) {
+            if (monacoEditorInstance) monacoEditorInstance.setValue(data.content);
+            showToast('Version wiederhergestellt.');
+            await loadEditorHistory(fileId);
+          } else {
+            showToast(data.error || 'Fehler beim Wiederherstellen.');
+          }
+        } catch {
+          showToast('Verbindungsfehler.');
+        }
+      };
+    });
+
+    lucide.createIcons();
+  } catch (err) {
+    console.error('Error loading editor history:', err);
+    list.innerHTML = '<p style="font-size: 0.82rem; color: var(--color-text-muted);">Verlauf konnte nicht geladen werden.</p>';
   }
 }
 

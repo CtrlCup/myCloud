@@ -1303,6 +1303,10 @@
             <i data-lucide="share-2" style="width:15px;height:15px;"></i>
             <span>Teilen</span>
           </button>
+          <button id="editor-history-btn" class="editor-btn" title="Verlauf">
+            <i data-lucide="history" style="width:15px;height:15px;"></i>
+            <span>Verlauf</span>
+          </button>
           <div class="editor-divider"></div>
           <button id="close-code-editor-btn" class="editor-btn editor-btn-close" title="Schließen (ESC)">
             <i data-lucide="x" style="width:15px;height:15px;"></i>
@@ -1311,7 +1315,17 @@
       </div>
 
       <!-- Monaco Editor -->
-      <div id="monaco-editor-container" style="flex:1; width:100%; height:100%; min-height:0;"></div>
+      <div style="position: relative; flex: 1; width: 100%; height: 100%; min-height: 0;">
+        <div id="monaco-editor-container" style="width:100%; height:100%;"></div>
+
+        <!-- Versionsverlauf-Panel -->
+        <div class="card viewer-info-panel viewer-info-panel-right" id="editor-history-panel">
+          <h4>Verlauf</h4>
+          <div id="editor-history-list" style="display: flex; flex-direction: column; gap: 0.5rem;">
+            <!-- Dynamisch generiert -->
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1525,6 +1539,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.16"></script>
+  <script src="/app.js?v=1.1.17"></script>
 </body>
 </html>

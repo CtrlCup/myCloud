@@ -1806,6 +1806,35 @@ app.get('/api/files/content/:id', requireAuth, async (req, res) => {
 });
 
 // Save text file content
+// Lean autosave version history: called right before a file's content is overwritten, with
+// the content as it was *before* this save. Throttled to one checkpoint per file per
+// FILE_VERSION_MIN_INTERVAL_MS so continuous typing (autosave fires every 1.5s) doesn't
+// create a version on every keystroke pause — only meaningful, spaced-out checkpoints are
+// kept. Also caps total versions per file so history stays lean rather than growing forever.
+const FILE_VERSION_MIN_INTERVAL_MS = 3 * 60 * 1000;
+const FILE_VERSION_MAX_PER_FILE = 30;
+async function maybeSaveFileVersion(fileId, oldContent) {
+  if (!oldContent) return; // nothing meaningful to check-point yet (new/empty file)
+  try {
+    const lastRes = await pool.query(
+      'SELECT created_at FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [fileId]
+    );
+    const last = lastRes.rows[0];
+    if (last && Date.now() - new Date(last.created_at).getTime() < FILE_VERSION_MIN_INTERVAL_MS) return;
+
+    await pool.query('INSERT INTO file_versions (file_id, content) VALUES ($1, $2)', [fileId, oldContent]);
+    await pool.query(
+      `DELETE FROM file_versions WHERE file_id = $1 AND id NOT IN (
+         SELECT id FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC LIMIT $2
+       )`,
+      [fileId, FILE_VERSION_MAX_PER_FILE]
+    );
+  } catch (err) {
+    console.error('Error saving file version:', err);
+  }
+}
+
 app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
@@ -1821,6 +1850,8 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
     const file = fileRes.rows[0];
     if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
 
+    await maybeSaveFileVersion(fileId, file.content);
+
     const filePath = path.join(UPLOADS_DIR, file.path);
     fs.writeFileSync(filePath, content);
     const stats = fs.statSync(filePath);
@@ -1830,6 +1861,82 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
     res.json({ success: true, size: stats.size });
   } catch (err) {
     console.error('Error saving file content:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// List version history for a file (newest first)
+app.get('/api/files/:id/versions', requireAuth, async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+  try {
+    const isOwner = await verifyFileOwner(fileId, userId);
+    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+
+    const result = await pool.query(
+      'SELECT id, created_at, LENGTH(content) as size FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC',
+      [fileId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error listing file versions:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get a specific version's full content (for preview or restore)
+app.get('/api/files/:id/versions/:versionId', requireAuth, async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const versionId = parseInt(req.params.versionId);
+  const userId = req.session.userId;
+  try {
+    const isOwner = await verifyFileOwner(fileId, userId);
+    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+
+    const result = await pool.query(
+      'SELECT id, content, created_at FROM file_versions WHERE id = $1 AND file_id = $2',
+      [versionId, fileId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error fetching file version:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Restore a file to a previous version's content — checkpoints the current state first (so
+// restoring is itself undoable via the same history) then overwrites.
+app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermission('edit_files'), async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const versionId = parseInt(req.params.versionId);
+  const userId = req.session.userId;
+  try {
+    const isOwner = await verifyFileOwner(fileId, userId);
+    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+
+    const versionRes = await pool.query(
+      'SELECT content FROM file_versions WHERE id = $1 AND file_id = $2',
+      [versionId, fileId]
+    );
+    if (versionRes.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
+    const restoredContent = versionRes.rows[0].content;
+
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    const file = fileRes.rows[0];
+
+    // Checkpoint the current (about-to-be-overwritten) state unconditionally, ignoring the
+    // usual throttle — a restore is a deliberate action the user should be able to undo too.
+    await pool.query('INSERT INTO file_versions (file_id, content) VALUES ($1, $2)', [fileId, file.content]);
+
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    fs.writeFileSync(filePath, restoredContent);
+    const stats = fs.statSync(filePath);
+    await pool.query('UPDATE files SET size = $1, content = $2 WHERE id = $3', [stats.size, restoredContent, fileId]);
+
+    res.json({ success: true, content: restoredContent });
+  } catch (err) {
+    console.error('Error restoring file version:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

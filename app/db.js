@@ -174,6 +174,19 @@ async function initDb() {
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS is_one_time_note BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS content TEXT');
 
+    // Lean autosave version history for the code editor — a rolling checkpoint per file,
+    // throttled server-side (see maybeSaveFileVersion in server.js) so continuous typing
+    // doesn't create a version on every 1.5s autosave tick.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS file_versions (
+        id SERIAL PRIMARY KEY,
+        file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+        content TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_file_versions_file_id ON file_versions(file_id)');
+
     // Settings Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS settings (
