@@ -37,6 +37,16 @@
     </header>
 
     <!-- CONTENT -->
+    <!-- Fehler-Ansicht (nicht gefunden, abgelaufen, bereits aufgerufen, ...) -->
+    <div class="card" id="share-error-block-view" style="display: none; max-width: 500px; margin: 6rem auto; padding: 2.5rem; text-align: center;">
+      <i id="share-error-icon" data-lucide="link-2-off" style="width: 48px; height: 48px; color: #ff5555; margin-bottom: 1rem;"></i>
+      <h3 id="share-error-title">Link nicht verfügbar</h3>
+      <p id="share-error-message" style="color: var(--color-text-muted); font-size: 0.9rem; margin-top: 0.5rem;"></p>
+      <a href="/" class="btn" style="width: 100%; justify-content: center; margin-top: 1.5rem;">
+        <i data-lucide="cloud"></i> Zu myCloud
+      </a>
+    </div>
+
     <!-- Passwort-Bereich -->
     <div class="card" id="password-block-view" style="display: none; max-width: 500px; margin: 6rem auto; padding: 2.5rem; text-align: center;">
       <i data-lucide="lock" style="width: 48px; height: 48px; color: var(--color-accent); margin-bottom: 1rem;"></i>
@@ -360,6 +370,38 @@
       return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
+    // Blendet alles andere aus und zeigt eine passende, deutschsprachige Fehlerkarte statt der
+    // rohen (englischen) API-Fehlermeldung — je nach Statuscode mit eigenem Icon/Text.
+    function showShareError(status) {
+      document.getElementById('password-block-view').style.display = 'none';
+      document.getElementById('note-security-block-view').style.display = 'none';
+      document.getElementById('main-explorer').style.display = 'none';
+
+      const variants = {
+        404: {
+          icon: 'search-x',
+          title: 'Link nicht gefunden',
+          message: 'Dieser Freigabe-Link existiert nicht (mehr). Möglicherweise wurde er gelöscht oder falsch eingegeben.',
+        },
+        410: {
+          icon: 'hourglass',
+          title: 'Nicht mehr verfügbar',
+          message: 'Diese Freigabe ist abgelaufen oder wurde bereits so oft wie erlaubt aufgerufen — insbesondere Einmalnachrichten verschwinden nach der letzten Ansicht unwiderruflich.',
+        },
+      };
+      const variant = variants[status] || {
+        icon: 'link-2-off',
+        title: 'Link nicht verfügbar',
+        message: 'Diese Freigabe konnte nicht geladen werden.',
+      };
+
+      document.getElementById('share-error-icon').setAttribute('data-lucide', variant.icon);
+      document.getElementById('share-error-title').textContent = variant.title;
+      document.getElementById('share-error-message').textContent = variant.message;
+      document.getElementById('share-error-block-view').style.display = 'block';
+      lucide.createIcons();
+    }
+
     // Daten laden
     async function loadShareData(folderId = null) {
       try {
@@ -368,16 +410,13 @@
 
         const res = await fetch(url);
         if (!res.ok) {
-          const err = await res.json();
-          document.getElementById('shared-title').innerHTML = `<i data-lucide="alert-triangle"></i> Fehler`;
-          document.getElementById('shared-title').style.color = '#ff5555';
-          document.getElementById('public-file-grid').innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--color-text-muted);">${err.error || 'Fehler beim Laden.'}</div>`;
-          lucide.createIcons();
+          showShareError(res.status);
           return;
         }
 
         const data = await res.json();
         shareConfig = data.share;
+        document.getElementById('share-error-block-view').style.display = 'none';
 
         // Check if password required
         if (shareConfig.passwordRequired) {
