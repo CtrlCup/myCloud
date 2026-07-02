@@ -94,7 +94,10 @@ async function indexExistingFiles() {
 }
 
 // Session Configuration using PostgreSQL for session store
-app.use(session({
+// Kept as a named reference (not just inline app.use(...)) so the WebSocket upgrade handler
+// further down can run it manually against the raw upgrade request — express-session normally
+// only wires into Express's own request pipeline, not into raw `http` 'upgrade' events.
+const sessionMiddleware = session({
   store: new (require('connect-pg-simple')(session))({
     pool: pool,
     tableName: 'session',
@@ -108,7 +111,8 @@ app.use(session({
     secure: false, // Set to true if running over HTTPS
     sameSite: 'lax',
   }
-}));
+});
+app.use(sessionMiddleware);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -2000,6 +2004,15 @@ app.get('/api/shares', requireAuth, async (req, res) => {
 // EuroOffice Temporary Token Store
 const officeTokens = new Map();
 
+// Tokens are only ever pruned lazily when reused past expiry, never on the (common) success
+// path — without this sweep the map grows without bound as more documents get opened.
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, data] of officeTokens.entries()) {
+    if (data.expires < now) officeTokens.delete(token);
+  }
+}, 10 * 60 * 1000);
+
 // Helper to get Document Type for EuroOffice
 function getOfficeDocType(ext) {
   if (['docx', 'doc', 'txt', 'odt', 'rtf', 'html'].includes(ext)) return 'word';
@@ -2023,9 +2036,9 @@ app.get('/api/eurooffice/config/:id', async (req, res) => {
   const fileId = parseInt(req.params.id);
 
   try {
-    // Get file info
+    // Get file info (must be owned by the requesting user)
     const fileRes = await pool.query(
-      'SELECT * FROM files WHERE id = $1 AND (owner_id = $2 OR is_folder = false)',
+      'SELECT * FROM files WHERE id = $1 AND owner_id = $2',
       [fileId, userId]
     );
 
@@ -2130,7 +2143,15 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
   const fileId = parseInt(req.params.id);
   const { status, url } = req.body;
 
-  if (status === 2 && url) {
+  // This endpoint has no user auth — it's called by the internal EuroOffice document server,
+  // not a browser, so a session/token check isn't available here. Without this guard, anyone
+  // on the internet could POST an arbitrary `url` and overwrite any file's content with
+  // whatever that URL serves (SSRF + arbitrary file write). Restricting `url` to the document
+  // server's own internal origin closes that off — we only ever fetch content the document
+  // server itself is serving, never an attacker-supplied host.
+  const internalOfficeOrigin = process.env.EURO_OFFICE_URL || 'http://eurooffice:80';
+
+  if (status === 2 && url && url.startsWith(internalOfficeOrigin)) {
     try {
       const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
       if (fileRes.rows.length === 0) {
@@ -2526,28 +2547,35 @@ app.post('/api/public/shares/:slug/unlock', async (req, res) => {
 // Helper to increment download count and check if a file/share should self-destruct
 async function incrementDownloadCountAndCheckSelfDestruct(shareId) {
   try {
-    const shareRes = await pool.query('SELECT * FROM shares WHERE id = $1', [shareId]);
+    // Atomic increment bounded by max_downloads (a plain read-then-write let concurrent
+    // requests all pass the limit check before any of them recorded their download).
+    const shareRes = await pool.query(
+      `UPDATE shares SET download_count = download_count + 1
+       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+       RETURNING *`,
+      [shareId]
+    );
     if (shareRes.rows.length === 0) return;
     const share = shareRes.rows[0];
-
-    const newCount = share.download_count + 1;
-    await pool.query('UPDATE shares SET download_count = $1 WHERE id = $2', [newCount, shareId]);
 
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [share.file_id]);
     if (fileRes.rows.length === 0) return;
     const file = fileRes.rows[0];
 
-    const limitReached = share.max_downloads !== null && newCount >= share.max_downloads;
-    if (file.is_one_time_note || limitReached) {
-      if (!file.is_folder) {
-        const filePath = path.join(UPLOADS_DIR, file.path);
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
+    // Self-destruct is specifically for one-time notes (always a single file, never a folder).
+    // It must NOT also fire just because a share's overall download limit was reached — for a
+    // folder share that would delete the entire shared folder tree (files.parent_id cascades)
+    // the moment the cap is hit, not just stop further downloads. The counter check at the top
+    // of every share route already stops further downloads once the limit is reached; no
+    // deletion is needed for that case.
+    if (file.is_one_time_note && !file.is_folder) {
+      const filePath = path.join(UPLOADS_DIR, file.path);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
       }
       // Cascades automatically to delete corresponding share record
       await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-      console.log(`Self-destructed one-time note or limit-reached file ${file.name} (ID: ${file.id})`);
+      console.log(`Self-destructed one-time note ${file.name} (ID: ${file.id})`);
     }
   } catch (err) {
     console.error('Self-destruct check error:', err);
@@ -2568,6 +2596,16 @@ async function verifyPublicShareAccess(slug, fileId, req) {
   const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
   if (share.password_hash && !isUnlocked) {
     return { error: 'Password required.', status: 401 };
+  }
+
+  if (!share.can_read) {
+    return { error: 'Read access denied.', status: 403 };
+  }
+
+  // "Only upload" shares are a blind dropbox — visitors may drop files in but must not be able
+  // to see/read anything back (including files other visitors dropped in the same folder).
+  if (share.only_upload) {
+    return { error: 'This share only accepts uploads.', status: 403 };
   }
 
   // Verify fileId is either the shared file/folder or a descendant
@@ -2750,13 +2788,10 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
   const { slug, fileId } = req.params;
 
   try {
-    const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
-    if (shareRes.rows.length === 0) return res.status(404).json({ error: 'Share link not found.' });
+    const access = await verifyPublicShareAccess(slug, fileId, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
 
-    const share = shareRes.rows[0];
-    if (share.expires_at && new Date(share.expires_at) < new Date()) {
-      return res.status(410).json({ error: 'Share has expired.' });
-    }
+    const { file, share } = access;
     if (!share.can_download) return res.status(403).json({ error: 'Download permissions denied.' });
 
     // Check download limit
@@ -2764,31 +2799,6 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
       return res.status(410).json({ error: 'This share has reached its download limit.' });
     }
 
-    // Check password protection
-    const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
-    if (share.password_hash && !isUnlocked) {
-      return res.status(401).json({ error: 'Password required.' });
-    }
-
-    // Verify fileId is either the shared file or a descendant of the shared folder
-    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [parseInt(fileId)]);
-    if (fileRes.rows.length === 0) return res.status(404).json({ error: 'File not found.' });
-
-    const file = fileRes.rows[0];
-    let checkId = file.id;
-    let isValid = false;
-
-    while (checkId !== null) {
-      if (checkId === share.file_id) {
-        isValid = true;
-        break;
-      }
-      const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
-      if (checkRes.rows.length === 0) break;
-      checkId = checkRes.rows[0].parent_id;
-    }
-
-    if (!isValid) return res.status(403).json({ error: 'Access denied.' });
     if (file.is_folder) return res.status(400).json({ error: 'Cannot download folder.' });
 
     const filePath = path.join(UPLOADS_DIR, file.path);
@@ -2904,13 +2914,11 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
   const { slug, folderId } = req.params;
 
   try {
-    const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
-    if (shareRes.rows.length === 0) return res.status(404).json({ error: 'Share link not found.' });
+    const access = await verifyPublicShareAccess(slug, folderId, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
 
-    const share = shareRes.rows[0];
-    if (share.expires_at && new Date(share.expires_at) < new Date()) {
-      return res.status(410).json({ error: 'Share has expired.' });
-    }
+    const { file: targetFolder, share } = access;
+    if (!targetFolder.is_folder) return res.status(404).json({ error: 'Folder not found.' });
     if (!share.can_zip) return res.status(403).json({ error: 'ZIP Download permissions denied.' });
 
     // Check download limit
@@ -2918,34 +2926,13 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
       return res.status(410).json({ error: 'This share has reached its download limit.' });
     }
 
-    // Check password protection
-    const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
-    if (share.password_hash && !isUnlocked) {
-      return res.status(401).json({ error: 'Password required.' });
-    }
-
-    // Verify folderId is or is descendant of share.file_id
-    const targetFolderRes = await pool.query('SELECT * FROM files WHERE id = $1 AND is_folder = true', [parseInt(folderId)]);
-    if (targetFolderRes.rows.length === 0) return res.status(404).json({ error: 'Folder not found.' });
-
-    const targetFolder = targetFolderRes.rows[0];
-    let checkId = targetFolder.id;
-    let isValid = false;
-
-    while (checkId !== null) {
-      if (checkId === share.file_id) {
-        isValid = true;
-        break;
-      }
-      const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
-      if (checkRes.rows.length === 0) break;
-      checkId = checkRes.rows[0].parent_id;
-    }
-
-    if (!isValid) return res.status(403).json({ error: 'Access denied.' });
-
-    // Increment download count
-    await pool.query('UPDATE shares SET download_count = download_count + 1 WHERE id = $1', [share.id]);
+    // Increment download count atomically, bounded by max_downloads (a plain
+    // read-then-write let concurrent requests all pass the limit check above at once).
+    await pool.query(
+      `UPDATE shares SET download_count = download_count + 1
+       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)`,
+      [share.id]
+    );
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(targetFolder.name)}.zip"`);
@@ -3753,19 +3740,66 @@ function initWebSocket(server) {
   const wss = new WebSocket.Server({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {
+    let url;
     try {
-      const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
-      if (url.pathname === '/api/collab') {
+      url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+    } catch (err) {
+      socket.destroy();
+      return;
+    }
+    if (url.pathname !== '/api/collab') {
+      socket.destroy();
+      return;
+    }
+
+    // Raw `upgrade` events bypass Express entirely, so express-session never runs for them —
+    // run it manually to get request.session (cookie-based auth) before deciding access.
+    // {} stands in for the response object; express-session only needs it for the parts of a
+    // real HTTP response we never trigger here (we only read the session, never modify it).
+    sessionMiddleware(request, {}, async () => {
+      try {
+        const fileId = parseInt(url.searchParams.get('fileId'));
+        const slug = url.searchParams.get('slug');
+
+        if (!fileId) {
+          socket.destroy();
+          return;
+        }
+
+        // Previously this endpoint trusted the client-supplied userId/username with no
+        // access check at all — anyone could join any file's collab room by guessing its id,
+        // eavesdrop on edits, and inject their own (which a legitimately write-permitted
+        // collaborator would then unwittingly persist). Determine real read/write access
+        // the same way the REST endpoints do, via session ownership or a public share.
+        let access = { canRead: false, canWrite: false };
+
+        if (request.session.userId) {
+          const isOwner = await verifyFileOwner(fileId, request.session.userId);
+          if (isOwner) access = { canRead: true, canWrite: true };
+        }
+
+        if (!access.canRead && slug) {
+          const shareAccess = await verifyPublicShareAccess(slug, fileId, request);
+          if (!shareAccess.error && shareAccess.share.can_read) {
+            access = { canRead: true, canWrite: !!shareAccess.share.can_write };
+          }
+        }
+
+        if (!access.canRead) {
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+
         wss.handleUpgrade(request, socket, head, (ws) => {
+          ws.canWrite = access.canWrite;
           wss.emit('connection', ws, request);
         });
-      } else {
+      } catch (err) {
+        console.error('WebSocket upgrade error:', err);
         socket.destroy();
       }
-    } catch (err) {
-      console.error('WebSocket upgrade error:', err);
-      socket.destroy();
-    }
+    });
   });
 
   wss.on('connection', (ws, request) => {
@@ -3872,6 +3906,10 @@ function initWebSocket(server) {
         try {
           const data = JSON.parse(message);
           if (data.type === 'edit') {
+            // Read-only participants (share without can_write) can watch but must not be able
+            // to inject changes that a write-permitted collaborator's client would then apply
+            // and unwittingly persist via the (properly-authenticated) save endpoint.
+            if (!ws.canWrite) return;
             broadcast({
               type: 'edit',
               userId: ws.userId,
