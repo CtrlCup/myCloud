@@ -2432,10 +2432,63 @@ document.addEventListener('dragover', (e) => {
 const shareModal = document.getElementById('share-modal-overlay');
 const shareForm = document.getElementById('share-form');
 const shareSlugInput = document.getElementById('share-slug');
+const shareCanReadCheck = document.getElementById('share-can-read');
 const shareCanWriteCheck = document.getElementById('share-can-write');
 const shareCanDownloadCheck = document.getElementById('share-can-download');
 const shareCanZipCheck = document.getElementById('share-can-zip');
 const shareCanCollabCheck = document.getElementById('share-can-collab');
+
+// Which permission rows apply to the file currently open in the share modal — set by
+// openShareModal(), read by updateSharePermissionsUI() so it knows what to restore when
+// "Inhalte anzeigen" gets re-checked after being off.
+let shareModalApplicability = { canWrite: true, onlyUpload: false, canCollab: false };
+
+// Without read access there's nothing to browse, edit live, or bulk-download as a ZIP — only a
+// direct single-file download still makes sense, so every other permission collapses down to
+// just that when "Inhalte anzeigen" is off.
+function updateSharePermissionsUI() {
+  const canRead = shareCanReadCheck.checked;
+  const writeRow = shareCanWriteCheck.closest('label');
+  const zipRow = shareCanZipCheck.closest('label');
+  const onlyUploadContainer = document.getElementById('share-only-upload-container');
+  const collabContainer = document.getElementById('share-can-collab-container');
+
+  if (!canRead) {
+    if (writeRow) writeRow.style.display = 'none';
+    if (zipRow) zipRow.style.display = 'none';
+    if (onlyUploadContainer) onlyUploadContainer.style.display = 'none';
+    if (collabContainer) collabContainer.style.display = 'none';
+    // Remember the pre-collapse zip state so re-enabling "Inhalte anzeigen" doesn't leave it
+    // stuck unchecked — write/collab stay off by default instead, since those are the more
+    // sensitive permissions and worth a deliberate re-enable.
+    if (shareCanZipCheck.dataset.restoreChecked === undefined) {
+      shareCanZipCheck.dataset.restoreChecked = shareCanZipCheck.checked ? '1' : '0';
+    }
+    shareCanWriteCheck.checked = false;
+    shareCanZipCheck.checked = false;
+    document.getElementById('share-only-upload').checked = false;
+    shareCanCollabCheck.checked = false;
+  } else {
+    if (writeRow) writeRow.style.display = '';
+    if (zipRow) zipRow.style.display = '';
+    if (onlyUploadContainer) onlyUploadContainer.style.display = shareModalApplicability.onlyUpload ? 'flex' : 'none';
+    if (collabContainer) collabContainer.style.display = shareModalApplicability.canCollab ? 'flex' : 'none';
+    if (shareCanZipCheck.dataset.restoreChecked !== undefined) {
+      shareCanZipCheck.checked = shareCanZipCheck.dataset.restoreChecked === '1';
+      delete shareCanZipCheck.dataset.restoreChecked;
+    }
+  }
+}
+shareCanReadCheck.onchange = updateSharePermissionsUI;
+
+// Collaborative editing needs write access, so keep the two checkboxes in sync in both
+// directions rather than allowing an inconsistent "collab on, write off" combination.
+shareCanCollabCheck.onchange = () => {
+  if (shareCanCollabCheck.checked) shareCanWriteCheck.checked = true;
+};
+shareCanWriteCheck.onchange = () => {
+  if (!shareCanWriteCheck.checked) shareCanCollabCheck.checked = false;
+};
 const shareExpiryType = document.getElementById('share-expiry-type');
 const shareExpiryHoursInput = document.getElementById('share-expiry-hours');
 const shareExpiryDaysInput = document.getElementById('share-expiry-days');
@@ -2463,6 +2516,8 @@ async function openShareModal(file) {
   
   // Set defaults
   shareSlugInput.value = '';
+  shareCanReadCheck.checked = true;
+  delete shareCanZipCheck.dataset.restoreChecked;
   shareCanWriteCheck.checked = false;
   shareCanDownloadCheck.checked = true;
   shareCanZipCheck.checked = true;
@@ -2505,9 +2560,13 @@ async function openShareModal(file) {
     if (onlyUploadContainer) onlyUploadContainer.style.display = file.is_folder ? 'flex' : 'none';
   }
 
-  // Collab Container: only relevant for folders (may contain Office docs) or a directly-shared Office file
+  // Collab Container: relevant for folders (may contain Office/code files), a directly-shared
+  // Office file, or a directly-shared code/text file — the code editor supports live
+  // collaboration too, not just Office documents.
   const collabContainer = document.getElementById('share-can-collab-container');
-  if (collabContainer) collabContainer.style.display = (file.is_folder || isOffice) ? 'flex' : 'none';
+  const collabApplies = file.is_folder || isOffice || isCode;
+  if (collabContainer) collabContainer.style.display = collabApplies ? 'flex' : 'none';
+  shareModalApplicability = { canWrite: !(!file.is_folder && !isCode && !isOffice), onlyUpload: file.is_folder, canCollab: collabApplies };
 
   // Check if already shared
   try {
@@ -2518,6 +2577,7 @@ async function openShareModal(file) {
     if (existing) {
       document.getElementById('share-existing-id').value = existing.id;
       shareSlugInput.value = existing.slug;
+      shareCanReadCheck.checked = existing.can_read !== false;
       shareCanWriteCheck.checked = existing.can_write;
       shareCanDownloadCheck.checked = existing.can_download;
       shareCanZipCheck.checked = existing.can_zip;
@@ -2557,6 +2617,7 @@ async function openShareModal(file) {
     console.error('Error checking existing share:', err);
   }
 
+  updateSharePermissionsUI();
   shareModal.classList.add('active');
   lucide.createIcons();
 }
@@ -2605,7 +2666,7 @@ shareForm.onsubmit = async (e) => {
   const payload = {
     fileId: parseInt(fileId),
     customSlug: shareSlugInput.value.trim(),
-    canRead: true,
+    canRead: shareCanReadCheck.checked,
     canWrite: shareCanWriteCheck.checked,
     canDownload: shareCanDownloadCheck.checked,
     canZip: shareCanZipCheck.checked,
