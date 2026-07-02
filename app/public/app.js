@@ -2709,7 +2709,9 @@ function openNumberPicker(input, opts = {}) {
   if (left + menuRect.width > window.innerWidth - 12) left = window.innerWidth - menuRect.width - 12;
   menu.style.left = `${Math.max(12, left)}px`;
   menu.style.top = `${rect.bottom + 6}px`;
-  menu.style.width = `${rect.width}px`;
+  // Deliberately not stretched to the input's own width (unlike .custom-select-menu) — the
+  // wheel only ever shows short numbers, so a wide input (e.g. "In wie vielen Stunden...")
+  // would otherwise leave the picker looking oversized and mostly empty.
 
   const wheel = menu.querySelector('.number-picker-wheel');
   const options = Array.from(menu.querySelectorAll('.number-picker-option'));
