@@ -875,9 +875,23 @@ header {
   gap: 0.75rem;
   flex-wrap: wrap;
   margin-bottom: 0.85rem;
+  cursor: pointer;
+  user-select: none;
 }
+.admin-role-row.collapsed .admin-role-row-head { margin-bottom: 0; }
+.admin-role-row.collapsed .admin-role-perms,
+.admin-role-row.collapsed .admin-role-footer { display: none; }
+.admin-role-collapse-icon {
+  color: var(--color-text-muted);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+.admin-role-row.collapsed .admin-role-collapse-icon { transform: rotate(-90deg); }
 .admin-role-name { font-weight: 700; font-size: 1rem; text-transform: capitalize; }
 .admin-role-row-head .role-info { font-size: 0.8rem; color: var(--color-text-muted); }
+.admin-role-weight-field { display: flex; align-items: center; gap: 0.4rem; }
+.admin-role-weight-field label { font-size: 0.78rem; color: var(--color-text-muted); }
+.admin-role-weight-field input { padding: 0.4rem 0.6rem; width: 80px; }
 .admin-role-perms {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));

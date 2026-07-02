@@ -3526,11 +3526,123 @@ document.getElementById('test-smtp-btn').onclick = async () => {
 
 // Admin: Load Users List
 // Load & render the role-management UI, and keep the role cache fresh for selects
+// Which roles the admin has manually expanded, by id — collapsed by default so opening the
+// panel doesn't dump every permission checkbox for every group on screen at once.
+const expandedRoleIds = new Set();
+const ADMIN_ROLES_VISIBLE_COUNT = 5;
+
+function renderRoleRow(role) {
+  const perms = role.permissions || {};
+  const quotaGb = role.storage_quota ? (role.storage_quota / (1024 ** 3)).toFixed(1) : '';
+  const usedStr = formatBytes(role.storage_used);
+  const quotaStr = role.storage_quota ? formatBytes(role.storage_quota) : 'unbegrenzt';
+  const isExpanded = expandedRoleIds.has(role.id);
+
+  const row = document.createElement('div');
+  row.className = 'admin-role-row' + (isExpanded ? '' : ' collapsed');
+  row.innerHTML = `
+    <div class="admin-role-row-head">
+      <i data-lucide="chevron-down" class="admin-role-collapse-icon" style="width:16px;height:16px;"></i>
+      <span class="admin-role-name">${escapeHtml(role.name)}</span>
+      ${role.is_default ? '<span class="role-badge default">Standard</span>' : ''}
+      ${role.is_system ? '<span class="role-badge system">System</span>' : ''}
+      <span class="role-info">${role.member_count} Mitglied(er) · ${usedStr} / ${quotaStr}</span>
+    </div>
+    <div class="admin-role-perms">
+      ${adminPermissionKeys.map(k => `
+        <label>
+          <input type="checkbox" data-perm="${k}" ${perms[k] ? 'checked' : ''} ${role.name === 'admin' ? 'disabled' : ''}>
+          <span>${escapeHtml(PERM_LABELS[k] || k)}</span>
+        </label>`).join('')}
+    </div>
+    <div class="admin-role-footer">
+      <div class="admin-role-quota-field">
+        <label>Gruppen-Speicherkontingent (GB, leer = unbegrenzt)</label>
+        <input type="number" min="0" step="0.1" class="form-control role-quota-input" value="${quotaGb}" placeholder="unbegrenzt">
+      </div>
+      <div class="admin-role-weight-field">
+        <label>Gewicht</label>
+        <input type="number" step="1" class="form-control role-weight-input" value="${role.weight || 0}" title="Höheres Gewicht = weiter oben in der Liste">
+      </div>
+      <div class="admin-role-actions">
+        ${!role.is_default ? '<button class="btn btn-role-default" style="color: var(--color-accent); border-color: rgba(var(--color-accent-rgb),0.3);">Als Standard</button>' : ''}
+        <button class="btn btn-primary btn-role-save">Speichern</button>
+        ${!role.is_system ? '<button class="btn btn-role-delete" style="color:#ff5555; border-color: rgba(255,0,0,0.25);">Löschen</button>' : ''}
+      </div>
+    </div>
+  `;
+
+  row.querySelector('.admin-role-row-head').onclick = () => {
+    row.classList.toggle('collapsed');
+    if (row.classList.contains('collapsed')) expandedRoleIds.delete(role.id);
+    else expandedRoleIds.add(role.id);
+  };
+
+  row.querySelector('.btn-role-save').onclick = async (e) => {
+    e.stopPropagation();
+    const permissions = {};
+    row.querySelectorAll('input[data-perm]').forEach(cb => { permissions[cb.getAttribute('data-perm')] = cb.checked; });
+    const qv = row.querySelector('.role-quota-input').value;
+    const storageQuota = (qv && parseFloat(qv) > 0) ? Math.round(parseFloat(qv) * (1024 ** 3)) : null;
+    const weight = parseInt(row.querySelector('.role-weight-input').value) || 0;
+    try {
+      const r = await fetch(`/api/settings/admin/roles/${role.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permissions, storageQuota, weight }),
+      });
+      const d = await r.json();
+      if (r.ok) { showToast('Rolle gespeichert.'); expandedRoleIds.add(role.id); loadAdminRoles(); }
+      else showToast(d.error || 'Fehler beim Speichern.');
+    } catch { showToast('Verbindungsfehler.'); }
+  };
+
+  const defBtn = row.querySelector('.btn-role-default');
+  if (defBtn) defBtn.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      const r = await fetch(`/api/settings/admin/roles/${role.id}/default`, { method: 'POST' });
+      const d = await r.json();
+      if (r.ok) { showToast(d.message || 'Standardrolle gesetzt.'); loadAdminRoles(); }
+      else showToast(d.error || 'Fehler.');
+    } catch { showToast('Verbindungsfehler.'); }
+  };
+
+  const delBtn = row.querySelector('.btn-role-delete');
+  if (delBtn) delBtn.onclick = async (e) => {
+    e.stopPropagation();
+    if (!await showConfirmDialog('Rolle löschen', `Rolle "${role.name}" wirklich löschen? Mitglieder werden auf die Standardrolle verschoben.`)) return;
+    try {
+      const r = await fetch(`/api/settings/admin/roles/${role.id}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (r.ok) { showToast(d.message || 'Rolle gelöscht.'); loadAdminRoles(); loadAdminUsers(); }
+      else showToast(d.error || 'Fehler beim Löschen.');
+    } catch { showToast('Verbindungsfehler.'); }
+  };
+
+  return row;
+}
+
+function openAllRolesModal() {
+  const overlay = document.getElementById('all-roles-modal-overlay');
+  const list = document.getElementById('all-roles-list');
+  if (!overlay || !list) return;
+  list.innerHTML = '';
+  adminRolesCache.forEach(role => list.appendChild(renderRoleRow(role)));
+  overlay.classList.add('active');
+  lucide.createIcons();
+}
+
+document.getElementById('admin-roles-show-all-btn')?.addEventListener('click', openAllRolesModal);
+document.getElementById('close-all-roles-modal-btn')?.addEventListener('click', () => {
+  document.getElementById('all-roles-modal-overlay').classList.remove('active');
+});
+
 async function loadAdminRoles() {
   try {
     const res = await fetch('/api/settings/admin/roles');
     if (!res.ok) return;
     const data = await res.json();
+    // Already ordered by weight DESC from the server; keep that order everywhere it's used.
     adminRolesCache = data.roles || [];
     adminPermissionKeys = data.permissionKeys || Object.keys(PERM_LABELS);
 
@@ -3548,80 +3660,15 @@ async function loadAdminRoles() {
     if (!list) return;
     list.innerHTML = '';
 
-    adminRolesCache.forEach(role => {
-      const perms = role.permissions || {};
-      const quotaGb = role.storage_quota ? (role.storage_quota / (1024 ** 3)).toFixed(1) : '';
-      const usedStr = formatBytes(role.storage_used);
-      const quotaStr = role.storage_quota ? formatBytes(role.storage_quota) : 'unbegrenzt';
+    const visibleRoles = adminRolesCache.slice(0, ADMIN_ROLES_VISIBLE_COUNT);
+    visibleRoles.forEach(role => list.appendChild(renderRoleRow(role)));
 
-      const row = document.createElement('div');
-      row.className = 'admin-role-row';
-      row.innerHTML = `
-        <div class="admin-role-row-head">
-          <span class="admin-role-name">${role.name}</span>
-          ${role.is_default ? '<span class="role-badge default">Standard</span>' : ''}
-          ${role.is_system ? '<span class="role-badge system">System</span>' : ''}
-          <span class="role-info">${role.member_count} Mitglied(er) · ${usedStr} / ${quotaStr}</span>
-        </div>
-        <div class="admin-role-perms">
-          ${adminPermissionKeys.map(k => `
-            <label>
-              <input type="checkbox" data-perm="${k}" ${perms[k] ? 'checked' : ''} ${role.name === 'admin' ? 'disabled' : ''}>
-              <span>${PERM_LABELS[k] || k}</span>
-            </label>`).join('')}
-        </div>
-        <div class="admin-role-footer">
-          <div class="admin-role-quota-field">
-            <label>Gruppen-Speicherkontingent (GB, leer = unbegrenzt)</label>
-            <input type="number" min="0" step="0.1" class="form-control role-quota-input" value="${quotaGb}" placeholder="unbegrenzt">
-          </div>
-          <div class="admin-role-actions">
-            ${!role.is_default ? '<button class="btn btn-role-default" style="color: var(--color-accent); border-color: rgba(var(--color-accent-rgb),0.3);">Als Standard</button>' : ''}
-            <button class="btn btn-primary btn-role-save">Speichern</button>
-            ${!role.is_system ? '<button class="btn btn-role-delete" style="color:#ff5555; border-color: rgba(255,0,0,0.25);">Löschen</button>' : ''}
-          </div>
-        </div>
-      `;
+    const showAllContainer = document.getElementById('admin-roles-show-all-container');
+    if (showAllContainer) {
+      showAllContainer.style.display = adminRolesCache.length > ADMIN_ROLES_VISIBLE_COUNT ? 'block' : 'none';
+    }
 
-      row.querySelector('.btn-role-save').onclick = async () => {
-        const permissions = {};
-        row.querySelectorAll('input[data-perm]').forEach(cb => { permissions[cb.getAttribute('data-perm')] = cb.checked; });
-        const qv = row.querySelector('.role-quota-input').value;
-        const storageQuota = (qv && parseFloat(qv) > 0) ? Math.round(parseFloat(qv) * (1024 ** 3)) : null;
-        try {
-          const r = await fetch(`/api/settings/admin/roles/${role.id}`, {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ permissions, storageQuota }),
-          });
-          const d = await r.json();
-          if (r.ok) { showToast('Rolle gespeichert.'); loadAdminRoles(); }
-          else showToast(d.error || 'Fehler beim Speichern.');
-        } catch { showToast('Verbindungsfehler.'); }
-      };
-
-      const defBtn = row.querySelector('.btn-role-default');
-      if (defBtn) defBtn.onclick = async () => {
-        try {
-          const r = await fetch(`/api/settings/admin/roles/${role.id}/default`, { method: 'POST' });
-          const d = await r.json();
-          if (r.ok) { showToast(d.message || 'Standardrolle gesetzt.'); loadAdminRoles(); }
-          else showToast(d.error || 'Fehler.');
-        } catch { showToast('Verbindungsfehler.'); }
-      };
-
-      const delBtn = row.querySelector('.btn-role-delete');
-      if (delBtn) delBtn.onclick = async () => {
-        if (!await showConfirmDialog('Rolle löschen', `Rolle "${role.name}" wirklich löschen? Mitglieder werden auf die Standardrolle verschoben.`)) return;
-        try {
-          const r = await fetch(`/api/settings/admin/roles/${role.id}`, { method: 'DELETE' });
-          const d = await r.json();
-          if (r.ok) { showToast(d.message || 'Rolle gelöscht.'); loadAdminRoles(); loadAdminUsers(); }
-          else showToast(d.error || 'Fehler beim Löschen.');
-        } catch { showToast('Verbindungsfehler.'); }
-      };
-
-      list.appendChild(row);
-    });
+    lucide.createIcons();
   } catch (err) {
     console.error('Error loading admin roles:', err);
   }

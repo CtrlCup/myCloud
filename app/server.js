@@ -3625,11 +3625,11 @@ const ROLE_PERMISSION_KEYS = ['admin', 'upload', 'create_folder', 'delete', 'ren
 app.get('/api/settings/admin/roles', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT r.id, r.name, r.is_default, r.is_system, r.permissions, r.storage_quota,
+      `SELECT r.id, r.name, r.is_default, r.is_system, r.permissions, r.storage_quota, r.weight,
               (SELECT COUNT(*) FROM users u WHERE u.role = r.name) as member_count,
               (SELECT COALESCE(SUM(f.size), 0) FROM files f JOIN users u ON f.owner_id = u.id
                  WHERE u.role = r.name AND f.is_folder = false) as storage_used
-       FROM roles r ORDER BY r.is_system DESC, r.name ASC`
+       FROM roles r ORDER BY r.weight DESC, r.is_system DESC, r.name ASC`
     );
     res.json({ roles: result.rows, permissionKeys: ROLE_PERMISSION_KEYS });
   } catch (err) {
@@ -3668,7 +3668,7 @@ app.post('/api/settings/admin/roles', requireAdmin, async (req, res) => {
 // Admin Role-Management: update a role's permissions / quota
 app.put('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
   const roleId = parseInt(req.params.id);
-  const { permissions, storageQuota } = req.body;
+  const { permissions, storageQuota, weight } = req.body;
   try {
     const roleRes = await pool.query('SELECT * FROM roles WHERE id = $1', [roleId]);
     if (roleRes.rows.length === 0) return res.status(404).json({ error: 'Rolle nicht gefunden.' });
@@ -3681,9 +3681,10 @@ app.put('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
 
     const quota = (storageQuota !== undefined && storageQuota !== null && storageQuota !== '')
       ? parseInt(storageQuota) : null;
+    const weightVal = Number.isFinite(parseInt(weight)) ? parseInt(weight) : 0;
 
-    await pool.query('UPDATE roles SET permissions = $1, storage_quota = $2 WHERE id = $3',
-      [JSON.stringify(perms), quota, roleId]);
+    await pool.query('UPDATE roles SET permissions = $1, storage_quota = $2, weight = $3 WHERE id = $4',
+      [JSON.stringify(perms), quota, weightVal, roleId]);
     res.json({ success: true, message: 'Rolle aktualisiert.' });
   } catch (err) {
     console.error('Admin update role error:', err);

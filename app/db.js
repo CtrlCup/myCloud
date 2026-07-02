@@ -71,6 +71,10 @@ async function initDb() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    // Display/priority weight — heavier roles sort first in the admin panel. Also intended as
+    // the future tie-breaker once a user can hold more than one role at a time (not yet
+    // implemented; today every user has exactly one role, so weight is purely cosmetic).
+    await client.query('ALTER TABLE roles ADD COLUMN IF NOT EXISTS weight INTEGER DEFAULT 0');
 
     // Seed the two built-in roles (admin = everything, user = default for new sign-ups)
     const ALL_PERMS = {
