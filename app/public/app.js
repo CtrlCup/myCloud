@@ -933,7 +933,13 @@ function compareFilesBySort(a, b) {
       result = a.name.localeCompare(b.name, 'de', { sensitivity: 'base' });
       break;
     case 'type':
-      result = getFileTypeLabel(a).localeCompare(getFileTypeLabel(b), 'de', { sensitivity: 'base' });
+      // Folders first regardless of their (somewhat arbitrary) type label — falls back to the
+      // usual alphabetical type comparison once both sides are folders or both are files. The
+      // asc/desc flip below then naturally puts folders last when sorted descending.
+      result = (a.is_folder ? 0 : 1) - (b.is_folder ? 0 : 1);
+      if (result === 0) {
+        result = getFileTypeLabel(a).localeCompare(getFileTypeLabel(b), 'de', { sensitivity: 'base' });
+      }
       break;
     case 'size':
       result = (a.size || 0) - (b.size || 0);
