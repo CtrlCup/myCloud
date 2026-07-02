@@ -472,6 +472,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) {
+      await pool.query('UPDATE users SET last_failed_login_at = NOW() WHERE id = $1', [user.id]);
       return res.status(401).json({ error: 'Ungültiger Benutzername oder E-Mail oder Passwort.' });
     }
 
@@ -509,6 +510,7 @@ app.post('/api/auth/login', async (req, res) => {
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
+    await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
 
     res.json({
       success: true,
@@ -583,6 +585,7 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
+    await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
 
     delete req.session.tempUserId;
     delete req.session.tempUsername;
@@ -781,6 +784,7 @@ app.post('/api/auth/passkey/login-verify', async (req, res) => {
       req.session.username = user.username;
       req.session.role = user.role;
       delete req.session.currentChallenge;
+      await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
 
       return res.json({ success: true, user: { id: user.id, username: user.username, role: user.role } });
     }
@@ -903,6 +907,7 @@ app.get('/auth/sso/callback', async (req, res) => {
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
+    await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
 
     res.redirect('/');
   } catch (err) {
@@ -3688,9 +3693,11 @@ app.get('/api/settings/admin/users', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT u.id, u.username, u.role, u.sso_provider, u.created_at, u.first_name, u.last_name, u.email, u.is_active, u.storage_quota,
+       u.last_login_at, u.last_failed_login_at,
        (SELECT COUNT(*) FROM files WHERE owner_id = u.id) as file_count,
        (SELECT COALESCE(SUM(size), 0) FROM files WHERE owner_id = u.id AND is_folder = false) as storage_used
-       FROM users u ORDER BY u.username ASC`
+       FROM users u
+       ORDER BY (u.last_failed_login_at IS NOT NULL) DESC, u.username ASC`
     );
     res.json(result.rows);
   } catch (err) {

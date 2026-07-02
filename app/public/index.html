@@ -815,6 +815,9 @@
               <div id="admin-user-list" class="admin-user-list" style="margin-top: 1rem; display: flex; flex-direction: column;">
                 <!-- Dynamisch generiert -->
               </div>
+              <div id="admin-users-show-all-container" style="display: none; margin-top: 0.85rem;">
+                <button type="button" id="admin-users-show-all-btn" class="btn" style="width: 100%; justify-content: center;">Mehr Benutzer</button>
+              </div>
             </div>
           </section>
 
@@ -1422,6 +1425,21 @@
     </div>
   </div>
 
+  <!-- ALL USERS MODAL -->
+  <div class="modal-overlay" id="all-users-modal-overlay">
+    <div class="card modal" style="max-width: 900px; width: 92%; max-height: 85vh; display: flex; flex-direction: column;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-shrink: 0;">
+        <h3>Alle Benutzer</h3>
+        <button class="btn-icon" id="close-all-users-modal-btn" type="button">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div id="all-users-list" class="admin-user-list" style="overflow-y: auto; display: flex; flex-direction: column;">
+        <!-- Dynamisch generiert -->
+      </div>
+    </div>
+  </div>
+
   <!-- TOTP SETUP MODAL -->
   <div class="modal-overlay" id="totp-setup-overlay">
     <div class="card modal" style="max-width: 400px; width: 90%;">
@@ -1507,6 +1525,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.15"></script>
+  <script src="/app.js?v=1.1.16"></script>
 </body>
 </html>

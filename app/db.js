@@ -58,6 +58,11 @@ async function initDb() {
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS display_real_name BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_quota BIGINT DEFAULT NULL');
+    // Login activity tracking for the admin user list: last_failed_login_at is cleared to NULL
+    // on every successful login, so "last_failed_login_at is set" alone means "has not
+    // successfully logged in since that failure" without needing to compare two timestamps.
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP DEFAULT NULL');
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_failed_login_at TIMESTAMP DEFAULT NULL');
 
     // Roles Table — named roles with a permission map and an optional group-wide storage quota
     await client.query(`

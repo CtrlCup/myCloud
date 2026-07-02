@@ -3749,204 +3749,233 @@ async function loadAdminRoles() {
   }
 }
 
+const ADMIN_USERS_VISIBLE_COUNT = 5;
+
+function renderUserRow(user) {
+  const row = document.createElement('div');
+  row.className = 'admin-user-row';
+
+  const roleOptions = adminRolesCache
+    .map(r => `<option value="${escapeHtml(r.name)}" ${r.name === user.role ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
+
+  const ssoText = user.sso_provider ? `Authentik (${escapeHtml(user.sso_provider)})` : 'Nein';
+  const realName = (user.first_name || user.last_name) ? escapeHtml(`${user.first_name || ''} ${user.last_name || ''}`.trim()) : '';
+  const emailText = escapeHtml(user.email) || 'Keine E-Mail';
+  const lastLoginText = user.last_login_at ? new Date(user.last_login_at).toLocaleString('de-DE') : 'Nie';
+
+  const statusBadge = user.is_active ? '' : ' <span class="badge" style="background: rgba(255, 85, 85, 0.2); color: #ff5555; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; font-weight: 500;">Gesperrt</span>';
+  const failedLoginBadge = user.last_failed_login_at
+    ? ` <span class="admin-user-warning-badge"><i data-lucide="alert-triangle"></i> Login fehlgeschlagen</span>`
+    : '';
+  const lockIcon = user.is_active ? 'lock' : 'unlock';
+  const lockTitle = user.is_active ? 'Sperren' : 'Entsperren';
+
+  row.innerHTML = `
+    <div class="admin-user-main">
+      <div class="admin-user-name">${escapeHtml(user.username)}${statusBadge}${failedLoginBadge}</div>
+      ${realName ? `<div class="admin-user-sub">${realName} · ${emailText}</div>` : `<div class="admin-user-sub">${emailText}</div>`}
+      <div class="admin-user-sub">Zuletzt online: ${lastLoginText}</div>
+    </div>
+    <div class="admin-user-meta">
+      <div>
+        <span class="meta-label">Rolle</span>
+        <select class="admin-role-select select-role">${roleOptions}</select>
+      </div>
+      <div>
+        <span class="meta-label">SSO</span>
+        <span class="meta-value">${ssoText}</span>
+      </div>
+      <div>
+        <span class="meta-label">Dateien</span>
+        <span class="meta-value">${user.file_count}</span>
+      </div>
+      <div>
+        <span class="meta-label">Speicher</span>
+        <span class="meta-value" style="display:inline-flex; align-items:center; gap:0.35rem;">
+          ${formatBytes(user.storage_used)} / ${user.storage_quota ? formatBytes(user.storage_quota) : 'unbegrenzt'}
+          <button class="btn-icon btn-action-edit-quota" style="width:20px;height:20px;color: var(--color-accent);" title="Speicherlimit ändern">
+            <i data-lucide="edit-3"></i>
+          </button>
+        </span>
+      </div>
+    </div>
+    <div class="admin-user-actions">
+      <button class="btn-icon btn-action-lock-user" style="color: ${user.is_active ? '#ffaa00' : '#00d2ff'};" title="${lockTitle}"><i data-lucide="${lockIcon}"></i></button>
+      <button class="btn-icon btn-action-reset-user" style="color: #00d2ff;" title="Passwort per Mail zurücksetzen" ${isEmailConfigured ? '' : 'disabled'}><i data-lucide="key-round"></i></button>
+      <button class="btn-icon btn-action-delete-user" style="color: #ff5555;" title="Benutzer löschen"><i data-lucide="trash-2"></i></button>
+    </div>
+  `;
+
+  // Handle edit quota
+  const editQuotaBtn = row.querySelector('.btn-action-edit-quota');
+  if (editQuotaBtn) {
+    editQuotaBtn.onclick = async () => {
+      const currentGb = user.storage_quota ? (user.storage_quota / (1024 * 1024 * 1024)).toFixed(1) : '';
+      const inputVal = await showInputPrompt(
+        'Speicherlimit festlegen',
+        `Speicherplatz-Limit für ${user.username} in Gigabyte (GB). Gib 0 oder leer ein für unbegrenzten Speicherplatz:`,
+        currentGb,
+        'z. B. 5'
+      );
+      if (inputVal === null) return; // user cancelled
+
+      let quotaBytes = null;
+      const parsed = parseFloat(inputVal.replace(',', '.'));
+      if (!isNaN(parsed) && parsed > 0) {
+        quotaBytes = Math.round(parsed * 1024 * 1024 * 1024);
+      }
+
+      try {
+        const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'quota', quotaBytes }),
+        });
+        if (r.ok) {
+          showToast('Speicherlimit erfolgreich aktualisiert.');
+          loadAdminUsers();
+        } else {
+          const err = await r.json();
+          showToast(err.error || 'Fehler beim Aktualisieren des Limits.');
+        }
+      } catch (err) {
+        console.error(err);
+        showToast('Verbindungsfehler beim Aktualisieren des Limits.');
+      }
+    };
+  }
+
+  // Handle role change
+  row.querySelector('.select-role').onchange = async (e) => {
+    const newRole = e.target.value;
+    try {
+      const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'role', role: newRole }),
+      });
+      if (r.ok) {
+        showToast('Benutzerrolle geändert.');
+        loadAdminSettings();
+      } else {
+        const err = await r.json();
+        showToast(err.error);
+        loadAdminSettings();
+      }
+    } catch (err) {
+      showToast('Fehler beim Ändern der Rolle.');
+    }
+  };
+
+  // Handle lock/unlock user status
+  row.querySelector('.btn-action-lock-user').onclick = async () => {
+    try {
+      const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle-status' }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        showToast(data.message || 'Benutzerstatus geändert.');
+        loadAdminSettings();
+      } else {
+        showToast(data.error || 'Fehler beim Ändern des Status.');
+      }
+    } catch (err) {
+      showToast('Verbindungsfehler.');
+    }
+  };
+
+  // Handle password reset
+  row.querySelector('.btn-action-reset-user').onclick = async () => {
+    if (!await showConfirmDialog('Passwort zurücksetzen', `Möchtest du das Passwort für "${user.username}" wirklich zurücksetzen? Dem Benutzer wird ein temporäres Passwort per E-Mail gesendet.`)) return;
+    showToast('Setze Passwort zurück...');
+    try {
+      const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset-password' }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        showToast('Passwort erfolgreich zurückgesetzt und E-Mail versendet.');
+      } else {
+        showToast(data.error || 'Fehler beim Zurücksetzen des Passworts.');
+      }
+    } catch (err) {
+      showToast('Verbindungsfehler.');
+    }
+  };
+
+  // Handle delete user
+  row.querySelector('.btn-action-delete-user').onclick = async () => {
+    if (!await showConfirmDialog('Benutzer löschen', `Möchtest du den Benutzer "${user.username}" und alle seine Dateien wirklich unwiderruflich löschen?`)) return;
+    try {
+      const r = await fetch(`/api/settings/admin/users/${user.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete' }),
+      });
+      if (r.ok) {
+        showToast('Benutzer gelöscht.');
+        loadAdminSettings();
+      } else {
+        const err = await r.json();
+        showToast(err.error);
+      }
+    } catch (err) {
+      showToast('Fehler beim Löschen des Benutzers.');
+    }
+  };
+
+  // Disable actions on current user
+  if (user.id === currentUser.id) {
+    row.querySelector('.btn-action-delete-user').disabled = true;
+    row.querySelector('.btn-action-lock-user').disabled = true;
+    row.querySelector('.btn-action-reset-user').disabled = true;
+    row.querySelector('.select-role').disabled = true;
+  }
+
+  return row;
+}
+
+function openAllUsersModal() {
+  const overlay = document.getElementById('all-users-modal-overlay');
+  const list = document.getElementById('all-users-list');
+  if (!overlay || !list) return;
+  list.innerHTML = '';
+  adminUsersCache.forEach(user => list.appendChild(renderUserRow(user)));
+  overlay.classList.add('active');
+  lucide.createIcons();
+}
+
+document.getElementById('admin-users-show-all-btn')?.addEventListener('click', openAllUsersModal);
+document.getElementById('close-all-users-modal-btn')?.addEventListener('click', () => {
+  document.getElementById('all-users-modal-overlay').classList.remove('active');
+});
+
+let adminUsersCache = [];
+
 async function loadAdminUsers() {
   try {
     await loadAdminRoles();
 
     const res = await fetch('/api/settings/admin/users');
-    const users = await res.json();
+    // Already ordered by the server: users with an unresolved failed login attempt first,
+    // then alphabetically by username.
+    adminUsersCache = await res.json();
 
     const container = document.getElementById('admin-user-list');
     container.innerHTML = '';
 
-    const roleOptions = (selected) => adminRolesCache
-      .map(r => `<option value="${escapeHtml(r.name)}" ${r.name === selected ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
+    const visibleUsers = adminUsersCache.slice(0, ADMIN_USERS_VISIBLE_COUNT);
+    visibleUsers.forEach(user => container.appendChild(renderUserRow(user)));
 
-    users.forEach(user => {
-      const row = document.createElement('div');
-      row.className = 'admin-user-row';
-
-      const ssoText = user.sso_provider ? `Authentik (${escapeHtml(user.sso_provider)})` : 'Nein';
-      const realName = (user.first_name || user.last_name) ? escapeHtml(`${user.first_name || ''} ${user.last_name || ''}`.trim()) : '';
-      const emailText = escapeHtml(user.email) || 'Keine E-Mail';
-
-      const statusBadge = user.is_active ? '' : ' <span class="badge" style="background: rgba(255, 85, 85, 0.2); color: #ff5555; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; font-weight: 500;">Gesperrt</span>';
-      const lockText = user.is_active ? 'Sperren' : 'Entsperren';
-      const lockColor = user.is_active ? '#ffaa00' : '#00d2ff';
-      const lockBorder = user.is_active ? 'rgba(255,170,0,0.2)' : 'rgba(0,210,255,0.2)';
-
-      row.innerHTML = `
-        <div class="admin-user-main">
-          <div class="admin-user-name">${escapeHtml(user.username)}${statusBadge}</div>
-          ${realName ? `<div class="admin-user-sub">${realName}</div>` : ''}
-          <div class="admin-user-sub">${emailText}</div>
-        </div>
-        <div class="admin-user-meta">
-          <div>
-            <span class="meta-label">Rolle</span>
-            <select class="admin-role-select select-role">${roleOptions(user.role)}</select>
-          </div>
-          <div>
-            <span class="meta-label">SSO</span>
-            <span class="meta-value">${ssoText}</span>
-          </div>
-          <div>
-            <span class="meta-label">Dateien</span>
-            <span class="meta-value">${user.file_count}</span>
-          </div>
-          <div>
-            <span class="meta-label">Speicher</span>
-            <span class="meta-value" style="display:inline-flex; align-items:center; gap:0.35rem;">
-              ${formatBytes(user.storage_used)} / ${user.storage_quota ? formatBytes(user.storage_quota) : 'unbegrenzt'}
-              <button class="btn btn-icon btn-action-edit-quota" style="padding: 2px; border: none; background: transparent; color: var(--color-accent);" title="Speicherlimit ändern">
-                <i data-lucide="edit-3" style="width: 14px; height: 14px;"></i>
-              </button>
-            </span>
-          </div>
-        </div>
-        <div class="admin-user-actions">
-          <button class="btn btn-action-lock-user" style="color: ${lockColor}; border-color: ${lockBorder};" title="${lockText}">${lockText}</button>
-          <button class="btn btn-action-reset-user" style="color: #00d2ff; border-color: rgba(0,210,255,0.2);" title="Passwort per Mail zurücksetzen" ${isEmailConfigured ? '' : 'disabled'}>Reset PW</button>
-          <button class="btn btn-action-delete-user" style="color: #ff5555; border-color: rgba(255,0,0,0.2);" title="Benutzer löschen">Löschen</button>
-        </div>
-      `;
-
-      // Handle edit quota
-      const editQuotaBtn = row.querySelector('.btn-action-edit-quota');
-      if (editQuotaBtn) {
-        editQuotaBtn.onclick = async () => {
-          const currentGb = user.storage_quota ? (user.storage_quota / (1024 * 1024 * 1024)).toFixed(1) : '';
-          const inputVal = await showInputPrompt(
-            'Speicherlimit festlegen',
-            `Speicherplatz-Limit für ${user.username} in Gigabyte (GB). Gib 0 oder leer ein für unbegrenzten Speicherplatz:`,
-            currentGb,
-            'z. B. 5'
-          );
-          if (inputVal === null) return; // user cancelled
-
-          let quotaBytes = null;
-          const parsed = parseFloat(inputVal.replace(',', '.'));
-          if (!isNaN(parsed) && parsed > 0) {
-            quotaBytes = Math.round(parsed * 1024 * 1024 * 1024);
-          }
-
-          try {
-            const r = await fetch(`/api/settings/admin/users/${user.id}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'quota', quotaBytes }),
-            });
-            if (r.ok) {
-              showToast('Speicherlimit erfolgreich aktualisiert.');
-              loadAdminUsers();
-            } else {
-              const err = await r.json();
-              showToast(err.error || 'Fehler beim Aktualisieren des Limits.');
-            }
-          } catch (err) {
-            console.error(err);
-            showToast('Verbindungsfehler beim Aktualisieren des Limits.');
-          }
-        };
-      }
-
-      // Handle role change
-      row.querySelector('.select-role').onchange = async (e) => {
-        const newRole = e.target.value;
-        try {
-          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'role', role: newRole }),
-          });
-          if (r.ok) {
-            showToast('Benutzerrolle geändert.');
-            loadAdminSettings();
-          } else {
-            const err = await r.json();
-            showToast(err.error);
-            loadAdminSettings();
-          }
-        } catch (err) {
-          showToast('Fehler beim Ändern der Rolle.');
-        }
-      };
-
-      // Handle lock/unlock user status
-      row.querySelector('.btn-action-lock-user').onclick = async () => {
-        try {
-          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'toggle-status' }),
-          });
-          const data = await r.json();
-          if (r.ok) {
-            showToast(data.message || 'Benutzerstatus geändert.');
-            loadAdminSettings();
-          } else {
-            showToast(data.error || 'Fehler beim Ändern des Status.');
-          }
-        } catch (err) {
-          showToast('Verbindungsfehler.');
-        }
-      };
-
-      // Handle password reset
-      row.querySelector('.btn-action-reset-user').onclick = async () => {
-        if (!await showConfirmDialog('Passwort zurücksetzen', `Möchtest du das Passwort für "${user.username}" wirklich zurücksetzen? Dem Benutzer wird ein temporäres Passwort per E-Mail gesendet.`)) return;
-        showToast('Setze Passwort zurück...');
-        try {
-          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'reset-password' }),
-          });
-          const data = await r.json();
-          if (r.ok) {
-            showToast('Passwort erfolgreich zurückgesetzt und E-Mail versendet.');
-          } else {
-            showToast(data.error || 'Fehler beim Zurücksetzen des Passworts.');
-          }
-        } catch (err) {
-          showToast('Verbindungsfehler.');
-        }
-      };
-
-      // Handle delete user
-      row.querySelector('.btn-action-delete-user').onclick = async () => {
-        if (!await showConfirmDialog('Benutzer löschen', `Möchtest du den Benutzer "${user.username}" und alle seine Dateien wirklich unwiderruflich löschen?`)) return;
-        try {
-          const r = await fetch(`/api/settings/admin/users/${user.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'delete' }),
-          });
-          if (r.ok) {
-            showToast('Benutzer gelöscht.');
-            loadAdminSettings();
-          } else {
-            const err = await r.json();
-            showToast(err.error);
-          }
-        } catch (err) {
-          showToast('Fehler beim Löschen des Benutzers.');
-        }
-      };
-
-      // Disable actions on current user
-      if (user.id === currentUser.id) {
-        row.querySelector('.btn-action-delete-user').disabled = true;
-        row.querySelector('.btn-action-delete-user').style.opacity = '0.4';
-        row.querySelector('.btn-action-lock-user').disabled = true;
-        row.querySelector('.btn-action-lock-user').style.opacity = '0.4';
-        row.querySelector('.btn-action-reset-user').disabled = true;
-        row.querySelector('.btn-action-reset-user').style.opacity = '0.4';
-        row.querySelector('.select-role').disabled = true;
-      }
-
-      container.appendChild(row);
-    });
+    const showAllContainer = document.getElementById('admin-users-show-all-container');
+    if (showAllContainer) {
+      showAllContainer.style.display = adminUsersCache.length > ADMIN_USERS_VISIBLE_COUNT ? 'block' : 'none';
+    }
 
     lucide.createIcons();
   } catch (err) {
