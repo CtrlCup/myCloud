@@ -2979,7 +2979,7 @@ document.getElementById('change-password-form').onsubmit = async (e) => {
   const newPassword = document.getElementById('new-password').value;
 
   try {
-    const res = await fetch('/api/settings/profile', {
+    const res = await fetch('/api/settings/password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ currentPassword, newPassword }),

@@ -3314,8 +3314,8 @@ app.post('/api/settings/2fa/totp/disable', requireAuth, async (req, res) => {
   }
 });
 
-// Update personal settings (Change password, delete passkeys)
-app.post('/api/settings/profile', requireAuth, async (req, res) => {
+// Change password
+app.post('/api/settings/password', requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   const userId = req.session.userId;
 

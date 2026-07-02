@@ -1984,6 +1984,34 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/settings/password:
+    post:
+      tags: [Settings]
+      summary: Eigenes Passwort ändern
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string, format: password }
+                newPassword: { type: string, format: password }
+      responses:
+        '200':
+          description: Passwort geändert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '400':
+          description: Aktuelles Passwort falsch, oder Account wird per SSO verwaltet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /api/settings/email:
     post:
       tags: [Settings]
