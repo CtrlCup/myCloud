@@ -1235,6 +1235,24 @@ function showFileContextMenu(file, x, y) {
   if (selectedFileIds.length > 1) {
     // Context Actions for Multiple Items
     actions.push({
+      label: 'Kopieren',
+      icon: 'copy',
+      action: () => {
+        clipboardFileIds = [...selectedFileIds];
+        clipboardAction = 'copy';
+        showToast(`${selectedFileIds.length} Element(e) kopiert!`);
+      }
+    });
+    actions.push({
+      label: 'Ausschneiden',
+      icon: 'scissors',
+      action: () => {
+        clipboardFileIds = [...selectedFileIds];
+        clipboardAction = 'cut';
+        showToast(`${selectedFileIds.length} Element(e) ausgeschnitten!`);
+      }
+    });
+    actions.push({
       label: 'Ausgewählte als ZIP',
       icon: 'file-archive',
       action: () => {
@@ -1276,6 +1294,25 @@ function showFileContextMenu(file, x, y) {
         action: () => window.location.href = `/api/files/download-zip/${file.id}`
       });
     }
+
+    actions.push({
+      label: 'Kopieren',
+      icon: 'copy',
+      action: () => {
+        clipboardFileIds = [file.id];
+        clipboardAction = 'copy';
+        showToast('1 Element kopiert!');
+      }
+    });
+    actions.push({
+      label: 'Ausschneiden',
+      icon: 'scissors',
+      action: () => {
+        clipboardFileIds = [file.id];
+        clipboardAction = 'cut';
+        showToast('1 Element ausgeschnitten!');
+      }
+    });
 
     actions.push({
       label: 'Teilen',
