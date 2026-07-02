@@ -234,6 +234,18 @@
         <span class="flh-spacer-actions"></span>
       </div>
 
+      <!-- Einmalnachrichten (eigene Kategorie, nur sichtbar wenn welche existieren) -->
+      <div class="card" id="notes-category-card" style="display: none; margin-bottom: 1.25rem; background: rgba(0,0,0,0.15);">
+        <div style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;" id="notes-category-header">
+          <i data-lucide="shield-alert" style="width: 18px; height: 18px; color: #ffaa00;"></i>
+          <h3 style="margin: 0; font-size: 1rem;">Einmalnachrichten</h3>
+          <i data-lucide="chevron-down" id="notes-category-chevron" style="width: 16px; height: 16px; color: var(--color-text-muted); margin-left: auto; transition: transform 0.2s ease;"></i>
+        </div>
+        <div id="notes-category-list" style="margin-top: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem;">
+          <!-- Dynamisch generiert -->
+        </div>
+      </div>
+
       <!-- Dateiliste -->
       <div class="file-grid" id="file-grid" style="position: relative; min-height: 400px;">
         <!-- Dynamisch generiert -->
@@ -1147,7 +1159,16 @@
             </select>
           </div>
         </div>
-        <div class="form-actions" style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end;">
+        <div class="form-group" style="margin-top: 1rem;">
+          <label>Anhänge (optional)</label>
+          <div id="create-note-dropzone" class="dropzone" style="padding: 1.25rem; cursor: pointer;">
+            <i data-lucide="paperclip" style="width: 24px; height: 24px; color: var(--color-accent);"></i>
+            <p style="margin: 0.35rem 0 0; font-size: 0.82rem; color: var(--color-text-muted);">Dateien oder Bilder hier ablegen oder klicken</p>
+            <input type="file" id="create-note-file-input" multiple style="display: none;">
+          </div>
+          <div id="create-note-attachment-list" style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.35rem;"></div>
+        </div>
+        <div class="form-actions" style="margin-top: 1.5rem; display: flex; flex-direction: row; gap: 0.5rem; justify-content: flex-end;">
           <button type="button" class="btn" id="cancel-create-note-btn">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Erstellen & Link generieren</button>
         </div>
@@ -1486,6 +1507,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.14"></script>
+  <script src="/app.js?v=1.1.15"></script>
 </body>
 </html>

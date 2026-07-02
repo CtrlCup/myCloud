@@ -1050,7 +1050,7 @@ app.get('/api/files/search', requireAuth, async (req, res) => {
         FROM folder_sizes
         GROUP BY id
       ) sz ON f.id = sz.id
-      WHERE f.owner_id = $1 AND (f.name ILIKE $2`;
+      WHERE f.owner_id = $1 AND f.is_one_time_note = false AND (f.name ILIKE $2`;
 
     const params = [userId, `%${query}%`];
 
@@ -1108,7 +1108,7 @@ app.get('/api/files/list', requireAuth, async (req, res) => {
          FROM folder_sizes
          GROUP BY id
        ) sz ON f.id = sz.id
-       WHERE f.owner_id = $1 AND (f.parent_id = $2 OR (f.parent_id IS NULL AND $2 IS NULL))
+       WHERE f.owner_id = $1 AND f.is_one_time_note = false AND (f.parent_id = $2 OR (f.parent_id IS NULL AND $2 IS NULL))
        ORDER BY f.is_folder DESC, f.name ASC`,
       [userId, parentId]
     );
@@ -1655,60 +1655,126 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
   }
 });
 
-// Create a self-destructing one-time note file and automatic share link
-app.post('/api/files/create-note', requireAuth, async (req, res) => {
+// Create a self-destructing one-time note file (optionally with attachments) and automatic
+// share link. With attachments, the note text + attachment files are wrapped in a container
+// folder that itself carries is_one_time_note = true, reusing the existing folder-share
+// browsing/zip-download machinery; without attachments it's a single flagged text file exactly
+// as before.
+app.post('/api/files/create-note', requireAuth, upload.array('attachments', 10), async (req, res) => {
   const { name, content, maxViews, expiresHours, parentId } = req.body;
   const userId = req.session.userId;
-  const parsedParentId = parentId ? parseInt(parentId) : null;
+  const parsedParentId = parentId && parentId !== 'null' ? parseInt(parentId) : null;
+  const attachments = req.files || [];
+
+  const cleanupAttachments = () => {
+    attachments.forEach(f => { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); });
+  };
 
   if (!name || content === undefined) {
-    return res.status(400).json({ error: 'Benutzername und Inhalt sind erforderlich.' });
+    cleanupAttachments();
+    return res.status(400).json({ error: 'Name und Inhalt sind erforderlich.' });
   }
 
   try {
     if (parsedParentId !== null) {
       const isOwner = await verifyFileOwner(parsedParentId, userId);
-      if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+      if (!isOwner) {
+        cleanupAttachments();
+        return res.status(403).json({ error: 'Access denied' });
+      }
     }
 
     const cleanName = name.trim().endsWith('.txt') ? name.trim() : name.trim() + '.txt';
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + (parseInt(expiresHours) || 24));
 
-    // Generate unique physical filename
-    const uniqueFilename = crypto.randomUUID() + '.txt';
-    const physicalPath = path.join(UPLOADS_DIR, uniqueFilename);
-    
-    // Write note text to physical file
-    fs.writeFileSync(physicalPath, content, 'utf8');
-    const size = Buffer.byteLength(content, 'utf8');
+    let containerFileId;
 
-    // Insert file record
-    const fileRes = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
-       VALUES ($1, $2, $3, $4, false, $5, $6, true, $7) RETURNING id`,
-      [cleanName, uniqueFilename, 'text/plain', size, parsedParentId, userId, content]
-    );
-    const fileId = fileRes.rows[0].id;
+    if (attachments.length > 0) {
+      const folderRes = await pool.query(
+        `INSERT INTO files (name, path, is_folder, parent_id, owner_id, is_one_time_note)
+         VALUES ($1, 'folder', true, $2, $3, true) RETURNING id`,
+        [cleanName.replace(/\.txt$/i, ''), parsedParentId, userId]
+      );
+      const folderId = folderRes.rows[0].id;
+
+      const uniqueFilename = crypto.randomUUID() + '.txt';
+      fs.writeFileSync(path.join(UPLOADS_DIR, uniqueFilename), content, 'utf8');
+      const size = Buffer.byteLength(content, 'utf8');
+      // Children are also flagged is_one_time_note so the flat "exclude one-time notes from
+      // listing/search" filter catches them too, without needing a recursive ancestor check.
+      await pool.query(
+        `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
+         VALUES ($1, $2, 'text/plain', $3, false, $4, $5, true, $6)`,
+        [cleanName, uniqueFilename, size, folderId, userId, content]
+      );
+
+      for (const att of attachments) {
+        const safeMimeType = getSafeMimeType(att.originalname);
+        await pool.query(
+          `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note)
+           VALUES ($1, $2, $3, $4, false, $5, $6, true)`,
+          [att.originalname, att.filename, safeMimeType, att.size, folderId, userId]
+        );
+      }
+
+      containerFileId = folderId;
+    } else {
+      const uniqueFilename = crypto.randomUUID() + '.txt';
+      fs.writeFileSync(path.join(UPLOADS_DIR, uniqueFilename), content, 'utf8');
+      const size = Buffer.byteLength(content, 'utf8');
+      const fileRes = await pool.query(
+        `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
+         VALUES ($1, $2, $3, $4, false, $5, $6, true, $7) RETURNING id`,
+        [cleanName, uniqueFilename, 'text/plain', size, parsedParentId, userId, content]
+      );
+      containerFileId = fileRes.rows[0].id;
+    }
 
     // Generate unique slug
     const slug = crypto.randomBytes(8).toString('hex');
 
-    // Create share record
+    // Create share record — bundles with attachments also get can_zip so the whole thing can
+    // be grabbed in a single request.
     await pool.query(
       `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, max_downloads, download_count)
-       VALUES ($1, $2, true, false, true, false, $3, $4, 0)`,
-      [slug, fileId, expiresAt, parseInt(maxViews) || 1]
+       VALUES ($1, $2, true, false, true, $3, $4, $5, 0)`,
+      [slug, containerFileId, attachments.length > 0, expiresAt, parseInt(maxViews) || 1]
     );
 
     const shareLink = `${EXPECTED_ORIGIN}/s/${slug}`;
     res.json({ success: true, shareLink });
   } catch (err) {
     console.error('Error creating one-time note:', err);
+    cleanupAttachments();
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
+// List the current user's one-time notes for the dashboard's dedicated management category.
+// Only top-level containers (the standalone note file, or the wrapper folder when it has
+// attachments) — never the note-text/attachment children of a wrapper folder, which are also
+// flagged is_one_time_note so they're excluded from normal listing/search.
+app.get('/api/files/notes', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+  try {
+    const result = await pool.query(
+      `SELECT f.id, f.name, f.is_folder, f.created_at,
+              s.slug, s.expires_at, s.max_downloads, s.download_count
+       FROM files f
+       LEFT JOIN files parent ON parent.id = f.parent_id
+       LEFT JOIN shares s ON s.file_id = f.id
+       WHERE f.owner_id = $1 AND f.is_one_time_note = true
+         AND (parent.id IS NULL OR parent.is_one_time_note IS NOT TRUE)
+       ORDER BY f.created_at DESC`,
+      [userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error listing one-time notes:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // Get text file content
 app.get('/api/files/content/:id', requireAuth, async (req, res) => {
@@ -2693,19 +2759,24 @@ async function incrementDownloadCountAndCheckSelfDestruct(shareId) {
     if (fileRes.rows.length === 0) return;
     const file = fileRes.rows[0];
 
-    // Self-destruct is specifically for one-time notes (always a single file, never a folder).
-    // It must NOT also fire just because a share's overall download limit was reached — for a
-    // folder share that would delete the entire shared folder tree (files.parent_id cascades)
-    // the moment the cap is hit, not just stop further downloads. The counter check at the top
-    // of every share route already stops further downloads once the limit is reached; no
-    // deletion is needed for that case.
-    if (file.is_one_time_note && !file.is_folder) {
-      const filePath = path.join(UPLOADS_DIR, file.path);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
+    // Self-destruct is specifically for one-time notes. It must NOT also fire just because a
+    // share's overall download limit was reached — for a regular (non-note) folder share that
+    // would delete the entire shared folder tree the moment the cap is hit, not just stop
+    // further downloads. The counter check at the top of every share route already stops
+    // further downloads once the limit is reached; no deletion is needed for that case. A note
+    // with attachments is a folder (holding the note text + attachment files) that is itself
+    // flagged is_one_time_note — its children are plain files, deleted recursively below.
+    if (file.is_one_time_note) {
+      if (file.is_folder) {
+        await deleteFolderRecursive(file.id, file.owner_id);
+      } else {
+        const filePath = path.join(UPLOADS_DIR, file.path);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+        await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
       }
       // Cascades automatically to delete corresponding share record
-      await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
       console.log(`Self-destructed one-time note ${file.name} (ID: ${file.id})`);
     }
   } catch (err) {
@@ -3067,21 +3138,30 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     if (!targetFolder.is_folder) return res.status(404).json({ error: 'Folder not found.' });
     if (!share.can_zip) return res.status(403).json({ error: 'ZIP Download permissions denied.' });
 
-    // Check download limit
-    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+    // Atomic increment bounded by max_downloads, done before streaming starts so two
+    // concurrent ZIP downloads can't both slip past the limit (a plain read-then-write would
+    // let that race through).
+    const incRes = await pool.query(
+      `UPDATE shares SET download_count = download_count + 1
+       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+       RETURNING *`,
+      [share.id]
+    );
+    if (incRes.rows.length === 0) {
       return res.status(410).json({ error: 'This share has reached its download limit.' });
     }
 
-    // Increment download count atomically, bounded by max_downloads (a plain
-    // read-then-write let concurrent requests all pass the limit check above at once).
-    await pool.query(
-      `UPDATE shares SET download_count = download_count + 1
-       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)`,
-      [share.id]
-    );
-
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(targetFolder.name)}.zip"`);
+    // A one-time note bundle self-destructs only after the ZIP has been fully sent — deleting
+    // mid-stream would break addFolderToZip() while it's still reading the files.
+    if (targetFolder.is_one_time_note) {
+      res.on('finish', () => {
+        deleteFolderRecursive(targetFolder.id, targetFolder.owner_id)
+          .then(() => console.log(`Self-destructed one-time note ${targetFolder.name} (ID: ${targetFolder.id})`))
+          .catch(err => console.error('Self-destruct cleanup error:', err));
+      });
+    }
 
     const archive = archiver('zip', { zlib: { level: 9 } });
     archive.on('error', (err) => { throw err; });
@@ -3875,14 +3955,16 @@ setInterval(async () => {
       if (fileRes.rows.length > 0) {
         const file = fileRes.rows[0];
         if (file.is_one_time_note) {
-          if (!file.is_folder) {
+          if (file.is_folder) {
+            await deleteFolderRecursive(file.id, file.owner_id);
+          } else {
             const filePath = path.join(UPLOADS_DIR, file.path);
             if (fs.existsSync(filePath)) {
               fs.unlinkSync(filePath);
             }
+            await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
           }
-          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-          console.log(`Background clean: Expired self-destruct note file ${file.name} deleted.`);
+          console.log(`Background clean: Expired self-destruct note ${file.name} deleted.`);
           continue;
         }
       }

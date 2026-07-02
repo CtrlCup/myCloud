@@ -663,11 +663,86 @@ async function loadFiles(folderId = null) {
     if (grid) grid.classList.remove('grid-exit');
     renderFiles(files);
     renderBreadcrumbs();
+    loadNotesCategory();
   } catch (err) {
     console.error(err);
     showToast('Fehler beim Laden des Datei-Explorers.');
   }
 }
+
+// One-time notes never appear in the regular file grid — they live in this dedicated,
+// collapsible category card instead (shown only while at least one exists).
+async function loadNotesCategory() {
+  const card = document.getElementById('notes-category-card');
+  const list = document.getElementById('notes-category-list');
+  if (!card || !list) return;
+
+  try {
+    const res = await fetch('/api/files/notes');
+    if (!res.ok) return;
+    const notes = await res.json();
+
+    if (notes.length === 0) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = 'block';
+    list.innerHTML = notes.map(note => {
+      const viewsLabel = note.max_downloads
+        ? `${note.download_count}/${note.max_downloads} Aufrufe`
+        : `${note.download_count} Aufrufe (unbegrenzt)`;
+      const expiresLabel = note.expires_at
+        ? `läuft ab ${new Date(note.expires_at).toLocaleString('de-DE')}`
+        : 'läuft nie ab';
+      return `
+        <div class="note-row" data-id="${note.id}">
+          <i data-lucide="${note.is_folder ? 'folder' : 'file-text'}" style="width: 18px; height: 18px; color: #ffaa00; flex-shrink: 0;"></i>
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-weight: 600; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(note.name)}</div>
+            <div style="font-size: 0.75rem; color: var(--color-text-muted);">${viewsLabel} · ${expiresLabel}</div>
+          </div>
+          <button type="button" class="btn-icon note-copy-link-btn" title="Link kopieren" data-slug="${escapeHtml(note.slug || '')}">
+            <i data-lucide="link"></i>
+          </button>
+          <button type="button" class="btn-icon note-delete-btn" title="Löschen" style="color: #ff5555;" data-id="${note.id}">
+            <i data-lucide="trash-2"></i>
+          </button>
+        </div>
+      `;
+    }).join('');
+
+    list.querySelectorAll('.note-copy-link-btn').forEach(btn => {
+      btn.onclick = () => {
+        const slug = btn.dataset.slug;
+        if (!slug) return;
+        navigator.clipboard.writeText(`${window.location.origin}/s/${slug}`);
+        showToast('Link kopiert.');
+      };
+    });
+    list.querySelectorAll('.note-delete-btn').forEach(btn => {
+      btn.onclick = async () => {
+        if (!await showConfirmDialog('Einmalnachricht löschen', 'Diese Einmalnachricht wirklich löschen?')) return;
+        try {
+          const r = await fetch(`/api/files/${btn.dataset.id}`, { method: 'DELETE' });
+          if (r.ok) { showToast('Gelöscht.'); loadNotesCategory(); }
+          else showToast('Fehler beim Löschen.');
+        } catch { showToast('Verbindungsfehler.'); }
+      };
+    });
+
+    lucide.createIcons();
+  } catch (err) {
+    console.error('Error loading notes category:', err);
+  }
+}
+
+document.getElementById('notes-category-header')?.addEventListener('click', () => {
+  const list = document.getElementById('notes-category-list');
+  const chevron = document.getElementById('notes-category-chevron');
+  const collapsed = list.style.display === 'none';
+  list.style.display = collapsed ? 'flex' : 'none';
+  chevron.style.transform = collapsed ? '' : 'rotate(-90deg)';
+});
 
 function renderBreadcrumbs() {
   const container = document.getElementById('breadcrumbs');
@@ -5984,11 +6059,43 @@ function showCreateNoteModal(defaultName) {
     const expiresSelect = document.getElementById('create-note-expires');
     const cancelBtn = document.getElementById('cancel-create-note-btn');
     const closeBtn = document.getElementById('close-create-note-btn');
+    const dropzone = document.getElementById('create-note-dropzone');
+    const fileInput = document.getElementById('create-note-file-input');
+    const attachmentList = document.getElementById('create-note-attachment-list');
 
     nameInput.value = defaultName ? (defaultName.endsWith('.txt') ? defaultName : defaultName + '.txt') : 'Einmalnotiz.txt';
     contentInput.value = '';
     maxViewsInput.value = 1;
     expiresSelect.value = '24'; // 24 hours default
+
+    let attachments = [];
+    const renderAttachments = () => {
+      attachmentList.innerHTML = attachments.map((f, i) => `
+        <div style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; background: rgba(255,255,255,0.04); border-radius: var(--radius-sm); padding: 0.4rem 0.6rem;">
+          <i data-lucide="file" style="width: 14px; height: 14px; color: var(--color-text-muted); flex-shrink: 0;"></i>
+          <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(f.name)}</span>
+          <span style="color: var(--color-text-muted);">${formatBytes(f.size)}</span>
+          <button type="button" class="btn-icon remove-attachment-btn" data-index="${i}" style="width: 22px; height: 22px;"><i data-lucide="x" style="width: 14px; height: 14px;"></i></button>
+        </div>
+      `).join('');
+      attachmentList.querySelectorAll('.remove-attachment-btn').forEach(btn => {
+        btn.onclick = () => { attachments.splice(parseInt(btn.dataset.index), 1); renderAttachments(); };
+      });
+      lucide.createIcons();
+    };
+    attachments = [];
+    renderAttachments();
+
+    dropzone.onclick = () => fileInput.click();
+    fileInput.onchange = () => { attachments.push(...fileInput.files); fileInput.value = ''; renderAttachments(); };
+    dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); };
+    dropzone.ondragleave = () => dropzone.classList.remove('drag-over');
+    dropzone.ondrop = (e) => {
+      e.preventDefault();
+      dropzone.classList.remove('drag-over');
+      attachments.push(...e.dataTransfer.files);
+      renderAttachments();
+    };
 
     overlay.classList.add('active');
     contentInput.focus();
@@ -5998,17 +6105,22 @@ function showCreateNoteModal(defaultName) {
       form.onsubmit = null;
       cancelBtn.onclick = null;
       closeBtn.onclick = null;
+      dropzone.onclick = null;
+      dropzone.ondragover = null;
+      dropzone.ondragleave = null;
+      dropzone.ondrop = null;
+      fileInput.onchange = null;
     };
 
     form.onsubmit = async (e) => {
       e.preventDefault();
-      const payload = {
-        name: nameInput.value.trim(),
-        content: contentInput.value,
-        maxViews: parseInt(maxViewsInput.value) || 1,
-        expiresHours: parseInt(expiresSelect.value) || 24,
-        parentId: currentFolderId
-      };
+      const formData = new FormData();
+      formData.append('name', nameInput.value.trim());
+      formData.append('content', contentInput.value);
+      formData.append('maxViews', parseInt(maxViewsInput.value) || 1);
+      formData.append('expiresHours', parseInt(expiresSelect.value) || 24);
+      formData.append('parentId', currentFolderId || '');
+      attachments.forEach(f => formData.append('attachments', f));
 
       showToast('Erstelle Einmalnotiz...');
       cleanup();
@@ -6016,8 +6128,7 @@ function showCreateNoteModal(defaultName) {
       try {
         const res = await fetch('/api/files/create-note', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: formData
         });
 
         const data = await res.json();
