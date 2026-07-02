@@ -2670,6 +2670,9 @@ document.querySelectorAll('#settings-nav .settings-nav-item').forEach(item => {
     if (targetSection === 'storage-settings') {
       loadStorageSettings();
     }
+    if (targetSection === 'api-settings') {
+      loadApiKeys();
+    }
   };
 });
 
@@ -2684,6 +2687,105 @@ document.querySelectorAll('#admin-nav .settings-nav-item').forEach(item => {
     document.getElementById(targetSection).classList.add('active');
   };
 });
+
+/* ─── API-Keys (persönliche Zugangsschlüssel für externe Apps) ─── */
+async function loadApiKeys() {
+  const container = document.getElementById('api-key-list');
+  if (!container) return;
+
+  try {
+    const res = await fetch('/api/settings/api-keys');
+    const keys = await res.json();
+
+    container.innerHTML = '';
+    if (!Array.isArray(keys) || keys.length === 0) {
+      container.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--color-text-muted);">Noch keine API-Keys erstellt.</td></tr>`;
+      return;
+    }
+
+    keys.forEach(key => {
+      const row = document.createElement('tr');
+      const createdText = new Date(key.created_at).toLocaleDateString('de-DE');
+      const lastUsedText = key.last_used_at ? new Date(key.last_used_at).toLocaleDateString('de-DE') : 'Nie';
+
+      row.innerHTML = `
+        <td style="font-weight: 500;">${key.name}</td>
+        <td><code style="font-size: 0.8rem; color: var(--color-text-muted);">${key.key_prefix}…</code></td>
+        <td>${createdText}</td>
+        <td>${lastUsedText}</td>
+        <td>
+          <button class="btn-icon btn-action-revoke-key" title="Widerrufen" style="padding: 5px; background: transparent; border: none; color: #ff5555;">
+            <i data-lucide="trash-2" style="width: 15px; height: 15px;"></i>
+          </button>
+        </td>
+      `;
+
+      row.querySelector('.btn-action-revoke-key').onclick = async () => {
+        if (!await showConfirmDialog('API-Key widerrufen', `Den API-Key "${key.name}" wirklich widerrufen? Apps, die ihn nutzen, verlieren sofort den Zugriff.`)) return;
+        try {
+          const r = await fetch(`/api/settings/api-keys/${key.id}`, { method: 'DELETE' });
+          if (r.ok) {
+            showToast('API-Key widerrufen.');
+            loadApiKeys();
+          } else {
+            showToast('Fehler beim Widerrufen des API-Keys.');
+          }
+        } catch {
+          showToast('Verbindungsfehler beim Widerrufen des API-Keys.');
+        }
+      };
+
+      container.appendChild(row);
+    });
+    lucide.createIcons();
+  } catch (err) {
+    console.error('Error loading API keys:', err);
+    container.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--color-text-muted);">Fehler beim Laden der API-Keys.</td></tr>`;
+  }
+}
+
+document.getElementById('create-api-key-btn').onclick = async () => {
+  const name = await showInputPrompt('Neuer API-Key', 'Gib einen Namen für diesen API-Key ein (z. B. "Mobile App"):', '', 'z. B. Mobile App');
+  if (!name || !name.trim()) return;
+
+  try {
+    const res = await fetch('/api/settings/api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() })
+    });
+    if (!res.ok) {
+      showToast('Fehler beim Erstellen des API-Keys.');
+      return;
+    }
+    const created = await res.json();
+    document.getElementById('api-key-created-value').value = created.key;
+    document.getElementById('api-key-created-modal-overlay').classList.add('active');
+    lucide.createIcons();
+    loadApiKeys();
+  } catch {
+    showToast('Verbindungsfehler beim Erstellen des API-Keys.');
+  }
+};
+
+document.getElementById('copy-api-key-created-btn').onclick = async () => {
+  const input = document.getElementById('api-key-created-value');
+  try {
+    await navigator.clipboard.writeText(input.value);
+    showToast('API-Key in die Zwischenablage kopiert!');
+  } catch {
+    input.select();
+    document.execCommand('copy');
+    showToast('API-Key in die Zwischenablage kopiert!');
+  }
+};
+
+const closeApiKeyCreatedModal = () => {
+  document.getElementById('api-key-created-modal-overlay').classList.remove('active');
+  document.getElementById('api-key-created-value').value = '';
+};
+document.getElementById('close-api-key-created-modal-btn').onclick = closeApiKeyCreatedModal;
+document.getElementById('done-api-key-created-btn').onclick = closeApiKeyCreatedModal;
 
 async function loadSettings() {
   try {

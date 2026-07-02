@@ -112,6 +112,19 @@ async function initDb() {
       )
     `);
 
+    // API Keys Table (personal access tokens for third-party/app clients)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(100) NOT NULL,
+        key_prefix VARCHAR(16) NOT NULL,
+        key_hash VARCHAR(64) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_used_at TIMESTAMP
+      )
+    `);
+
     // Shares Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS shares (

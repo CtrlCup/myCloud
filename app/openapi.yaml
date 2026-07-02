@@ -1,0 +1,2678 @@
+openapi: 3.0.3
+info:
+  title: myCloud API
+  version: "1.0.0"
+  description: >
+    REST-API des myCloud-Servers. Sie treibt sowohl die Web-Oberfläche (index.html/app.js,
+    share.html) an als auch zukünftige App-Clients (mobil/Desktop) — beide sprechen exakt
+    dieselben Endpunkte an, es gibt keine separate "App-API".
+
+
+    **Authentifizierung** — zwei gleichwertige Methoden, die parallel funktionieren:
+
+    1. **API-Key (empfohlen für App-/Drittanbieter-Clients):** Unter `POST /api/settings/api-keys`
+       einen persönlichen Key erzeugen (Format `mcld_<64 hex Zeichen>`, wird nur bei der Erstellung
+       einmal im Klartext zurückgegeben) und als `Authorization: Bearer mcld_...`-Header mitschicken.
+       Keys lassen sich einzeln pro Gerät/App widerrufen (`DELETE /api/settings/api-keys/:id`).
+    2. **Session-Cookie (wie im Browser):** `POST /api/auth/login` setzt ein Session-Cookie
+       (`connect.sid`), das bei jedem folgenden Request automatisch mitgeschickt wird.
+
+    Endpunkte ohne `security`-Angabe sind öffentlich (kein Login nötig), u.a. alle
+    `/api/public/...`-Routen und der Auth-Flow selbst (`/api/auth/login`, `/api/auth/register`, ...).
+
+
+    **Echtzeit-Kollaboration** im Code-/Markdown-Editor läuft über einen separaten WebSocket unter
+    `/api/collab?fileId=<id>&userId=<id>&username=<name>[&guest=1][&slug=<shareSlug>]` (nicht Teil
+    dieser REST-Spezifikation, da OpenAPI keine WebSockets beschreibt). Der Server sendet/empfängt
+    JSON-Nachrichten mit `type`: `init` (Willkommensnachricht inkl. zugewiesener Farbe/Name),
+    `user_joined`, `user_left`, `edit` (Textänderungen), `cursor` (Cursor-/Selektionsposition).
+    Anonyme Gäste (`guest=1`, z.B. Betrachter eines öffentlichen Freigabe-Links) bekommen vom
+    Server automatisch einen zufälligen deutschen Tiernamen und eine Farbe aus einer festen Palette
+    zugewiesen, um Kollisionen mit bereits verbundenen Nutzern zu vermeiden.
+
+
+    Für die kollaborative Bearbeitung von Office-Dokumenten (docx/xlsx/pptx) wird kein eigenes
+    WebSocket-Protokoll verwendet — stattdessen liefert `GET /api/eurooffice/config/:id` (bzw. die
+    öffentliche Variante) eine Konfiguration für den eingebetteten EuroOffice-/OnlyOffice-kompatiblen
+    Dokumentenserver, der Co-Editing intern selbst realisiert.
+  contact:
+    name: myCloud
+servers:
+  - url: /
+    description: Relativer Server — funktioniert unter jeder Deployment-URL.
+
+tags:
+  - name: Authentication
+    description: Login, Registrierung, Logout, Session-Status.
+  - name: WebAuthn/Passkeys
+    description: Passwortlose Anmeldung per Passkey (FIDO2/WebAuthn).
+  - name: SSO
+    description: Single Sign-On über einen OIDC-Provider (Authentik-kompatibel).
+  - name: Password Reset
+    description: Passwort per E-Mail-Link zurücksetzen.
+  - name: Files
+    description: Datei-Explorer — Auflisten, Hoch-/Herunterladen, Verschieben, Kopieren, Löschen, Inhalt bearbeiten.
+  - name: Sharing
+    description: Öffentliche Freigabe-Links für eigene Dateien/Ordner verwalten.
+  - name: Public Shares
+    description: Zugriff auf einen bereits erstellten Freigabe-Link — kein Login nötig.
+  - name: EuroOffice
+    description: Konfiguration für den eingebetteten Office-Editor (docx/xlsx/pptx), inkl. Live-Kollaboration.
+  - name: Branding
+    description: Öffentliche Marken-/Design-Einstellungen (Name, Farben, Hintergründe, Icon).
+  - name: Settings
+    description: Persönliche Kontoeinstellungen (Profil, Avatar, Speicherplatz, Passkeys).
+  - name: Two-Factor Auth
+    description: E-Mail- und TOTP-basierte Zwei-Faktor-Authentifizierung verwalten.
+  - name: API Keys
+    description: Persönliche API-Keys für App-/Drittanbieter-Clients erzeugen und verwalten.
+  - name: Admin
+    description: Verwaltung (nur für Administratoren bzw. Rollen mit der `admin`-Berechtigung).
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "mcld_<key>"
+      description: >
+        Persönlicher API-Key aus den Einstellungen, gesendet als "Authorization: Bearer mcld_...".
+        Empfohlen für App-/Drittanbieter-Clients.
+    CookieAuth:
+      type: apiKey
+      in: cookie
+      name: connect.sid
+      description: >
+        Session-Cookie, wie es der Web-Login (`POST /api/auth/login`) setzt. Für Browser-Clients.
+
+  parameters:
+    FileId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+      description: Datei- oder Ordner-ID.
+    ShareSlug:
+      name: slug
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Öffentlicher Freigabe-Link-Slug (Teil der URL `/s/:slug`).
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+
+    File:
+      type: object
+      description: Eine Datei- oder Ordner-Zeile aus der `files`-Tabelle. Ordner haben `is_folder = true`; ihre `size` ist rekursiv über alle enthaltenen Dateien aufsummiert.
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        path:
+          type: string
+          description: Physischer Dateiname im uploads-Verzeichnis (nur beim Erstellen/Hochladen relevant, i.d.R. keine App-Client-Nutzung nötig).
+        mime_type:
+          type: string
+          nullable: true
+        size:
+          type: integer
+          format: int64
+        is_folder:
+          type: boolean
+        parent_id:
+          type: integer
+          nullable: true
+        owner_id:
+          type: integer
+        content:
+          type: string
+          nullable: true
+          description: Indexierter Textinhalt für die Volltextsuche (nur bei manchen Endpunkten enthalten).
+        created_at:
+          type: string
+          format: date-time
+
+    Share:
+      type: object
+      properties:
+        id:
+          type: integer
+        slug:
+          type: string
+        file_id:
+          type: integer
+        can_read:
+          type: boolean
+        can_write:
+          type: boolean
+          description: Bei Ordnern "Dateien hochladen", bei Dateien "Bearbeiten & Speichern".
+        can_download:
+          type: boolean
+        can_zip:
+          type: boolean
+        can_collab:
+          type: boolean
+          description: Erlaubt Live-Kollaboration im EuroOffice-Editor für jeden mit dem Link (impliziert Bearbeiten, unabhängig von can_write).
+        only_upload:
+          type: boolean
+          description: "\"Nur-Hochladen\"-Modus: Besucher sieht keine vorhandenen Inhalte, kann nur Dateien hochladen."
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        max_downloads:
+          type: integer
+          nullable: true
+        download_count:
+          type: integer
+        password_hash:
+          type: string
+          nullable: true
+          description: Nur intern relevant — die API gibt niemals das Klartext-Passwort zurück.
+        created_at:
+          type: string
+          format: date-time
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        role:
+          type: string
+        email:
+          type: string
+          nullable: true
+        first_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
+        display_real_name:
+          type: boolean
+        two_factor_email:
+          type: boolean
+        two_factor_totp:
+          type: boolean
+
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        key_prefix:
+          type: string
+          description: Erste 12 Zeichen des Keys, zur Wiedererkennung in der Liste (z.B. "mcld_a1b2c3").
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          properties:
+            key:
+              type: string
+              description: Der vollständige API-Key im Klartext — wird nur bei der Erstellung ein einziges Mal zurückgegeben und danach nirgends mehr gespeichert.
+
+    EuroOfficeConfig:
+      type: object
+      description: Konfigurationsobjekt für die EuroOffice/OnlyOffice-kompatible DocsAPI (`new DocsAPI.DocEditor(...)`).
+      properties:
+        publicUrl:
+          type: string
+          description: Browser-erreichbare Basis-URL des Dokumentenservers.
+        config:
+          type: object
+          properties:
+            document:
+              type: object
+              properties:
+                fileType:
+                  type: string
+                key:
+                  type: string
+                  description: "Stabiler Dokument-Schlüssel (`file_<id>`) — mehrere Sitzungen mit demselben Schlüssel landen automatisch in derselben Live-Kollaborationssitzung."
+                title:
+                  type: string
+                url:
+                  type: string
+            documentType:
+              type: string
+              enum: [word, cell, slide]
+            editorConfig:
+              type: object
+              properties:
+                callbackUrl:
+                  type: string
+                user:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    color:
+                      type: string
+                mode:
+                  type: string
+                  enum: [edit, view]
+                lang:
+                  type: string
+
+security:
+  - ApiKeyAuth: []
+  - CookieAuth: []
+
+paths:
+  # ───────────────────────── AUTHENTICATION ─────────────────────────
+  /api/auth/status:
+    get:
+      tags: [Authentication]
+      summary: Aktuellen Login-/Ersteinrichtungs-Status abfragen
+      description: "Ohne gültige Session/Key liefert dies trotzdem 200 mit `loggedIn: false` sowie Hinweisen, ob es sich um die Ersteinrichtung handelt und ob SSO aktiviert ist."
+      security: []
+      responses:
+        '200':
+          description: Status-Objekt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  loggedIn:
+                    type: boolean
+                  user:
+                    $ref: '#/components/schemas/User'
+                  firstRun:
+                    type: boolean
+                  ssoEnabled:
+                    type: boolean
+
+  /api/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Neuen Benutzer registrieren
+      description: Der erste registrierte Benutzer wird automatisch Admin. Ist SMTP konfiguriert, muss die E-Mail-Adresse erst per Link bestätigt werden, bevor ein Login möglich ist.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '201':
+          description: "Registrierung erfolgreich (ggf. mit `requiresVerification: true`)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  user:
+                    $ref: '#/components/schemas/User'
+                  requiresVerification:
+                    type: boolean
+        '400':
+          description: E-Mail/Passwort fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Registrierung ist deaktiviert
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: E-Mail/Name bereits vergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/auth/verify-email:
+    get:
+      tags: [Authentication]
+      summary: E-Mail-Adresse per Token bestätigen
+      description: Wird über den Link in der Bestätigungs-E-Mail aufgerufen; leitet danach zur Login-Seite weiter (kein JSON).
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: Weiterleitung zur Login-Seite nach erfolgreicher Bestätigung.
+        '400':
+          description: Ungültiger oder abgelaufener Link (HTML-Text, kein JSON).
+
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Anmelden (Benutzername oder E-Mail + Passwort)
+      description: "Bei aktivierter Zwei-Faktor-Authentifizierung liefert dies `requires2FA: true` statt eines Logins — anschließend `POST /api/auth/login/verify-2fa` aufrufen."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  description: Benutzername oder E-Mail-Adresse.
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Login erfolgreich, oder 2FA erforderlich
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  requires2FA:
+                    type: boolean
+                  type:
+                    type: string
+                    enum: [totp, email]
+                  user:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      username: { type: string }
+                      role: { type: string }
+                      hasCustomUsername: { type: boolean }
+        '400':
+          description: Fehlende Felder oder Account nutzt SSO/Passkey
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Falsche Zugangsdaten
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Account gesperrt oder E-Mail nicht bestätigt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/auth/login/verify-2fa:
+    post:
+      tags: [Authentication]
+      summary: Zwei-Faktor-Code beim Login bestätigen (TOTP oder E-Mail-Code)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+      responses:
+        '200':
+          description: Login abgeschlossen
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      username: { type: string }
+                      role: { type: string }
+                      hasCustomUsername: { type: boolean }
+        '400':
+          description: Ungültiger/abgelaufener Code oder keine 2FA-Sitzung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Benutzer nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/auth/set-username:
+    post:
+      tags: [Authentication]
+      summary: Benutzernamen einmalig festlegen (z.B. nach SSO-Erstlogin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username:
+                  type: string
+      responses:
+        '200':
+          description: Erfolgreich geändert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  username: { type: string }
+        '400':
+          description: Ungültiges Format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: Name bereits vergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Abmelden (zerstört die Server-Session)
+      description: Bei API-Key-Authentifizierung ist dieser Aufruf wirkungslos für den Key selbst (Keys werden separat über `DELETE /api/settings/api-keys/:id` widerrufen).
+      security: []
+      responses:
+        '200':
+          description: Erfolgreich abgemeldet
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+
+  # ───────────────────────── WEBAUTHN / PASSKEYS ─────────────────────────
+  /api/auth/passkey/register-options:
+    post:
+      tags: [WebAuthn/Passkeys]
+      summary: WebAuthn-Registrierungsoptionen für einen neuen Passkey anfordern
+      responses:
+        '200':
+          description: WebAuthn `PublicKeyCredentialCreationOptions` (an `@simplewebauthn/browser` weiterreichen)
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/auth/passkey/register-verify:
+    post:
+      tags: [WebAuthn/Passkeys]
+      summary: Vom Browser erzeugte Passkey-Registrierungsantwort verifizieren und speichern
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential]
+              properties:
+                credential:
+                  type: object
+                  description: WebAuthn-Browser-Antwortobjekt (siehe @simplewebauthn/browser).
+                name:
+                  type: string
+                  description: Anzeigename für den Passkey (z.B. Gerätename).
+      responses:
+        '200':
+          description: Passkey gespeichert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean } }
+        '400':
+          description: Challenge fehlt oder Verifikation fehlgeschlagen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/auth/passkey/login-options:
+    post:
+      tags: [WebAuthn/Passkeys]
+      summary: WebAuthn-Login-Optionen anfordern (vor der Anmeldung, kein Login nötig)
+      security: []
+      responses:
+        '200':
+          description: WebAuthn `PublicKeyCredentialRequestOptions`
+          content:
+            application/json:
+              schema: { type: object }
+
+  /api/auth/passkey/login-verify:
+    post:
+      tags: [WebAuthn/Passkeys]
+      summary: Passkey-Login-Antwort verifizieren und einloggen
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: WebAuthn-Browser-Authentifizierungsantwort (siehe @simplewebauthn/browser), enthält u.a. `id`.
+      responses:
+        '200':
+          description: Login erfolgreich
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      username: { type: string }
+                      role: { type: string }
+        '400':
+          description: Challenge fehlt oder Verifikation fehlgeschlagen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Kein Passkey mit dieser ID gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────── SSO ─────────────────────────
+  /auth/sso:
+    get:
+      tags: [SSO]
+      summary: Zum konfigurierten OIDC-Provider weiterleiten
+      security: []
+      responses:
+        '302':
+          description: Weiterleitung zum Provider-Login.
+        '400':
+          description: SSO deaktiviert oder unvollständig konfiguriert (HTML-Text).
+        '500':
+          description: Konfigurationsfehler (HTML-Text).
+
+  /auth/sso/callback:
+    get:
+      tags: [SSO]
+      summary: OIDC-Redirect-Callback — tauscht den Code gegen Tokens, legt bei Bedarf den Nutzer an und loggt ein
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: Weiterleitung zur Startseite nach erfolgreichem Login.
+        '400':
+          description: Ungültiger State (HTML-Text).
+        '500':
+          description: SSO-Authentifizierung fehlgeschlagen (HTML-Text).
+
+  # ───────────────────────── PASSWORD RESET ─────────────────────────
+  /api/auth/reset-password-request:
+    post:
+      tags: [Password Reset]
+      summary: Passwort-Reset-Link per E-Mail anfordern
+      description: "Antwortet aus Sicherheitsgründen auch dann mit `success: true`, wenn der Benutzer nicht existiert."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username:
+                  type: string
+                  description: Benutzername oder E-Mail-Adresse.
+      responses:
+        '200':
+          description: Link versendet (oder Benutzer existiert nicht — wird nicht unterschieden)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  message: { type: string }
+                  devLink:
+                    type: string
+                    description: Nur auf localhost ohne funktionierendes SMTP zurückgegeben (Entwicklungs-Fallback).
+        '400':
+          description: SSO-Account oder keine E-Mail hinterlegt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/auth/reset-password-execute:
+    post:
+      tags: [Password Reset]
+      summary: Passwort mit gültigem Reset-Token setzen
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token:
+                  type: string
+                newPassword:
+                  type: string
+      responses:
+        '200':
+          description: Passwort erfolgreich geändert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '400':
+          description: Token ungültig, abgelaufen oder fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────── FILES ─────────────────────────
+  /api/files/search:
+    get:
+      tags: [Files]
+      summary: Eigene Dateien/Ordner nach Name (und optional Inhalt) durchsuchen
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: deep
+          in: query
+          schema: { type: boolean }
+          description: "\"Intelligente Suche\": durchsucht zusätzlich den indexierten Dateiinhalt sowie unscharfe Namens-/Inhaltstreffer (pg_trgm)."
+      responses:
+        '200':
+          description: Trefferliste, sortiert nach Relevanz
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/File' }
+
+  /api/files/list:
+    get:
+      tags: [Files]
+      summary: Inhalt eines Ordners auflisten (Ordner zuerst, dann alphabetisch)
+      parameters:
+        - name: parentId
+          in: query
+          schema: { type: integer, nullable: true }
+          description: Weglassen oder `null` für das Wurzelverzeichnis.
+      responses:
+        '200':
+          description: Liste der direkten Kinder
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/File' }
+        '403':
+          description: Übergeordneter Ordner gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/folder:
+    post:
+      tags: [Files]
+      summary: Neuen Ordner erstellen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                parentId: { type: integer, nullable: true }
+      responses:
+        '201':
+          description: Erstellter Ordner
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400':
+          description: Name fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Zielordner gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/upload:
+    post:
+      tags: [Files]
+      summary: Datei hochladen
+      description: Bricht mit 413 ab, wenn das persönliche oder das gruppenweite Speicherkontingent überschritten würde.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                parentId:
+                  type: string
+                  description: Ziel-Ordner-ID (als String), oder weglassen/`null` für das Wurzelverzeichnis.
+      responses:
+        '201':
+          description: Hochgeladene Datei
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400':
+          description: Keine Datei übermittelt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Zielordner gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413':
+          description: Speicherplatzlimit überschritten
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/download/{id}:
+    get:
+      tags: [Files]
+      summary: Einzelne Datei herunterladen (oder inline im Browser anzeigen)
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - name: inline
+          in: query
+          schema: { type: boolean }
+          description: "`true` liefert `Content-Disposition: inline` statt eines Downloads (z.B. für PDF-Vorschau)."
+      responses:
+        '200':
+          description: Dateiinhalt
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400':
+          description: Ordner können nicht direkt heruntergeladen werden (ZIP-Endpunkt nutzen)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Datei gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Datei nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/download-zip/{id}:
+    get:
+      tags: [Files]
+      summary: Ordner (rekursiv) als ZIP herunterladen
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: ZIP-Archiv
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '403':
+          description: Ordner gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Ordner nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/download-zip-multiple:
+    get:
+      tags: [Files]
+      summary: Mehrere ausgewählte Dateien/Ordner als ein ZIP herunterladen
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          schema: { type: string }
+          description: Kommagetrennte Liste von Datei-/Ordner-IDs.
+      responses:
+        '200':
+          description: ZIP-Archiv (`mycloud_selection.zip`)
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '400':
+          description: Keine IDs übergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/{id}:
+    delete:
+      tags: [Files]
+      summary: Datei oder Ordner (rekursiv) löschen
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: Gelöscht
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '403':
+          description: Gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/move-multiple:
+    post:
+      tags: [Files]
+      summary: Mehrere Dateien/Ordner in einen anderen Ordner verschieben
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileIds]
+              properties:
+                fileIds:
+                  type: array
+                  items: { type: integer }
+                targetFolderId:
+                  type: integer
+                  nullable: true
+                  description: "`null` verschiebt ins Wurzelverzeichnis."
+      responses:
+        '200':
+          description: Verschoben
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '400':
+          description: fileIds fehlt oder leer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Zielordner gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/copy-multiple:
+    post:
+      tags: [Files]
+      summary: Mehrere Dateien/Ordner (rekursiv) kopieren
+      description: "Kopien erhalten den Namenszusatz \" (Kopie)\"."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileIds]
+              properties:
+                fileIds:
+                  type: array
+                  items: { type: integer }
+                targetFolderId:
+                  type: integer
+                  nullable: true
+      responses:
+        '200':
+          description: Kopiert
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '400':
+          description: fileIds fehlt oder leer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Zielordner gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/delete-multiple:
+    post:
+      tags: [Files]
+      summary: Mehrere Dateien/Ordner auf einmal löschen
+      description: Fremde oder nicht existierende IDs in der Liste werden stillschweigend übersprungen.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '200':
+          description: Gelöscht
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '400':
+          description: Keine IDs übergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/create-empty:
+    post:
+      tags: [Files]
+      summary: "Neue leere Datei erstellen (optional aus Vorlage: docx/xlsx/pptx)"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                parentId: { type: integer, nullable: true }
+                type:
+                  type: string
+                  enum: [txt, docx, xlsx, pptx, codex, other]
+                  description: "`codex` erstellt eine leere .js-Datei, `other` eine .bin-Datei; bei `txt` wird eine im Namen enthaltene Endung übernommen."
+      responses:
+        '201':
+          description: Erstellte Datei
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400':
+          description: Name fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Zielordner gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/create-note:
+    post:
+      tags: [Files]
+      summary: Selbstzerstörende Einmal-Notiz erstellen und automatisch einen Freigabe-Link dafür anlegen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, content]
+              properties:
+                name: { type: string }
+                content: { type: string }
+                maxViews:
+                  type: integer
+                  description: Anzahl Abrufe, nach denen sich die Notiz selbst löscht (Standard 1).
+                expiresHours:
+                  type: integer
+                  description: Ablaufzeit in Stunden (Standard 24).
+                parentId: { type: integer, nullable: true }
+      responses:
+        '200':
+          description: Freigabe-Link zur Notiz
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  shareLink: { type: string }
+        '400':
+          description: Name oder Inhalt fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/content/{id}:
+    get:
+      tags: [Files]
+      summary: Textinhalt einer Datei lesen (Code-/Text-Editor)
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: Rohtext
+          content:
+            text/plain:
+              schema: { type: string }
+        '400':
+          description: Ordner haben keinen Textinhalt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Physische Datei fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [Files]
+      summary: Textinhalt einer Datei speichern
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        '200':
+          description: Gespeichert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, size: { type: integer } }
+        '400':
+          description: content fehlt oder Ziel ist ein Ordner
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/files/thumbnail/{id}:
+    get:
+      tags: [Files]
+      summary: Vorschaubild einer Datei (Bild direkt, Video/RAW automatisch generiert per ffmpeg/exiftool)
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: Bilddaten
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '400':
+          description: Ordner haben kein Vorschaubild
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Kein Vorschaubild verfügbar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────── SHARING ─────────────────────────
+  /api/shares:
+    get:
+      tags: [Sharing]
+      summary: Alle eigenen Freigabe-Links auflisten
+      responses:
+        '200':
+          description: Liste der Freigaben (inkl. `file_name`, `is_folder` der geteilten Datei)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Share' }
+    post:
+      tags: [Sharing]
+      summary: Neuen Freigabe-Link für eine eigene Datei/Ordner erstellen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileId]
+              properties:
+                fileId: { type: integer }
+                customSlug:
+                  type: string
+                  description: Optionaler eigener Link-Teil; wird bereinigt (Kleinbuchstaben, a-z0-9-_) und muss eindeutig sein.
+                canRead: { type: boolean, default: true }
+                canWrite: { type: boolean, default: false }
+                canDownload: { type: boolean, default: true }
+                canZip: { type: boolean, default: true }
+                canCollab: { type: boolean, default: false }
+                onlyUpload: { type: boolean, default: false }
+                password: { type: string, nullable: true }
+                maxDownloads: { type: integer, nullable: true }
+                expiresDays: { type: integer, description: Alternative zu expiresAt — Ablauf in N Tagen ab jetzt. }
+                expiresAt: { type: string, format: date-time }
+      responses:
+        '201':
+          description: Erstellte Freigabe
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Share' }
+        '403':
+          description: Datei gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: customSlug bereits vergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/shares/{id}:
+    put:
+      tags: [Sharing]
+      summary: Bestehenden Freigabe-Link aktualisieren
+      description: "Nur übergebene Felder werden geändert; `removePassword: true` entfernt den Passwortschutz."
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                customSlug: { type: string }
+                canRead: { type: boolean }
+                canWrite: { type: boolean }
+                canDownload: { type: boolean }
+                canZip: { type: boolean }
+                canCollab: { type: boolean }
+                onlyUpload: { type: boolean }
+                password: { type: string }
+                removePassword: { type: boolean }
+                maxDownloads: { type: integer, nullable: true }
+                expiresDays: { type: integer, nullable: true }
+                expiresAt: { type: string, format: date-time, nullable: true }
+      responses:
+        '200':
+          description: Aktualisierte Freigabe
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Share' }
+        '403':
+          description: Gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: customSlug bereits vergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Sharing]
+      summary: Freigabe-Link aufheben
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Aufgehoben
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '403':
+          description: Gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/shares/bulk-delete:
+    post:
+      tags: [Sharing]
+      summary: Mehrere eigene Freigaben auf einmal aufheben
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, items: { type: integer } }
+      responses:
+        '200':
+          description: Anzahl gelöschter Freigaben
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, deleted: { type: integer } }
+        '400':
+          description: Keine IDs übergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/shares/bulk-update:
+    post:
+      tags: [Sharing]
+      summary: Berechtigungen/Ablauf/Passwort mehrerer eigener Freigaben gleichzeitig ändern
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, updates]
+              properties:
+                ids: { type: array, items: { type: integer } }
+                updates:
+                  type: object
+                  description: Nur gesetzte Felder werden angewendet (canRead, canWrite, canDownload, canZip, canCollab, onlyUpload, expiresAt, maxDownloads, password, removePassword).
+      responses:
+        '200':
+          description: Anzahl aktualisierter Freigaben
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, updated: { type: integer } }
+        '400':
+          description: Keine IDs oder keine Felder zum Aktualisieren
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine der IDs gehört dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────── EUROOFFICE ─────────────────────────
+  /api/eurooffice/config/{id}:
+    get:
+      tags: [EuroOffice]
+      summary: EuroOffice-Editor-Konfiguration für eine eigene Office-Datei abrufen
+      description: Unterstützt docx, xlsx, pptx, txt, odt, ods, odp. Der zurückgegebene `document.key` ist stabil pro Datei — mehrere gleichzeitige Sitzungen mit demselben Schlüssel landen automatisch in derselben Live-Kollaboration.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: Editor-Konfiguration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EuroOfficeConfig' }
+        '400':
+          description: Ordner oder nicht unterstütztes Format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Datei nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/eurooffice/download/{id}:
+    get:
+      tags: [EuroOffice]
+      summary: Interner Download-Endpunkt für den Dokumentenserver (token-basiert, keine Session nötig)
+      description: Wird ausschließlich vom EuroOffice-Dokumentenserver selbst aufgerufen (interne Docker-Netzwerk-URL), niemals direkt vom App-Client.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+          description: Kurzlebiges Token (10 Minuten gültig) aus der zuvor abgerufenen Editor-Konfiguration.
+      responses:
+        '200':
+          description: Dateiinhalt
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '403':
+          description: Token ungültig oder abgelaufen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/eurooffice/callback/{id}:
+    post:
+      tags: [EuroOffice]
+      summary: Speicher-Callback des Dokumentenservers (persistiert Änderungen zurück auf die Platte)
+      description: Wird ausschließlich vom EuroOffice-Dokumentenserver selbst aufgerufen, niemals direkt vom App-Client.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: integer
+                  description: "OnlyOffice-Statuscode; `2` bedeutet \"fertig bearbeitet, jetzt speichern\"."
+                url:
+                  type: string
+                  description: URL, von der die gespeicherte Datei heruntergeladen werden kann.
+      responses:
+        '200':
+          description: 'Immer `{ "error": 0 }`, unabhängig vom tatsächlichen Ergebnis (OnlyOffice-Callback-Konvention).'
+          content:
+            application/json:
+              schema: { type: object, properties: { error: { type: integer } } }
+
+  # ───────────────────────── BRANDING ─────────────────────────
+  /api/public/branding:
+    get:
+      tags: [Branding]
+      summary: Öffentliche Branding-Einstellungen abrufen (Name, Farben, vorhandene Hintergründe/Icon)
+      security: []
+      responses:
+        '200':
+          description: Branding-Objekt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  tabName: { type: string }
+                  hasIcon: { type: boolean }
+                  customColorBg: { type: string }
+                  customColorAccent: { type: string }
+                  hasDashboardBg: { type: boolean }
+                  hasLoginBg: { type: boolean }
+                  hasDashboardBgLight: { type: boolean }
+                  hasLoginBgLight: { type: boolean }
+                  appUrl: { type: string }
+                  emailConfigured: { type: boolean }
+
+  /api/public/branding/icon:
+    get:
+      tags: [Branding]
+      summary: Hochgeladenes Cloud-Icon abrufen
+      security: []
+      responses:
+        '200':
+          description: Bilddaten
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '404':
+          description: Kein Icon gesetzt (Klartext).
+
+  /api/public/branding/dashboard-bg:
+    get:
+      tags: [Branding]
+      summary: Dashboard-Hintergrundbild abrufen
+      security: []
+      parameters:
+        - name: variant
+          in: query
+          schema: { type: string, enum: [dark, light] }
+          description: Standard ist "dark".
+      responses:
+        '200':
+          description: Bilddaten
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '404':
+          description: Kein Hintergrund gesetzt (Klartext).
+
+  /api/public/branding/login-bg:
+    get:
+      tags: [Branding]
+      summary: Login-Hintergrundbild abrufen
+      security: []
+      parameters:
+        - name: variant
+          in: query
+          schema: { type: string, enum: [dark, light] }
+          description: Standard ist "dark".
+      responses:
+        '200':
+          description: Bilddaten
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '404':
+          description: Kein Hintergrund gesetzt (Klartext).
+
+  # ───────────────────────── PUBLIC SHARES ─────────────────────────
+  /api/public/shares/{slug}:
+    get:
+      tags: [Public Shares]
+      summary: Freigegebenen Inhalt (Datei oder Ordnerauflistung) abrufen
+      description: "Ist die Freigabe passwortgeschützt und noch nicht entsperrt, wird nur `share.passwordRequired: true` und ein anonymisierter Platzhaltername zurückgegeben — vorher `POST .../unlock` aufrufen."
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+        - name: parentId
+          in: query
+          schema: { type: integer }
+          description: Zum Navigieren in Unterordnern eines freigegebenen Ordners.
+      responses:
+        '200':
+          description: Freigabe-Metadaten, Basis-Datei und (falls Ordner) enthaltene Dateien
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  share: { $ref: '#/components/schemas/Share' }
+                  baseFile: { $ref: '#/components/schemas/File' }
+                  currentFolderId: { type: integer }
+                  files:
+                    type: array
+                    items: { $ref: '#/components/schemas/File' }
+        '404':
+          description: Link nicht gefunden oder Inhalt gelöscht
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: Link abgelaufen oder Downloadlimit erreicht
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/shares/{slug}/unlock:
+    post:
+      tags: [Public Shares]
+      summary: Passwortgeschützte Freigabe für die aktuelle Sitzung entsperren
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password: { type: string }
+      responses:
+        '200':
+          description: Entsperrt (Freischaltung wird per Session-Cookie gemerkt)
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '401':
+          description: Falsches Passwort
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Link nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/shares/{slug}/content/{fileId}:
+    get:
+      tags: [Public Shares]
+      summary: Textinhalt einer freigegebenen Datei lesen
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Rohtext
+          content:
+            text/plain:
+              schema: { type: string }
+        '400':
+          description: Ordner haben keinen Textinhalt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Passwort erforderlich
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: fileId liegt außerhalb des freigegebenen Bereichs
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [Public Shares]
+      summary: Textinhalt einer freigegebenen Datei speichern (erfordert can_write)
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        '200':
+          description: Gespeichert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, size: { type: integer } }
+        '400':
+          description: content fehlt oder Ziel ist ein Ordner
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Schreibrechte fehlen, oder fileId außerhalb des freigegebenen Bereichs
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/shares/{slug}/eurooffice/config/{fileId}:
+    get:
+      tags: [Public Shares, EuroOffice]
+      summary: EuroOffice-Editor-Konfiguration für eine freigegebene Office-Datei (Live-Kollaboration)
+      description: Erfordert die Freigabe-Berechtigung `can_collab`. Der Gast bekommt automatisch einen zufälligen deutschen Tiernamen und eine Farbe zugewiesen; der Editor öffnet immer im Bearbeitungsmodus (die Kollaborations-Berechtigung allein genügt, unabhängig von can_write).
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Editor-Konfiguration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EuroOfficeConfig' }
+        '400':
+          description: Ordner oder nicht unterstütztes Format
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: can_collab nicht aktiviert, oder fileId außerhalb des freigegebenen Bereichs
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/shares/{slug}/thumbnail/{fileId}:
+    get:
+      tags: [Public Shares]
+      summary: Vorschaubild einer freigegebenen Datei
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Bilddaten
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '400':
+          description: Ordner haben kein Vorschaubild
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Kein Vorschaubild verfügbar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/shares/{slug}/download/{fileId}:
+    get:
+      tags: [Public Shares]
+      summary: Freigegebene Datei herunterladen (oder inline anzeigen)
+      description: Erhöht den Downloadzähler der Freigabe; bei Einmal-Notizen oder Erreichen des Downloadlimits wird die Datei danach automatisch gelöscht.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: inline
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Dateiinhalt
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401':
+          description: Passwort erforderlich
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Downloadrechte fehlen, oder fileId außerhalb des freigegebenen Bereichs
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: Abgelaufen oder Downloadlimit erreicht
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/shares/{slug}/upload:
+    post:
+      tags: [Public Shares]
+      summary: Datei in einen freigegebenen Ordner hochladen (erfordert can_write)
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                parentId:
+                  type: string
+                  description: Ziel-Unterordner innerhalb der Freigabe.
+      responses:
+        '201':
+          description: Hochgeladene Datei
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400':
+          description: Keine Datei übermittelt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: Passwort erforderlich
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Schreibrechte fehlen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: Freigabe abgelaufen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/public/shares/{slug}/download-zip/{folderId}:
+    get:
+      tags: [Public Shares]
+      summary: Unterordner einer Freigabe (rekursiv) als ZIP herunterladen (erfordert can_zip)
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShareSlug'
+        - name: folderId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: ZIP-Archiv
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '401':
+          description: Passwort erforderlich
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: ZIP-Rechte fehlen, oder folderId außerhalb des freigegebenen Bereichs
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: Freigabe abgelaufen oder Downloadlimit erreicht
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────── SETTINGS ─────────────────────────
+  /api/settings:
+    get:
+      tags: [Settings]
+      summary: Eigene Kontoeinstellungen abrufen (Profil, Passkeys, E-Mail-Status; für Admins zusätzlich die Systemkonfiguration)
+      responses:
+        '200':
+          description: Einstellungsobjekt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  passkeys:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        created_at: { type: string, format: date-time }
+                  emailConfigured: { type: boolean }
+                  adminConfig:
+                    type: object
+                    description: "Nur enthalten, wenn der Nutzer Admin ist. Alle Key/Value-Systemeinstellungen (SMTP-Passwort wird durch `email_smtp_pass_configured: true` ersetzt)."
+
+  /api/settings/avatar:
+    post:
+      tags: [Settings]
+      summary: Profilbild hochladen (JPEG/PNG/GIF, max. 2 MB)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [avatar]
+              properties:
+                avatar: { type: string, format: binary }
+      responses:
+        '200':
+          description: Erfolgreich
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, avatarUrl: { type: string } }
+        '400':
+          description: Falscher Dateityp oder zu groß
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/users/{id}/avatar:
+    get:
+      tags: [Settings]
+      summary: Profilbild eines Benutzers abrufen (generiert einen Initialen-Avatar als SVG, falls keins hochgeladen wurde)
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Bilddaten (hochgeladenes Bild oder generiertes SVG)
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+            image/svg+xml:
+              schema: { type: string }
+        '404':
+          description: Benutzer nicht gefunden (Klartext).
+
+  /api/users/storage:
+    get:
+      tags: [Settings]
+      summary: Eigenen Speicherverbrauch, Kontingent und freien Festplattenspeicher abrufen
+      responses:
+        '200':
+          description: Speicherstatistik
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usedBytes: { type: integer, format: int64 }
+                  quotaBytes: { type: integer, format: int64, nullable: true }
+                  freeDiskBytes: { type: integer, format: int64 }
+
+  /api/settings/profile:
+    post:
+      tags: [Settings]
+      summary: Profildaten aktualisieren (Name, Benutzername, E-Mail, Klarname-Anzeige)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email]
+              properties:
+                first_name: { type: string, nullable: true }
+                last_name: { type: string, nullable: true }
+                username: { type: string }
+                email: { type: string }
+                display_real_name: { type: boolean }
+      responses:
+        '200':
+          description: Aktualisiertes Profil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, user: { $ref: '#/components/schemas/User' } }
+        '400':
+          description: Pflichtfeld fehlt oder Benutzername/E-Mail bereits vergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/email:
+    post:
+      tags: [Settings]
+      summary: Nur die E-Mail-Adresse aktualisieren
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        '200':
+          description: Gespeichert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '400':
+          description: E-Mail fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/passkeys/{id}:
+    delete:
+      tags: [Settings]
+      summary: Eigenen Passkey entfernen
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Entfernt
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '404':
+          description: Nicht gefunden oder gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────── TWO-FACTOR AUTH ─────────────────────────
+  /api/settings/2fa/email:
+    post:
+      tags: [Two-Factor Auth]
+      summary: E-Mail-basierte Zwei-Faktor-Authentifizierung ein-/ausschalten
+      description: Erfordert eine hinterlegte, funktionierende SMTP-Konfiguration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: Gespeichert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, twoFactorEmail: { type: boolean } }
+        '400':
+          description: Keine E-Mail hinterlegt oder SMTP nicht eingerichtet
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/2fa/totp/setup:
+    post:
+      tags: [Two-Factor Auth]
+      summary: TOTP-Einrichtung starten (liefert Secret + otpauth-URL für den QR-Code)
+      responses:
+        '200':
+          description: TOTP-Setup-Daten
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  secret: { type: string }
+                  otpauthUrl: { type: string }
+
+  /api/settings/2fa/totp/confirm:
+    post:
+      tags: [Two-Factor Auth]
+      summary: TOTP-Einrichtung mit einem ersten gültigen Code bestätigen und aktivieren
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '200':
+          description: Aktiviert
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '400':
+          description: Ungültiger Code oder keine Setup-Sitzung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/2fa/totp/disable:
+    post:
+      tags: [Two-Factor Auth]
+      summary: TOTP-2FA deaktivieren
+      responses:
+        '200':
+          description: Deaktiviert
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+
+  # ───────────────────────── API KEYS ─────────────────────────
+  /api/settings/api-keys:
+    get:
+      tags: [API Keys]
+      summary: Eigene API-Keys auflisten (ohne den geheimen Schlüssel selbst)
+      responses:
+        '200':
+          description: Liste
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApiKey' }
+    post:
+      tags: [API Keys]
+      summary: Neuen API-Key erstellen
+      description: Der volle Schlüssel (`key`) wird nur in dieser Antwort einmalig zurückgegeben — danach ist nur noch das Präfix abrufbar.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Anzeigename, z.B. "iPhone App". Standard "API-Key".
+      responses:
+        '201':
+          description: Erstellter Key inkl. Klartext-Schlüssel
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
+
+  /api/settings/api-keys/{id}:
+    delete:
+      tags: [API Keys]
+      summary: API-Key widerrufen
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Widerrufen
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '404':
+          description: Nicht gefunden oder gehört nicht dem Nutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  # ───────────────────────── ADMIN ─────────────────────────
+  /api/settings/admin/icon:
+    post:
+      tags: [Admin]
+      summary: Cloud-Icon hochladen
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [icon]
+              properties:
+                icon: { type: string, format: binary }
+      responses:
+        '200':
+          description: Erfolgreich
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, iconUrl: { type: string } }
+        '400':
+          description: Keine Datei übermittelt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/dashboard-bg:
+    post:
+      tags: [Admin]
+      summary: Dashboard-Hintergrundbild hochladen
+      parameters:
+        - name: variant
+          in: query
+          schema: { type: string, enum: [dark, light] }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary }
+      responses:
+        '200':
+          description: Erfolgreich
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, bgUrl: { type: string } }
+        '400':
+          description: Keine Datei übermittelt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Admin]
+      summary: Dashboard-Hintergrundbild entfernen
+      parameters:
+        - name: variant
+          in: query
+          schema: { type: string, enum: [dark, light] }
+      responses:
+        '200':
+          description: Entfernt
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/login-bg:
+    post:
+      tags: [Admin]
+      summary: Login-Hintergrundbild hochladen
+      parameters:
+        - name: variant
+          in: query
+          schema: { type: string, enum: [dark, light] }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image: { type: string, format: binary }
+      responses:
+        '200':
+          description: Erfolgreich
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, bgUrl: { type: string } }
+        '400':
+          description: Keine Datei übermittelt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Admin]
+      summary: Login-Hintergrundbild entfernen
+      parameters:
+        - name: variant
+          in: query
+          schema: { type: string, enum: [dark, light] }
+      responses:
+        '200':
+          description: Entfernt
+          content:
+            application/json:
+              schema: { type: object, properties: { success: { type: boolean } } }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/config:
+    post:
+      tags: [Admin]
+      summary: Systemkonfiguration aktualisieren (Cloud-Name, SSO, SMTP, Farben, …)
+      description: Beliebige Key/Value-Paare der `settings`-Tabelle; SMTP-bezogene Änderungen setzen `email_smtp_tested` automatisch zurück. Änderungen an SSO-/SMTP-Schlüsseln werden zusätzlich in die `.env`-Datei zurückgeschrieben.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: string
+              example:
+                cloud_name: "myCloud"
+                sso_enabled: "true"
+      responses:
+        '200':
+          description: Gespeichert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/test-smtp:
+    post:
+      tags: [Admin]
+      summary: SMTP-Konfiguration mit einer Test-E-Mail prüfen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to:
+                  type: string
+                  description: Empfänger-Adresse der Test-E-Mail.
+      responses:
+        '200':
+          description: Versendet — SMTP als getestet markiert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '400':
+          description: Empfängeradresse fehlt
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: SMTP-Verbindung fehlgeschlagen
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/users:
+    get:
+      tags: [Admin]
+      summary: Alle Benutzer auflisten (inkl. Dateianzahl und Speicherverbrauch)
+      responses:
+        '200':
+          description: Liste
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  allOf:
+                    - $ref: '#/components/schemas/User'
+                    - type: object
+                      properties:
+                        sso_provider: { type: string, nullable: true }
+                        created_at: { type: string, format: date-time }
+                        is_active: { type: boolean }
+                        storage_quota: { type: integer, format: int64, nullable: true }
+                        file_count: { type: integer }
+                        storage_used: { type: integer, format: int64 }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [Admin]
+      summary: Neuen Benutzer anlegen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password]
+              properties:
+                username: { type: string }
+                email: { type: string }
+                password: { type: string }
+                role:
+                  type: string
+                  description: Fällt auf die Standardrolle zurück, falls die angegebene Rolle nicht existiert.
+      responses:
+        '201':
+          description: Erstellter Benutzer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400':
+          description: Pflichtfeld fehlt oder bereits vergeben
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/users/{id}:
+    post:
+      tags: [Admin]
+      summary: Aktion auf einem Benutzer ausführen (löschen / sperren-entsperren / Rolle ändern / Kontingent setzen / Passwort zurücksetzen)
+      description: Der Admin kann keine Aktion auf dem eigenen Konto ausführen.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [delete, quota, role, toggle-status, reset-password]
+                role:
+                  type: string
+                  description: Erforderlich bei action=role.
+                quotaBytes:
+                  type: integer
+                  format: int64
+                  nullable: true
+                  description: Erforderlich bei action=quota; `null`/weglassen = kein Limit.
+      responses:
+        '200':
+          description: Aktion ausgeführt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '400':
+          description: Ungültige Aktion, auf sich selbst angewendet, oder Voraussetzung fehlt (z.B. SMTP für reset-password)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Benutzer nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/roles:
+    get:
+      tags: [Admin]
+      summary: Alle Rollen auflisten (inkl. Mitgliederzahl und gemeinsamem Speicherverbrauch)
+      responses:
+        '200':
+          description: Rollenliste + verfügbare Berechtigungsschlüssel
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  roles:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        name: { type: string }
+                        is_default: { type: boolean }
+                        is_system: { type: boolean }
+                        permissions:
+                          type: object
+                          additionalProperties: { type: boolean }
+                        storage_quota: { type: integer, format: int64, nullable: true }
+                        member_count: { type: integer }
+                        storage_used: { type: integer, format: int64 }
+                  permissionKeys:
+                    type: array
+                    items: { type: string }
+                    example: [admin, upload, create_folder, delete, rename, share, download, edit_files]
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [Admin]
+      summary: Neue Rolle erstellen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: 2–30 Zeichen, a-z 0-9 _ -.
+                permissions:
+                  type: object
+                  additionalProperties: { type: boolean }
+                storageQuota:
+                  type: integer
+                  format: int64
+                  nullable: true
+      responses:
+        '201':
+          description: Erstellte Rolle
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  name: { type: string }
+                  is_default: { type: boolean }
+                  is_system: { type: boolean }
+                  permissions:
+                    type: object
+                    additionalProperties: { type: boolean }
+                  storage_quota: { type: integer, format: int64, nullable: true }
+        '400':
+          description: Ungültiger Name oder bereits vorhanden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/roles/{id}:
+    put:
+      tags: [Admin]
+      summary: Berechtigungen/Speicherkontingent einer Rolle aktualisieren
+      description: Die eingebaute admin-Rolle behält immer alle Berechtigungen, unabhängig von den übergebenen Werten.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                permissions:
+                  type: object
+                  additionalProperties: { type: boolean }
+                storageQuota:
+                  type: integer
+                  format: int64
+                  nullable: true
+      responses:
+        '200':
+          description: Aktualisiert
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Rolle nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    delete:
+      tags: [Admin]
+      summary: Rolle löschen (Mitglieder fallen auf die Standardrolle zurück)
+      description: System-Rollen (admin, user) können nicht gelöscht werden.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Gelöscht
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '400':
+          description: System-Rolle kann nicht gelöscht werden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Rolle nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/settings/admin/roles/{id}/default:
+    post:
+      tags: [Admin]
+      summary: Rolle als Standardrolle für neue Registrierungen festlegen
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Gesetzt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean }, message: { type: string } }
+        '403':
+          description: Keine Admin-Berechtigung
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Rolle nicht gefunden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }

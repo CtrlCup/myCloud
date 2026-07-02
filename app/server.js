@@ -7,6 +7,8 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const archiver = require('archiver');
 const crypto = require('crypto');
+const swaggerUi = require('swagger-ui-express');
+const yaml = require('js-yaml');
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -111,6 +113,53 @@ app.use(session({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// API-Key Authentication (Bearer token, for external/app clients)
+// Populates req.session.userId/.username/.role from a personal API key, exactly like a browser
+// login would — every existing route below reads those three session fields, so this lets the
+// entire API work for token-authenticated clients without touching any individual route handler.
+app.use(async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (req.session.userId || !authHeader || !authHeader.startsWith('Bearer ')) return next();
+
+  const token = authHeader.slice(7).trim();
+  if (!token.startsWith('mcld_')) return next();
+
+  try {
+    const keyHash = crypto.createHash('sha256').update(token).digest('hex');
+    const result = await pool.query(
+      `SELECT ak.id AS key_id, u.id AS user_id, u.username, u.role
+       FROM api_keys ak JOIN users u ON ak.user_id = u.id
+       WHERE ak.key_hash = $1`,
+      [keyHash]
+    );
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      req.session.userId = row.user_id;
+      req.session.username = row.username;
+      req.session.role = row.role;
+      pool.query('UPDATE api_keys SET last_used_at = NOW() WHERE id = $1', [row.key_id]).catch(() => {});
+    }
+  } catch (err) {
+    console.error('API key auth error:', err);
+  }
+  next();
+});
+
+// API documentation (Swagger UI over the openapi.yaml spec, so an app developer can browse
+// and try out every endpoint at /api/docs). Public — it only describes the API, no secrets.
+let openApiSpec = null;
+try {
+  openApiSpec = yaml.load(fs.readFileSync(path.join(__dirname, 'openapi.yaml'), 'utf8'));
+} catch (err) {
+  console.error('Failed to load openapi.yaml:', err.message);
+}
+if (openApiSpec) {
+  app.get('/api/docs/openapi.json', (req, res) => res.json(openApiSpec));
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec, {
+    customSiteTitle: 'myCloud API Docs',
+  }));
+}
 
 // Authentication Middleware
 function requireAuth(req, res, next) {
@@ -3031,6 +3080,58 @@ app.get('/api/settings', requireAuth, async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error('Error fetching settings:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/* ─── API Keys (personal access tokens for external/app clients) ─── */
+
+// List the current user's API keys (never returns the actual key, only metadata)
+app.get('/api/settings/api-keys', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, name, key_prefix, created_at, last_used_at FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC',
+      [req.session.userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error listing API keys:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Create a new API key. The full key is only ever returned here — only its hash is stored.
+app.post('/api/settings/api-keys', requireAuth, async (req, res) => {
+  const name = (req.body.name || '').trim().slice(0, 100) || 'API-Key';
+  try {
+    const token = `mcld_${crypto.randomBytes(24).toString('hex')}`;
+    const keyPrefix = token.slice(0, 12);
+    const keyHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    const result = await pool.query(
+      `INSERT INTO api_keys (user_id, name, key_prefix, key_hash)
+       VALUES ($1, $2, $3, $4) RETURNING id, name, key_prefix, created_at`,
+      [req.session.userId, name, keyPrefix, keyHash]
+    );
+
+    res.status(201).json({ ...result.rows[0], key: token });
+  } catch (err) {
+    console.error('Error creating API key:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Revoke (delete) one of the current user's API keys
+app.delete('/api/settings/api-keys/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM api_keys WHERE id = $1 AND user_id = $2 RETURNING id',
+      [parseInt(req.params.id), req.session.userId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'API key not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error revoking API key:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

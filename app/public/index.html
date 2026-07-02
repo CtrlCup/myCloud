@@ -268,6 +268,9 @@
             <div class="settings-nav-item" data-section="storage-settings">
               <i data-lucide="hard-drive"></i> Speicher
             </div>
+            <div class="settings-nav-item" data-section="api-settings">
+              <i data-lucide="terminal"></i> API-Zugriff
+            </div>
           </aside>
 
           <!-- Content Bereich -->
@@ -452,6 +455,39 @@
                 <div id="storage-detail-text" style="font-size: 0.95rem; color: var(--color-text-muted); line-height: 1.6;">
                   Lädt Speicherinformationen...
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Section 5: API-Zugriff -->
+          <section id="api-settings" class="settings-section">
+            <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.75rem;">
+                <h3 style="margin: 0;">Persönliche API-Keys</h3>
+                <button class="btn btn-primary" id="create-api-key-btn">
+                  <i data-lucide="plus"></i> Neuer API-Key
+                </button>
+              </div>
+              <p style="font-size: 0.9rem; color: var(--color-text-muted); margin-bottom: 1.5rem;">
+                Mit einem API-Key kann sich eine externe App oder ein Skript bei myCloud anmelden, ohne dein Passwort zu kennen —
+                als <code>Authorization: Bearer &lt;key&gt;</code>-Header bei jeder Anfrage. Die komplette API ist unter
+                <a href="/api/docs" target="_blank" rel="noopener">/api/docs</a> dokumentiert.
+              </p>
+              <div class="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Key</th>
+                      <th>Erstellt am</th>
+                      <th>Zuletzt verwendet</th>
+                      <th>Aktion</th>
+                    </tr>
+                  </thead>
+                  <tbody id="api-key-list">
+                    <!-- Dynamisch generiert -->
+                  </tbody>
+                </table>
               </div>
             </div>
           </section>
@@ -1051,6 +1087,29 @@
           <button type="submit" class="btn btn-primary" style="justify-content: center;">Bestätigen</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- API-KEY ERSTELLT MODAL (zeigt den Key einmalig im Klartext) -->
+  <div class="modal-overlay" id="api-key-created-modal-overlay">
+    <div class="card modal" style="max-width: 480px; width: 90%;">
+      <div class="modal-header">
+        <h3 class="modal-title">API-Key erstellt</h3>
+        <button class="close-btn" id="close-api-key-created-modal-btn" type="button">&times;</button>
+      </div>
+      <p style="font-size: 0.85rem; color: #ff9f43; margin: 1rem 0;">
+        <i data-lucide="alert-triangle" style="width: 14px; height: 14px; vertical-align: -2px;"></i>
+        Dieser Key wird nur jetzt angezeigt. Kopiere ihn und bewahre ihn sicher auf.
+      </p>
+      <div style="display: flex; gap: 0.5rem;">
+        <input type="text" id="api-key-created-value" class="form-control" readonly style="font-family: monospace; font-size: 0.85rem;">
+        <button type="button" class="btn btn-primary" id="copy-api-key-created-btn" style="padding: 0 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+          <i data-lucide="copy" style="width: 16px; height: 16px;"></i>
+        </button>
+      </div>
+      <div class="form-actions" style="margin-top: 1.5rem; display: flex; justify-content: flex-end;">
+        <button type="button" class="btn btn-primary" id="done-api-key-created-btn" style="justify-content: center;">Fertig</button>
+      </div>
     </div>
   </div>
 
