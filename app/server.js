@@ -1789,7 +1789,7 @@ app.get('/api/files/notes', requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT f.id, f.name, f.is_folder, f.created_at,
-              s.slug, s.expires_at, s.max_downloads, s.download_count
+              s.id AS share_id, s.slug, s.expires_at, s.max_downloads, s.download_count
        FROM files f
        LEFT JOIN files parent ON parent.id = f.parent_id
        LEFT JOIN shares s ON s.file_id = f.id

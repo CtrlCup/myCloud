@@ -726,6 +726,9 @@ function renderNoteRow(note) {
     <button type="button" class="btn-icon note-copy-link-btn" title="Link kopieren" data-slug="${escapeHtml(note.slug || '')}">
       <i data-lucide="link"></i>
     </button>
+    <button type="button" class="btn-icon note-settings-btn" title="Aufrufe/Ablauf bearbeiten">
+      <i data-lucide="settings"></i>
+    </button>
     <button type="button" class="btn-icon note-delete-btn" title="Löschen" style="color: #ff5555;" data-id="${note.id}">
       <i data-lucide="trash-2"></i>
     </button>
@@ -736,6 +739,14 @@ function renderNoteRow(note) {
     if (!slug) return;
     navigator.clipboard.writeText(`${window.location.origin}/s/${slug}`);
     showToast('Link kopiert.');
+  };
+  row.querySelector('.note-settings-btn').onclick = async () => {
+    if (!note.share_id) { showToast('Keine Freigabe gefunden.'); return; }
+    try {
+      const r = await fetch('/api/shares');
+      allShares = await r.json();
+    } catch { showToast('Verbindungsfehler.'); return; }
+    openShareEditModal([note.share_id]);
   };
   row.querySelector('.note-delete-btn').onclick = async () => {
     if (!await showConfirmDialog('Einmalnachricht löschen', 'Diese Einmalnachricht wirklich löschen?')) return;
@@ -2601,6 +2612,7 @@ shareCanWriteCheck.onchange = () => {
 // in the DOM (just hidden) and its value/change-event keep working exactly as before, so every
 // existing .value read/write and .onchange handler elsewhere in the code needs no changes.
 function styleSelectAsDropdown(select) {
+  select.style.display = 'none';
   const wrap = document.createElement('div');
   wrap.style.width = '100%';
   select.insertAdjacentElement('afterend', wrap);
@@ -3764,6 +3776,11 @@ async function loadAdminRoles() {
         .map(r => `<option value="${r.name}">${r.name}</option>`).join('');
       if (adminRolesCache.some(r => r.name === prev)) newRoleSelect.value = prev;
       else { const def = adminRolesCache.find(r => r.is_default); if (def) newRoleSelect.value = def.name; }
+      if (!newRoleSelect._styledAsDropdown) {
+        styleSelectAsDropdown(newRoleSelect);
+        newRoleSelect._styledAsDropdown = true;
+      }
+      newRoleSelect._syncCustomLabel?.();
     }
 
     const list = document.getElementById('admin-roles-list');
@@ -3828,7 +3845,7 @@ function renderUserRow(user) {
         <span class="meta-label">Speicher</span>
         <span class="meta-value" style="display:inline-flex; align-items:center; gap:0.35rem;">
           ${formatBytes(user.storage_used)} / ${user.storage_quota ? formatBytes(user.storage_quota) : 'unbegrenzt'}
-          <button class="btn-icon btn-action-edit-quota" style="width:20px;height:20px;color: var(--color-accent);" title="Speicherlimit ändern">
+          <button class="btn-icon btn-action-edit-quota" style="width:20px;height:20px;padding:0;display:flex;align-items:center;justify-content:center;background:transparent;border:none;color: var(--color-accent);" title="Speicherlimit ändern">
             <i data-lucide="edit-3"></i>
           </button>
         </span>
@@ -4344,6 +4361,7 @@ document.getElementById('share-edit-form').onsubmit = async (e) => {
         shareEditOverlay.classList.remove('active');
         selectedShareIds.clear();
         loadUserShares();
+        loadNotesPage();
       } else {
         const err = await res.json();
         showToast(err.error || 'Fehler beim Speichern.');
@@ -4375,6 +4393,7 @@ document.getElementById('share-edit-form').onsubmit = async (e) => {
         showToast('Link aktualisiert.');
         shareEditOverlay.classList.remove('active');
         loadUserShares();
+        loadNotesPage();
       } else {
         const err = await res.json();
         showToast(err.error || 'Fehler beim Speichern.');
