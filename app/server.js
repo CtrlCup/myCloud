@@ -2646,7 +2646,10 @@ app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) =
           name: guestName,
           color: pickRandomCollabColor()
         },
-        mode: share.can_write ? 'edit' : 'view',
+        // Reaching this point already required share.can_collab === true (checked above), so
+        // anyone with the link can edit — collaborative editing shouldn't need a second,
+        // separate "Bearbeiten & Speichern" permission on top of it.
+        mode: 'edit',
         lang: 'de'
       }
     };

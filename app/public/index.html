@@ -1311,12 +1311,15 @@
 
   <!-- EUROOFFICE MODAL (FULLSCREEN EDITOR) -->
   <div class="modal-overlay" id="office-editor-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--color-bg);">
-    <div style="position: relative; width: 100%; height: 100%;">
-      <!-- Rotes X oben rechts zum Beenden -->
-      <button class="btn" id="close-office-editor-btn" style="position: absolute; top: 10px; right: 10px; z-index: 10002; background: #ff5555; border-color: #ff5555; color: #fff; border-radius: 50%; width: 36px; height: 36px; padding: 0; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(0,0,0,0.5); cursor: pointer;" title="Beenden">
-        <i data-lucide="x" style="width: 18px; height: 18px;"></i>
-      </button>
-      <div id="office-iframe-container" style="width: 100%; height: 100%; background: #fff;">
+    <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
+      <!-- Eigene schmale Kopfleiste für den Schließen-Button, damit er nicht mit den nativen -->
+      <!-- EuroOffice-Symbolen (z.B. Mitbearbeiter-Anzeige) oben rechts im Editor kollidiert. -->
+      <div style="display: flex; justify-content: flex-end; align-items: center; padding: 0.4rem 0.6rem; background: #0d0d14; flex-shrink: 0;">
+        <button class="btn" id="close-office-editor-btn" style="background: #ff5555; border-color: #ff5555; color: #fff; border-radius: 50%; width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; cursor: pointer;" title="Beenden">
+          <i data-lucide="x" style="width: 16px; height: 16px;"></i>
+        </button>
+      </div>
+      <div id="office-iframe-container" style="flex: 1; width: 100%; background: #fff;">
         <!-- Initialisiert EuroOffice DocsAPI -->
       </div>
     </div>
