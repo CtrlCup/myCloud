@@ -1512,11 +1512,20 @@ function showFileContextMenu(file, x, y) {
 }
 
 // Global Dashboard Background Right Click Menu
-document.getElementById('dashboard-view').oncontextmenu = (e) => {
-  if (e.target.closest('.file-item') || e.target.closest('.settings-layout') || e.target.closest('header') || e.target.closest('.modal') || e.target.closest('#multi-actions-bar')) {
+// Bound to the whole document (not just #dashboard-view) because the actual page content sits
+// in a centered, max-width .container — on any wider viewport there's a real margin of plain
+// <body> background on both sides that isn't inside #dashboard-view at all, where a right-click
+// used to always fall through to the browser's native menu instead of this one.
+document.oncontextmenu = (e) => {
+  if (currentViewName !== 'dashboard') return;
+  // Excluding the whole <header> used to also swallow right-clicks on the empty space
+  // around its controls (e.g. left of the logo), showing the browser's native menu there
+  // instead of ours — only the actual interactive controls need to opt out.
+  const isHeaderControl = e.target.closest('header') && e.target.closest('button, a, input, select, .user-menu-trigger, .user-dropdown-menu');
+  if (e.target.closest('.file-item') || e.target.closest('.settings-layout') || isHeaderControl || e.target.closest('.modal') || e.target.closest('#multi-actions-bar')) {
     return;
   }
-  
+
   e.preventDefault();
 
   const existing = document.querySelector('.context-menu');
