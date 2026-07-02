@@ -2536,7 +2536,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
     }
 
     // Get the base file/folder shared
-    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size, is_one_time_note FROM files WHERE id = $1', [share.file_id]);
     if (baseFileRes.rows.length === 0) {
       return res.status(404).json({ error: 'Shared content no longer exists.' });
     }
@@ -2632,6 +2632,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         name: baseFile.name,
         is_folder: baseFile.is_folder,
         size: baseFile.size,
+        is_one_time_note: baseFile.is_one_time_note,
       },
       currentFolderId,
       files,

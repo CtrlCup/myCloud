@@ -52,6 +52,18 @@
       </form>
     </div>
 
+    <!-- Sicherheits-Bestätigung vor dem Anzeigen einer Einmalnachricht -->
+    <div class="card" id="note-security-block-view" style="display: none; max-width: 500px; margin: 6rem auto; padding: 2.5rem; text-align: center;">
+      <i data-lucide="shield-alert" style="width: 48px; height: 48px; color: #ffaa00; margin-bottom: 1rem;"></i>
+      <h3>Einmalige Nachricht</h3>
+      <p style="color: var(--color-text-muted); font-size: 0.9rem; margin-bottom: 1.5rem;">
+        Diese Nachricht kann nur eine begrenzte Anzahl Mal angesehen werden. Sobald du sie anzeigst, zählt das als eine Ansicht — nach der letzten Ansicht wird sie unwiderruflich gelöscht. Zeige sie nur an, wenn du bereit dazu bist.
+      </p>
+      <button type="button" class="btn btn-primary" id="note-security-confirm-btn" style="width: 100%; justify-content: center;">
+        <i data-lucide="eye"></i> Nachricht jetzt anzeigen
+      </button>
+    </div>
+
     <main class="explorer" id="main-explorer">
 
       <!-- Einzeldatei-Ansicht (Download / Vorschau) -->
@@ -264,6 +276,12 @@
     let breadcrumbsHistory = [];
     let shareBranding = null;
     let hasAutoOpened = false;   // only auto-open a single-file viewer once
+    let noteViewConfirmed = false;   // gate for the one-time-note security confirmation screen
+
+    document.getElementById('note-security-confirm-btn').onclick = () => {
+      noteViewConfirmed = true;
+      loadShareData(currentFolderId);
+    };
 
     // Active theme (explicit override or system preference)
     function getActiveTheme() {
@@ -369,6 +387,20 @@
           return;
         } else {
           document.getElementById('password-block-view').style.display = 'none';
+        }
+
+        // One-time notes must never be shown (and therefore consumed/counted) just because the
+        // page loaded — show a confirmation screen first and only proceed once the visitor
+        // deliberately opts in.
+        if (data.baseFile.is_one_time_note && !noteViewConfirmed) {
+          document.getElementById('note-security-block-view').style.display = 'block';
+          document.getElementById('main-explorer').style.display = 'none';
+          lucide.createIcons();
+          return;
+        }
+        document.getElementById('note-security-block-view').style.display = 'none';
+
+        if (!shareConfig.passwordRequired) {
           const explorer = document.getElementById('main-explorer');
           explorer.style.display = 'block';
           explorer.classList.remove('view-enter');
