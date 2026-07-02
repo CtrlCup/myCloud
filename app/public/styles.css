@@ -2412,6 +2412,84 @@ tbody tr {
   background: var(--editor-bg);
 }
 
+/* ─── Custom <select> replacement (native option lists ignore the app's dark theme and render
+   with the OS's own light-on-white styling) ─── */
+.custom-select-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  padding: 0.4rem 0.75rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: var(--transition);
+}
+.custom-select-btn:hover {
+  border-color: rgba(var(--color-accent-rgb), 0.4);
+}
+.custom-select-menu {
+  min-width: 200px;
+  max-height: 260px;
+  overflow-y: auto;
+  /* .context-menu's base z-index (9999) sits below share/settings modals (10010+) — without
+     this override menus opened from inside those modals rendered in the DOM but stayed
+     invisible behind them. */
+  z-index: 10020;
+}
+
+/* ─── Number picker (scrollable wheel) for the share-link downloads limit ─── */
+.number-picker {
+  min-width: 140px;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  z-index: 10020;
+}
+.number-picker-unlimited {
+  width: 100%;
+  text-align: center;
+}
+.number-picker-wheel {
+  position: relative;
+  height: 168px;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  border-top: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
+}
+.number-picker-wheel::-webkit-scrollbar {
+  width: 0;
+}
+.number-picker-wheel-pad {
+  height: 72px;
+  flex-shrink: 0;
+}
+.number-picker-option {
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  scroll-snap-align: center;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, font-size 0.15s ease;
+}
+.number-picker-option.selected {
+  color: var(--color-accent);
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
 /* ─── PDF viewer page-layout toggle ─── */
 .pdf-layout-toggle {
   display: flex;

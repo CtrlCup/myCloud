@@ -834,7 +834,7 @@
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
           <div class="form-group" style="margin-bottom: 0; display: flex; flex-direction: column;">
             <label for="share-expiry-type" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Ablaufzeitpunkt definieren</label>
-            <select id="share-expiry-type" class="form-control" style="padding: 0.4rem 0.75rem; font-size: 0.85rem; background: var(--input-bg); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-sm); outline: none; cursor: pointer; width: 100%;">
+            <select id="share-expiry-type" class="form-control" style="display: none;">
               <option value="none">Nie (Unbegrenzt)</option>
               <option value="hours">Stunden</option>
               <option value="days">Tage</option>
@@ -843,7 +843,7 @@
           </div>
           <div class="form-group" style="margin-bottom: 0;">
             <label for="share-max-downloads" style="font-size: 0.8rem; margin-bottom: 0.25rem;">Klicks/Downloads Limit</label>
-            <input type="number" id="share-max-downloads" class="form-control" placeholder="Unbegrenzt" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+            <input type="number" id="share-max-downloads" class="form-control" placeholder="Unbegrenzt" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;" readonly>
           </div>
         </div>
 
@@ -1468,6 +1468,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.12"></script>
+  <script src="/app.js?v=1.1.13"></script>
 </body>
 </html>

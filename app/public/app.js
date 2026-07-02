@@ -2495,7 +2495,156 @@ shareCanCollabCheck.onchange = () => {
 shareCanWriteCheck.onchange = () => {
   if (!shareCanWriteCheck.checked) shareCanCollabCheck.checked = false;
 };
+// Wraps a native <select> with a custom button + dropdown menu styled like the rest of the
+// app — native <option> lists render with the OS's own light-on-white styling regardless of
+// page CSS, which was unreadable against this app's dark theme. The underlying <select> stays
+// in the DOM (just hidden) and its value/change-event keep working exactly as before, so every
+// existing .value read/write and .onchange handler elsewhere in the code needs no changes.
+function styleSelectAsDropdown(select) {
+  const wrap = document.createElement('div');
+  wrap.style.width = '100%';
+  select.insertAdjacentElement('afterend', wrap);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'custom-select-btn';
+  const label = document.createElement('span');
+  const chevron = document.createElement('i');
+  chevron.setAttribute('data-lucide', 'chevron-down');
+  chevron.style.cssText = 'width:14px;height:14px;opacity:0.6;flex-shrink:0;';
+  btn.appendChild(label);
+  btn.appendChild(chevron);
+  wrap.appendChild(btn);
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  const syncLabel = () => {
+    label.textContent = select.options[select.selectedIndex] ? select.options[select.selectedIndex].textContent : '';
+  };
+  syncLabel();
+  select._syncCustomLabel = syncLabel;
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    if (document.querySelector('.custom-select-menu')) {
+      closeCustomSelectMenus();
+      return;
+    }
+    closeCustomSelectMenus();
+
+    const menu = document.createElement('div');
+    menu.className = 'card context-menu custom-select-menu';
+    menu.innerHTML = Array.from(select.options).map((opt, i) => `
+      <button type="button" class="btn-menu-item ${i === select.selectedIndex ? 'active' : ''}" data-index="${i}">
+        <span>${escapeHtml(opt.textContent)}</span>
+      </button>
+    `).join('');
+    document.body.appendChild(menu);
+
+    const rect = btn.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    let left = rect.left;
+    if (left + menuRect.width > window.innerWidth - 12) left = window.innerWidth - menuRect.width - 12;
+    menu.style.left = `${Math.max(12, left)}px`;
+    menu.style.top = `${rect.bottom + 6}px`;
+    menu.style.width = `${rect.width}px`;
+
+    menu.querySelectorAll('[data-index]').forEach(item => {
+      item.onclick = (ev) => {
+        ev.stopPropagation();
+        select.selectedIndex = parseInt(item.dataset.index, 10);
+        syncLabel();
+        select.dispatchEvent(new Event('change'));
+        closeCustomSelectMenus();
+      };
+    });
+
+    setTimeout(() => document.addEventListener('click', closeCustomSelectMenus, { once: true }), 50);
+  };
+}
+
+function closeCustomSelectMenus() {
+  document.querySelectorAll('.custom-select-menu, .number-picker').forEach(m => m.remove());
+}
+
 const shareExpiryType = document.getElementById('share-expiry-type');
+styleSelectAsDropdown(shareExpiryType);
+
+// Scrollable number picker (Apple-picker-wheel-inspired, but in the app's own glass-menu look)
+// for the share-link downloads limit, instead of a bare number input.
+const NUMBER_PICKER_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 250, 500, 1000];
+const NUMBER_PICKER_OPTION_HEIGHT = 24;
+
+function openNumberPicker(input) {
+  if (document.querySelector('.number-picker')) {
+    closeCustomSelectMenus();
+    return;
+  }
+  closeCustomSelectMenus();
+
+  const currentVal = input.value ? parseInt(input.value, 10) : null;
+  const values = [...NUMBER_PICKER_VALUES];
+  if (currentVal && !values.includes(currentVal)) {
+    values.push(currentVal);
+    values.sort((a, b) => a - b);
+  }
+
+  const menu = document.createElement('div');
+  menu.className = 'card context-menu number-picker';
+  menu.innerHTML = `
+    <button type="button" class="btn-menu-item number-picker-unlimited">Unbegrenzt</button>
+    <div class="number-picker-wheel">
+      <div class="number-picker-wheel-pad"></div>
+      ${values.map(v => `<div class="number-picker-option" data-value="${v}">${v}</div>`).join('')}
+      <div class="number-picker-wheel-pad"></div>
+    </div>
+  `;
+  document.body.appendChild(menu);
+
+  const rect = input.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  let left = rect.left;
+  if (left + menuRect.width > window.innerWidth - 12) left = window.innerWidth - menuRect.width - 12;
+  menu.style.left = `${Math.max(12, left)}px`;
+  menu.style.top = `${rect.bottom + 6}px`;
+  menu.style.width = `${rect.width}px`;
+
+  const wheel = menu.querySelector('.number-picker-wheel');
+  const options = Array.from(menu.querySelectorAll('.number-picker-option'));
+
+  const updateSelected = () => {
+    const centerIndex = Math.min(options.length - 1, Math.max(0, Math.round(wheel.scrollTop / NUMBER_PICKER_OPTION_HEIGHT)));
+    options.forEach((opt, i) => opt.classList.toggle('selected', i === centerIndex));
+  };
+  wheel.addEventListener('scroll', updateSelected);
+
+  options.forEach((opt, i) => {
+    opt.onclick = () => wheel.scrollTo({ top: i * NUMBER_PICKER_OPTION_HEIGHT, behavior: 'smooth' });
+  });
+
+  const initialIndex = currentVal ? values.indexOf(currentVal) : -1;
+  wheel.scrollTop = initialIndex >= 0 ? initialIndex * NUMBER_PICKER_OPTION_HEIGHT : 0;
+  updateSelected();
+
+  menu.querySelector('.number-picker-unlimited').onclick = (e) => {
+    e.stopPropagation();
+    input.value = '';
+    menu.remove();
+    document.removeEventListener('click', closeHandler);
+  };
+
+  const closeHandler = (e) => {
+    if (!menu.contains(e.target) && e.target !== input) {
+      const centerIndex = Math.round(wheel.scrollTop / NUMBER_PICKER_OPTION_HEIGHT);
+      if (options[centerIndex]) input.value = options[centerIndex].dataset.value;
+      menu.remove();
+      document.removeEventListener('click', closeHandler);
+    }
+  };
+  setTimeout(() => document.addEventListener('click', closeHandler), 50);
+}
+
+const shareMaxDownloadsInput = document.getElementById('share-max-downloads');
+shareMaxDownloadsInput.onclick = () => openNumberPicker(shareMaxDownloadsInput);
 const shareExpiryHoursInput = document.getElementById('share-expiry-hours');
 const shareExpiryDaysInput = document.getElementById('share-expiry-days');
 const shareExpiryCustomInput = document.getElementById('share-expiry-custom');
@@ -2528,7 +2677,7 @@ async function openShareModal(file) {
   shareCanDownloadCheck.checked = true;
   shareCanZipCheck.checked = true;
   shareCanCollabCheck.checked = false;
-  if (shareExpiryType) shareExpiryType.value = 'none';
+  if (shareExpiryType) { shareExpiryType.value = 'none'; shareExpiryType._syncCustomLabel?.(); }
   if (shareExpiryHoursInput) shareExpiryHoursInput.value = '';
   if (shareExpiryDaysInput) shareExpiryDaysInput.value = '';
   if (shareExpiryCustomInput) shareExpiryCustomInput.value = '';
@@ -2602,6 +2751,7 @@ async function openShareModal(file) {
         }
         if (shareExpiryType) {
           shareExpiryType.value = 'custom';
+          shareExpiryType._syncCustomLabel?.();
         }
         updateShareExpiryUI();
       }
