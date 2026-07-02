@@ -1476,10 +1476,7 @@
       showToast('Bereite Office-Editor vor...');
 
       try {
-        const guestName = localStorage.getItem('shareGuestName') || `Gast-${Math.random().toString(36).substring(2, 6)}`;
-        localStorage.setItem('shareGuestName', guestName);
-
-        const res = await fetch(`/api/public/shares/${slug}/eurooffice/config/${fileId}?name=${encodeURIComponent(guestName)}`);
+        const res = await fetch(`/api/public/shares/${slug}/eurooffice/config/${fileId}`);
         if (!res.ok) {
           const err = await res.json();
           showToast(err.error || 'Fehler beim Laden der Office-Konfiguration.');

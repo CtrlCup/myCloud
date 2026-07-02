@@ -1959,6 +1959,13 @@ function getOfficeDocType(ext) {
   return 'word';
 }
 
+// Picks a random colour from the same palette used for code-editor collab cursors (COLLAB_COLORS,
+// defined further down with the WebSocket collab setup), so each EuroOffice co-author gets a
+// distinct highlight/cursor colour.
+function pickRandomCollabColor() {
+  return COLLAB_COLORS[Math.floor(Math.random() * COLLAB_COLORS.length)].replace('#', '');
+}
+
 // Get EuroOffice Config for editing
 app.get('/api/eurooffice/config/:id', async (req, res) => {
   const userId = req.session.userId;
@@ -2017,7 +2024,8 @@ app.get('/api/eurooffice/config/:id', async (req, res) => {
         callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}?userId=${userId}`,
         user: {
           id: `${userId}`,
-          name: user.username
+          name: user.username,
+          color: pickRandomCollabColor()
         },
         mode: 'edit',
         lang: 'de'
@@ -2610,7 +2618,7 @@ app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) =
     }
 
     const guestId = `guest_${crypto.randomBytes(4).toString('hex')}`;
-    const guestName = (req.query.name ? String(req.query.name) : '').trim().slice(0, 40) || `Gast-${guestId.slice(-4)}`;
+    const guestName = COLLAB_ANIMALS[Math.floor(Math.random() * COLLAB_ANIMALS.length)];
 
     const token = crypto.randomBytes(16).toString('hex');
     officeTokens.set(token, {
@@ -2635,7 +2643,8 @@ app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) =
         callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}`,
         user: {
           id: guestId,
-          name: guestName
+          name: guestName,
+          color: pickRandomCollabColor()
         },
         mode: share.can_write ? 'edit' : 'view',
         lang: 'de'
