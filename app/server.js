@@ -1376,6 +1376,30 @@ app.delete('/api/files/:id', requireAuth, requirePermission('delete'), async (re
   }
 });
 
+// Rename a file or folder — only the human-facing name changes, the on-disk physical
+// filename (a random UUID, unrelated to the display name) stays put, so no file-system move
+// is needed here.
+app.put('/api/files/:id/rename', requireAuth, requirePermission('rename'), async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+  const newName = (req.body.name || '').trim();
+
+  if (!newName) return res.status(400).json({ error: 'Name darf nicht leer sein.' });
+  if (newName.length > 255) return res.status(400).json({ error: 'Name ist zu lang.' });
+  if (newName.includes('/') || newName.includes('\\')) return res.status(400).json({ error: 'Name darf keine Schrägstriche enthalten.' });
+
+  try {
+    const isOwner = await verifyFileOwner(fileId, userId);
+    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+
+    const result = await pool.query('UPDATE files SET name = $1 WHERE id = $2 RETURNING id, name', [newName, fileId]);
+    res.json({ success: true, name: result.rows[0].name });
+  } catch (err) {
+    console.error('Error renaming file:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Move multiple files/folders to a target folder
 app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), async (req, res) => {
   const { fileIds, targetFolderId } = req.body;

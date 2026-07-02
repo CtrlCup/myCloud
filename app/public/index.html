@@ -1276,25 +1276,28 @@
           <div class="editor-file-badge">
             <i data-lucide="file-code" style="width:15px;height:15px;"></i>
           </div>
-          <span id="code-editor-title" style="font-weight:600; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:260px; color:var(--editor-fg);">Editor</span>
+          <span id="code-editor-title" title="Klicken zum Umbenennen" style="font-weight:600; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:260px; color:var(--editor-fg); cursor:text; border-bottom:1px dashed transparent;">Editor</span>
+          <input id="code-editor-title-input" type="text" style="display:none; font-weight:600; font-size:0.85rem; max-width:260px; width:220px; color:var(--editor-fg); background:rgba(255,255,255,0.08); border:1px solid var(--editor-border); border-radius:4px; padding:0.1rem 0.4rem; outline:none; font-family:inherit;">
           <div id="collab-users-container" class="editor-collab-pill" style="display:none;">
             <span class="editor-collab-dot"></span>
             <span id="collab-users-list" style="font-size:0.75rem; font-weight:500;">Nur du</span>
           </div>
         </div>
 
-        <!-- Center: language selector -->
-        <div class="editor-lang-wrap">
-          <i data-lucide="code-2" style="width:13px;height:13px;opacity:0.6;"></i>
-          <button type="button" id="monaco-lang-btn" class="editor-lang-select" title="Programmiersprache wechseln">
-            <span id="monaco-lang-btn-label">Plaintext</span>
-            <i data-lucide="chevron-down" style="width:12px;height:12px;opacity:0.7;"></i>
-          </button>
+        <!-- Center: save status + language selector -->
+        <div style="display:flex; align-items:center; gap:0.6rem;">
+          <span id="editor-save-status" class="editor-save-status"></span>
+          <div class="editor-lang-wrap">
+            <i data-lucide="code-2" style="width:13px;height:13px;opacity:0.6;"></i>
+            <button type="button" id="monaco-lang-btn" class="editor-lang-select" title="Programmiersprache wechseln">
+              <span id="monaco-lang-btn-label">Plaintext</span>
+              <i data-lucide="chevron-down" style="width:12px;height:12px;opacity:0.7;"></i>
+            </button>
+          </div>
         </div>
 
-        <!-- Right: save status + buttons -->
+        <!-- Right: buttons -->
         <div class="editor-titlebar-right">
-          <span id="editor-save-status" class="editor-save-status"></span>
           <button id="save-code-editor-btn" class="editor-btn editor-btn-save" title="Speichern (Strg+S)">
             <i data-lucide="save" style="width:15px;height:15px;"></i>
             <span>Speichern</span>
@@ -1539,6 +1542,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.17"></script>
+  <script src="/app.js?v=1.1.18"></script>
 </body>
 </html>

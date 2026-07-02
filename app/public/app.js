@@ -5453,6 +5453,11 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
       historyBtn.onclick = () => toggleEditorHistoryPanel(fileId);
     }
 
+    // Click the title to rename in place — authenticated owner only, matching Teilen/Verlauf
+    const titleEl = document.getElementById('code-editor-title');
+    titleEl.style.cursor = (isPublic || readOnly) ? 'default' : 'text';
+    titleEl.onclick = (isPublic || readOnly) ? null : () => startEditorTitleRename(fileId);
+
     const container = document.getElementById('monaco-editor-container');
     container.innerHTML = '';
 
@@ -5644,6 +5649,66 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
     console.error('Error opening code editor:', err);
     showToast('Code-Editor konnte nicht geladen werden.');
   }
+}
+
+function startEditorTitleRename(fileId) {
+  const titleEl = document.getElementById('code-editor-title');
+  const input = document.getElementById('code-editor-title-input');
+  if (!titleEl || !input || input.style.display !== 'none') return;
+
+  const originalName = titleEl.textContent;
+  input.value = originalName;
+  titleEl.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+  // Select just the filename part (before the extension), matching most file managers
+  const dotIndex = originalName.lastIndexOf('.');
+  input.setSelectionRange(0, dotIndex > 0 ? dotIndex : originalName.length);
+
+  let settled = false;
+  const finish = async (commit) => {
+    if (settled) return;
+    settled = true;
+    const newName = input.value.trim();
+
+    if (!commit || !newName || newName === originalName) {
+      titleEl.style.display = '';
+      input.style.display = 'none';
+      return;
+    }
+
+    try {
+      const r = await fetch(`/api/files/${fileId}/rename`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        titleEl.textContent = data.name;
+        currentEditorLanguage = getMonacoLanguage(data.name);
+        setEditorLanguageLabel(currentEditorLanguage);
+        if (monacoEditorInstance) monaco.editor.setModelLanguage(monacoEditorInstance.getModel(), currentEditorLanguage);
+        showToast('Umbenannt.');
+        loadFiles(currentFolderId);
+      } else {
+        titleEl.textContent = originalName;
+        showToast(data.error || 'Fehler beim Umbenennen.');
+      }
+    } catch {
+      titleEl.textContent = originalName;
+      showToast('Verbindungsfehler.');
+    }
+
+    titleEl.style.display = '';
+    input.style.display = 'none';
+  };
+
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  };
+  input.onblur = () => finish(true);
 }
 
 function formatRelativeTime(dateStr) {
