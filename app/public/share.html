@@ -1263,16 +1263,23 @@
             if (!monacoEditorInstance || readOnly) return;
             const currentContent = monacoEditorInstance.getValue();
             try {
-              const saveUrl = isPublic 
+              const saveUrl = isPublic
                 ? `/api/public/shares/${slug}/content/${fileId}`
                 : `/api/files/content/${fileId}`;
-              await fetch(saveUrl, {
+              const res = await fetch(saveUrl, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content: currentContent })
               });
+              // fetch() only rejects on a network failure, not an HTTP error status — without
+              // this check, a share that expired or lost write access mid-session would fail
+              // to save silently, with no indication the edit was lost.
+              if (!res.ok) {
+                showToast('Automatisches Speichern fehlgeschlagen. Deine Änderungen wurden möglicherweise nicht gespeichert.');
+              }
             } catch (e) {
               console.error('Autosave error:', e);
+              showToast('Automatisches Speichern fehlgeschlagen. Deine Änderungen wurden möglicherweise nicht gespeichert.');
             }
           }, 1500);
         });

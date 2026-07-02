@@ -5071,9 +5071,13 @@ async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content: currentContent })
           });
-          if (r.ok && typeof showEditorSaveStatus === 'function') showEditorSaveStatus('✓ Auto-Gespeichert');
+          if (typeof showEditorSaveStatus === 'function') {
+            if (r.ok) showEditorSaveStatus('✓ Auto-Gespeichert');
+            else showEditorSaveStatus('Auto-Speichern fehlgeschlagen', true);
+          }
         } catch (e) {
           console.error('Autosave error:', e);
+          if (typeof showEditorSaveStatus === 'function') showEditorSaveStatus('Verbindungsfehler', true);
         }
       }, 1500);
     });
