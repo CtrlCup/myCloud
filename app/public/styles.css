@@ -1232,7 +1232,9 @@ tr:hover td {
   transform: translateY(-80px);
   opacity: 0;
   transition: var(--transition);
-  z-index: 2000;
+  /* Must outrank every modal it can be triggered from (share modal 10010, confirm dialog
+     10030, ...) so the toast is never silently rendered behind an open overlay. */
+  z-index: 10040;
   font-size: 0.9rem;
 }
 

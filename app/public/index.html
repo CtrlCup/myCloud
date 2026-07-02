@@ -884,14 +884,14 @@
         <div id="share-expiry-hours-container" style="display: none; margin-top: -0.25rem;">
           <div class="form-group" style="margin-bottom: 0;">
             <label for="share-expiry-hours" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">In wie vielen Stunden soll die Freigabe ablaufen?</label>
-            <input type="number" id="share-expiry-hours" class="form-control" placeholder="z.B. 3" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+            <input type="number" id="share-expiry-hours" class="form-control" placeholder="z.B. 3" min="1" readonly style="padding: 0.4rem 0.75rem; font-size: 0.85rem; cursor: pointer;">
           </div>
         </div>
 
         <div id="share-expiry-days-container" style="display: none; margin-top: -0.25rem;">
           <div class="form-group" style="margin-bottom: 0;">
             <label for="share-expiry-days" style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 0.25rem; display: block;">In wie vielen Tagen soll die Freigabe ablaufen?</label>
-            <input type="number" id="share-expiry-days" class="form-control" placeholder="z.B. 7" min="1" style="padding: 0.4rem 0.75rem; font-size: 0.85rem;">
+            <input type="number" id="share-expiry-days" class="form-control" placeholder="z.B. 7" min="1" readonly style="padding: 0.4rem 0.75rem; font-size: 0.85rem; cursor: pointer;">
           </div>
         </div>
 
@@ -1570,6 +1570,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.20"></script>
+  <script src="/app.js?v=1.1.21"></script>
 </body>
 </html>

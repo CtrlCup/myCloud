@@ -2674,15 +2674,18 @@ styleSelectAsDropdown(shareExpiryType);
 const NUMBER_PICKER_VALUES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200, 250, 500, 1000];
 const NUMBER_PICKER_OPTION_HEIGHT = 24;
 
-function openNumberPicker(input) {
+// opts.values overrides the default preset list; opts.unlimitedLabel omitted disables the
+// "Unbegrenzt" shortcut button entirely (used for expiry hours/days, which have no such concept).
+function openNumberPicker(input, opts = {}) {
   if (document.querySelector('.number-picker')) {
     closeCustomSelectMenus();
     return;
   }
   closeCustomSelectMenus();
 
+  const presetValues = opts.values || NUMBER_PICKER_VALUES;
   const currentVal = input.value ? parseInt(input.value, 10) : null;
-  const values = [...NUMBER_PICKER_VALUES];
+  const values = [...presetValues];
   if (currentVal && !values.includes(currentVal)) {
     values.push(currentVal);
     values.sort((a, b) => a - b);
@@ -2691,7 +2694,7 @@ function openNumberPicker(input) {
   const menu = document.createElement('div');
   menu.className = 'card context-menu number-picker';
   menu.innerHTML = `
-    <button type="button" class="btn-menu-item number-picker-unlimited">Unbegrenzt</button>
+    ${opts.unlimitedLabel ? `<button type="button" class="btn-menu-item number-picker-unlimited">${escapeHtml(opts.unlimitedLabel)}</button>` : ''}
     <div class="number-picker-wheel">
       <div class="number-picker-wheel-pad"></div>
       ${values.map(v => `<div class="number-picker-option" data-value="${v}">${v}</div>`).join('')}
@@ -2725,12 +2728,15 @@ function openNumberPicker(input) {
   wheel.scrollTop = initialIndex >= 0 ? initialIndex * NUMBER_PICKER_OPTION_HEIGHT : 0;
   updateSelected();
 
-  menu.querySelector('.number-picker-unlimited').onclick = (e) => {
-    e.stopPropagation();
-    input.value = '';
-    menu.remove();
-    document.removeEventListener('click', closeHandler);
-  };
+  const unlimitedBtn = menu.querySelector('.number-picker-unlimited');
+  if (unlimitedBtn) {
+    unlimitedBtn.onclick = (e) => {
+      e.stopPropagation();
+      input.value = '';
+      menu.remove();
+      document.removeEventListener('click', closeHandler);
+    };
+  }
 
   const closeHandler = (e) => {
     if (!menu.contains(e.target) && e.target !== input) {
@@ -2744,9 +2750,11 @@ function openNumberPicker(input) {
 }
 
 const shareMaxDownloadsInput = document.getElementById('share-max-downloads');
-shareMaxDownloadsInput.onclick = () => openNumberPicker(shareMaxDownloadsInput);
+shareMaxDownloadsInput.onclick = () => openNumberPicker(shareMaxDownloadsInput, { unlimitedLabel: 'Unbegrenzt' });
 const shareExpiryHoursInput = document.getElementById('share-expiry-hours');
 const shareExpiryDaysInput = document.getElementById('share-expiry-days');
+shareExpiryHoursInput.onclick = () => openNumberPicker(shareExpiryHoursInput, { values: [1, 2, 3, 6, 12, 18, 24, 48, 72] });
+shareExpiryDaysInput.onclick = () => openNumberPicker(shareExpiryDaysInput, { values: [1, 2, 3, 5, 7, 14, 30, 60, 90] });
 const shareExpiryCustomInput = document.getElementById('share-expiry-custom');
 const deleteShareBtn = document.getElementById('delete-share-btn');
 const shareResultSection = document.getElementById('share-result-section');
@@ -4051,6 +4059,9 @@ async function loadUserShares() {
         <td><span style="font-size: 0.8rem; color: var(--color-text-muted);">${permissions.join(', ')}</span></td>
         <td>${expiresText}</td>
         <td style="white-space: nowrap;">
+          <button class="btn-icon btn-action-copy-share" title="Link kopieren" style="padding: 5px; background: transparent; border: none; color: var(--color-text-muted);">
+            <i data-lucide="link" style="width: 15px; height: 15px;"></i>
+          </button>
           <button class="btn-icon btn-action-edit-share" title="Bearbeiten" style="padding: 5px; background: transparent; border: none; color: var(--color-text-muted);">
             <i data-lucide="pencil" style="width: 15px; height: 15px;"></i>
           </button>
@@ -4066,6 +4077,11 @@ async function loadUserShares() {
         if (checkbox.checked) selectedShareIds.add(share.id);
         else selectedShareIds.delete(share.id);
         renderSharesSelectionState();
+      };
+
+      row.querySelector('.btn-action-copy-share').onclick = () => {
+        navigator.clipboard.writeText(`${window.location.origin}/s/${share.slug}`);
+        showToast('Link kopiert.');
       };
 
       row.querySelector('.btn-action-edit-share').onclick = () => openShareEditModal([share.id]);
