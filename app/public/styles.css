@@ -1692,15 +1692,10 @@ tr:hover td {
 }
 
 .search-container.search-expanded .search-expandable {
-  max-width: 360px;
+  max-width: 520px;
   opacity: 1;
   pointer-events: auto;
   margin-left: 0.35rem;
-}
-
-.search-container.search-expanded .search-shortcut-hint {
-  opacity: 1 !important;
-  transition-delay: 0.15s;
 }
 
 .search-toggle-btn {
