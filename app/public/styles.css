@@ -682,14 +682,14 @@ header {
   height: 50%;
 }
 
-/* Grid: name sits low, right under the thumbnail */
+/* Grid: name sits at the bottom, below type + size */
 .file-grid:not(.list-view) .file-info-group {
-  order: 2;
+  order: 4;
   width: 100%;
-  margin-bottom: 0.1rem;
+  margin-top: 0.3rem;
 }
 
-/* Grid: type label below name */
+/* Grid: type label right under the thumbnail */
 .file-type-label {
   display: none;
 }
@@ -698,14 +698,14 @@ header {
   display: none;
 }
 .file-grid:not(.list-view) .file-type-label {
-  order: 3;
+  order: 2;
   display: block;
   font-size: 0.68rem;
   font-weight: 600;
   color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  margin-top: 0.3rem;
+  margin-top: 0.1rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -713,9 +713,9 @@ header {
   text-align: center;
 }
 
-/* Grid: size at bottom */
+/* Grid: size below type label */
 .file-grid:not(.list-view) .file-info {
-  order: 4;
+  order: 3;
   font-size: 0.72rem;
   margin-top: 0.1rem;
 }
