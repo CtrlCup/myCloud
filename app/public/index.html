@@ -16,6 +16,8 @@
   <script src="https://unpkg.com/@simplewebauthn/browser/dist/bundle/index.umd.min.js"></script>
   <!-- Custom Stylesheet -->
   <link rel="stylesheet" href="/styles.css">
+  <!-- PDF.js viewer component styles (page/text-layer rendering) -->
+  <link rel="stylesheet" href="/pdfjs/web/pdf_viewer.css">
 </head>
 <body>
 
@@ -1345,12 +1347,22 @@
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="pdf-viewer-title">
           <i data-lucide="file-text"></i> PDF-Vorschau
         </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <div class="pdf-layout-toggle" id="pdf-layout-toggle">
+            <button type="button" class="pdf-layout-btn active" data-spread="0" title="Einzelseite"><i data-lucide="file"></i></button>
+            <button type="button" class="pdf-layout-btn" data-spread="1" title="Zwei Seiten (Seite 1 einzeln)"><i data-lucide="book-open"></i></button>
+            <button type="button" class="pdf-layout-btn" data-spread="2" title="Zwei Seiten (Seite 1 & 2 zusammen)"><i data-lucide="gallery-horizontal"></i></button>
+          </div>
+          <button type="button" class="pdf-layout-btn" id="pdf-fit-page-btn" title="An Fenster anpassen (Höhe/Breite)" style="background: rgba(255,255,255,0.05); border: 1px solid var(--color-border); width: 34px; height: 34px;"><i data-lucide="scan"></i></button>
+        </div>
         <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
           <i data-lucide="x"></i>
         </button>
       </div>
-      <div style="flex: 1; padding: 0; overflow: hidden; background: #525659; display: flex; justify-content: center; align-items: center;">
-        <iframe id="pdf-viewer-iframe" style="width: 100%; height: 100%; border: none; background: #525659;" allow="autoplay"></iframe>
+      <div style="flex: 1; position: relative; overflow: hidden; background: #525659;">
+        <div id="pdf-viewer-container" style="position: absolute; inset: 0; overflow: auto;">
+          <div id="pdf-viewer-inner" class="pdfViewer"></div>
+        </div>
       </div>
     </div>
   </div>

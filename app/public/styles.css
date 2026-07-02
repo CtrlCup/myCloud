@@ -2412,6 +2412,54 @@ tbody tr {
   background: var(--editor-bg);
 }
 
+/* ─── PDF viewer page-layout toggle ─── */
+.pdf-layout-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.2rem;
+}
+.pdf-layout-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.pdf-layout-btn:hover {
+  color: var(--color-text);
+  background: rgba(255,255,255,0.08);
+}
+.pdf-layout-btn.active {
+  color: #fff;
+  background: var(--color-accent);
+}
+.pdf-layout-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* pdf.js renders each page as its own white sheet; give the scroll area breathing room and
+   center pages so it doesn't look like a raw unstyled dump. */
+#pdf-viewer-container {
+  padding: 1.5rem 0;
+}
+#pdf-viewer-inner.pdfViewer .page {
+  margin: 0 auto 1.5rem auto;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.4);
+  border: none;
+}
+
 /* ─── Image/Video viewer info panel ─── */
 .viewer-info-panel {
   position: absolute;

@@ -155,6 +155,15 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Self-hosted PDF.js viewer app (not just the bare library) — its prebuilt UI already has a
+// page-layout menu with single/two-page/two-page-with-cover-page modes, which is exactly the
+// "two-page view with control over which side page 1 lands on" the in-house PDF viewer wants,
+// so embedding it directly is far less work (and more correct) than reimplementing spread-view
+// pagination by hand. Served from node_modules rather than vendored into public/ so it stays in
+// sync with the pdfjs-dist version in package.json. The viewer shell itself needs no auth (it's
+// just static JS/HTML); the PDF it loads goes through our existing authenticated download route.
+app.use('/pdfjs', express.static(path.join(__dirname, 'node_modules/pdfjs-dist')));
+
 // API-Key Authentication (Bearer token, for external/app clients)
 // Populates req.session.userId/.username/.role from a personal API key, exactly like a browser
 // login would — every existing route below reads those three session fields, so this lets the

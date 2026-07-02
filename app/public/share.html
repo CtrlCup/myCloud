@@ -12,6 +12,8 @@
   <script src="https://unpkg.com/lucide@latest"></script>
   <!-- Custom Stylesheet -->
   <link rel="stylesheet" href="/styles.css">
+  <!-- PDF.js viewer component styles (page/text-layer rendering) -->
+  <link rel="stylesheet" href="/pdfjs/web/pdf_viewer.css">
 </head>
 <body>
 
@@ -217,12 +219,22 @@
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="pdf-viewer-title">
           <i data-lucide="file-text"></i> PDF-Vorschau
         </div>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <div class="pdf-layout-toggle" id="pdf-layout-toggle">
+            <button type="button" class="pdf-layout-btn active" data-spread="0" title="Einzelseite"><i data-lucide="file"></i></button>
+            <button type="button" class="pdf-layout-btn" data-spread="1" title="Zwei Seiten (Seite 1 einzeln)"><i data-lucide="book-open"></i></button>
+            <button type="button" class="pdf-layout-btn" data-spread="2" title="Zwei Seiten (Seite 1 & 2 zusammen)"><i data-lucide="gallery-horizontal"></i></button>
+          </div>
+          <button type="button" class="pdf-layout-btn" id="pdf-fit-page-btn" title="An Fenster anpassen (Höhe/Breite)" style="background: rgba(255,255,255,0.05); border: 1px solid var(--color-border); width: 34px; height: 34px;"><i data-lucide="scan"></i></button>
+        </div>
         <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
           <i data-lucide="x"></i>
         </button>
       </div>
-      <div style="flex: 1; padding: 0; overflow: hidden; background: #525659; display: flex; justify-content: center; align-items: center;">
-        <iframe id="pdf-viewer-iframe" style="width: 100%; height: 100%; border: none; background: #525659;" allow="autoplay"></iframe>
+      <div style="flex: 1; position: relative; overflow: hidden; background: #525659;">
+        <div id="pdf-viewer-container" style="position: absolute; inset: 0; overflow: auto;">
+          <div id="pdf-viewer-inner" class="pdfViewer"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -1605,28 +1617,113 @@
       player.src = '';
     };
 
-    function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
+    // pdfjs-dist only ships the library + the reusable PDFViewer component on npm (not the
+    // prebuilt viewer.html app, which Mozilla only distributes as a separate GitHub release
+    // ZIP) — so the two-page/spread view here is built directly on top of PDFViewer's own
+    // documented spreadMode property (0=none, 1=odd, 2=even).
+    let pdfjsLib = null;
+    let pdfjsViewerLib = null;
+    let currentPdfViewer = null;
+    let currentPdfLoadingTask = null;
+
+    async function loadPdfJsLibs() {
+      if (!pdfjsLib) {
+        pdfjsLib = await import('/pdfjs/build/pdf.mjs');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdfjs/build/pdf.worker.mjs';
+      }
+      if (!pdfjsViewerLib) {
+        pdfjsViewerLib = await import('/pdfjs/web/pdf_viewer.mjs');
+      }
+      return { pdfjsLib, pdfjsViewerLib };
+    }
+
+    async function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
       const overlay = document.getElementById('pdf-viewer-overlay');
-      const iframe = document.getElementById('pdf-viewer-iframe');
       const title = document.getElementById('pdf-viewer-title');
 
-      title.innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
+      title.innerHTML = `<i data-lucide="file-text"></i> ${escapeHtml(fileName)}`;
       lucide.createIcons();
 
-      const sourceUrl = isPublic 
+      overlay.style.display = 'flex';
+      overlay.classList.add('active');
+
+      const sourceUrl = isPublic
         ? `/api/public/shares/${slug}/download/${fileId}?inline=true`
         : `/api/files/download/${fileId}?inline=true`;
 
-      iframe.src = sourceUrl;
-      overlay.style.display = 'flex';
-      overlay.classList.add('active');
+      const container = document.getElementById('pdf-viewer-container');
+      const inner = document.getElementById('pdf-viewer-inner');
+      inner.innerHTML = '';
+      document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.spread === '0'));
+
+      try {
+        const { pdfjsLib, pdfjsViewerLib } = await loadPdfJsLibs();
+
+        if (currentPdfLoadingTask) {
+          try { await currentPdfLoadingTask.destroy(); } catch {}
+          currentPdfLoadingTask = null;
+        }
+
+        const eventBus = new pdfjsViewerLib.EventBus();
+        const linkService = new pdfjsViewerLib.PDFLinkService({ eventBus });
+        const pdfViewer = new pdfjsViewerLib.PDFViewer({ container, viewer: inner, eventBus, linkService });
+        linkService.setViewer(pdfViewer);
+        currentPdfViewer = pdfViewer;
+
+        eventBus.on('pagesinit', () => {
+          pdfViewer.currentScaleValue = 'page-width';
+        });
+
+        const loadingTask = pdfjsLib.getDocument(sourceUrl);
+        currentPdfLoadingTask = loadingTask;
+        const pdfDocument = await loadingTask.promise;
+        pdfViewer.setDocument(pdfDocument);
+        linkService.setDocument(pdfDocument);
+      } catch (err) {
+        console.error('PDF viewer error:', err);
+        showToast('Fehler beim Laden der PDF-Datei.');
+      }
     }
+
+    document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(btn => {
+      btn.onclick = () => {
+        if (!currentPdfViewer) return;
+        document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentPdfViewer.spreadMode = parseInt(btn.dataset.spread, 10);
+      };
+    });
+
+    document.getElementById('pdf-fit-page-btn').onclick = () => {
+      if (!currentPdfViewer) return;
+      currentPdfViewer.currentScaleValue = 'page-fit';
+    };
+
+    // Space/→ = next page, ← = previous page, exactly one PDF page per press regardless of zoom
+    // or spread mode.
+    document.addEventListener('keydown', (e) => {
+      const overlay = document.getElementById('pdf-viewer-overlay');
+      if (!overlay.classList.contains('active') || !currentPdfViewer) return;
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+      if (e.key === ' ' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        currentPdfViewer.nextPage();
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        currentPdfViewer.previousPage();
+      }
+    });
 
     document.getElementById('close-pdf-viewer-btn').onclick = () => {
       const overlay = document.getElementById('pdf-viewer-overlay');
       overlay.classList.remove('active');
       overlay.style.display = 'none';
-      document.getElementById('pdf-viewer-iframe').src = '';
+      document.getElementById('pdf-viewer-inner').innerHTML = '';
+      if (currentPdfLoadingTask) {
+        currentPdfLoadingTask.destroy().catch(() => {});
+        currentPdfLoadingTask = null;
+      }
+      currentPdfViewer = null;
     };
 
     // EuroOffice collaborative editor (public share) — only available when the

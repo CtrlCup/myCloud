@@ -5520,28 +5520,116 @@ document.getElementById('close-video-viewer-btn').onclick = () => {
   player.src = '';
 };
 
-function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
+// pdfjs-dist only ships the library + the reusable PDFViewer component on npm (not the
+// prebuilt viewer.html app, which Mozilla only distributes as a separate GitHub release ZIP) —
+// so the two-page/spread view here is built directly on top of PDFViewer's own documented
+// spreadMode property (0=none, 1=odd, 2=even) rather than embedding a full prebuilt app.
+let pdfjsLib = null;
+let pdfjsViewerLib = null;
+let currentPdfViewer = null;
+let currentPdfLoadingTask = null;
+
+async function loadPdfJsLibs() {
+  if (!pdfjsLib) {
+    pdfjsLib = await import('/pdfjs/build/pdf.mjs');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdfjs/build/pdf.worker.mjs';
+  }
+  if (!pdfjsViewerLib) {
+    pdfjsViewerLib = await import('/pdfjs/web/pdf_viewer.mjs');
+  }
+  return { pdfjsLib, pdfjsViewerLib };
+}
+
+async function openPdfViewer(fileId, fileName, isPublic = false, slug = '') {
   const overlay = document.getElementById('pdf-viewer-overlay');
-  const iframe = document.getElementById('pdf-viewer-iframe');
   const title = document.getElementById('pdf-viewer-title');
 
-  title.innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
+  title.innerHTML = `<i data-lucide="file-text"></i> ${escapeHtml(fileName)}`;
   lucide.createIcons();
 
-  const sourceUrl = isPublic 
+  overlay.style.display = 'flex';
+  overlay.classList.add('active');
+
+  const sourceUrl = isPublic
     ? `/api/public/shares/${slug}/download/${fileId}?inline=true`
     : `/api/files/download/${fileId}?inline=true`;
 
-  iframe.src = sourceUrl;
-  overlay.style.display = 'flex';
-  overlay.classList.add('active');
+  const container = document.getElementById('pdf-viewer-container');
+  const inner = document.getElementById('pdf-viewer-inner');
+  inner.innerHTML = '';
+  document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.spread === '0'));
+
+  try {
+    const { pdfjsLib, pdfjsViewerLib } = await loadPdfJsLibs();
+
+    if (currentPdfLoadingTask) {
+      try { await currentPdfLoadingTask.destroy(); } catch {}
+      currentPdfLoadingTask = null;
+    }
+
+    const eventBus = new pdfjsViewerLib.EventBus();
+    const linkService = new pdfjsViewerLib.PDFLinkService({ eventBus });
+    const pdfViewer = new pdfjsViewerLib.PDFViewer({ container, viewer: inner, eventBus, linkService });
+    linkService.setViewer(pdfViewer);
+    currentPdfViewer = pdfViewer;
+
+    eventBus.on('pagesinit', () => {
+      pdfViewer.currentScaleValue = 'page-width';
+    });
+
+    const loadingTask = pdfjsLib.getDocument(sourceUrl);
+    currentPdfLoadingTask = loadingTask;
+    const pdfDocument = await loadingTask.promise;
+    pdfViewer.setDocument(pdfDocument);
+    linkService.setDocument(pdfDocument);
+  } catch (err) {
+    console.error('PDF viewer error:', err);
+    showToast('Fehler beim Laden der PDF-Datei.');
+  }
 }
+
+document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(btn => {
+  btn.onclick = () => {
+    if (!currentPdfViewer) return;
+    document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentPdfViewer.spreadMode = parseInt(btn.dataset.spread, 10);
+  };
+});
+
+// "page-fit" scales the page so both its height and width fit entirely inside the viewport —
+// exactly the "match the displayed height/width ratio" fit the user asked for.
+document.getElementById('pdf-fit-page-btn').onclick = () => {
+  if (!currentPdfViewer) return;
+  currentPdfViewer.currentScaleValue = 'page-fit';
+};
+
+// Space/→ = next page, ← = previous page, exactly one PDF page per press regardless of zoom or
+// spread mode — nextPage()/previousPage() are PDFViewer's own page-stepping methods, so the
+// step size always matches whatever this particular PDF's page size actually is.
+document.addEventListener('keydown', (e) => {
+  const overlay = document.getElementById('pdf-viewer-overlay');
+  if (!overlay.classList.contains('active') || !currentPdfViewer) return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+  if (e.key === ' ' || e.key === 'ArrowRight') {
+    e.preventDefault();
+    currentPdfViewer.nextPage();
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    currentPdfViewer.previousPage();
+  }
+});
 
 document.getElementById('close-pdf-viewer-btn').onclick = () => {
   const overlay = document.getElementById('pdf-viewer-overlay');
   overlay.classList.remove('active');
   overlay.style.display = 'none';
-  document.getElementById('pdf-viewer-iframe').src = '';
+  document.getElementById('pdf-viewer-inner').innerHTML = '';
+  if (currentPdfLoadingTask) {
+    currentPdfLoadingTask.destroy().catch(() => {});
+    currentPdfLoadingTask = null;
+  }
+  currentPdfViewer = null;
 };
 
 // Backdrop click close for new overlays
