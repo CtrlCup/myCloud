@@ -221,6 +221,10 @@ function playViewEnter(el) {
   el.classList.remove('view-enter');
   void el.offsetWidth; // force reflow so the animation re-triggers
   el.classList.add('view-enter');
+  // Klasse nach Ablauf wieder entfernen: eine dauerhaft "gefüllte" Transform-Animation
+  // würde sonst einen Containing Block bilden und position:fixed-Kinder (z.B. die
+  // Quickactions-Leiste) relativ zu diesem Element statt zum Viewport positionieren.
+  el.addEventListener('animationend', () => el.classList.remove('view-enter'), { once: true });
 }
 
 function showView(viewName) {
