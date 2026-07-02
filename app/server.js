@@ -202,12 +202,28 @@ if (openApiSpec) {
   }));
 }
 
+// Sessions last up to 30 days and only carry the role/active-status a user had at login time.
+// Without re-checking the DB, an admin who deactivates or demotes someone doesn't actually
+// revoke their access until that stale session expires on its own. Refreshes req.session.role
+// to the current value (self-healing a stale session) and reports whether the account is still
+// active. Called by all three auth middlewares below.
+async function refreshSessionIdentity(req) {
+  const result = await pool.query('SELECT is_active, role FROM users WHERE id = $1', [req.session.userId]);
+  if (result.rows.length === 0 || result.rows[0].is_active === false) return false;
+  req.session.role = result.rows[0].role;
+  return true;
+}
+
 // Authentication Middleware
-function requireAuth(req, res, next) {
-  if (req.session.userId) {
-    return next();
+async function requireAuth(req, res, next) {
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    if (!(await refreshSessionIdentity(req))) return res.status(401).json({ error: 'Unauthorized' });
+    next();
+  } catch (err) {
+    console.error('requireAuth error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
-  res.status(401).json({ error: 'Unauthorized' });
 }
 
 // Resolve the permission map for a role name (empty object if the role is gone)
@@ -229,6 +245,9 @@ async function requireAdmin(req, res, next) {
     if (!req.session.userId) {
       return res.status(403).json({ error: 'Forbidden: Admin access required' });
     }
+    if (!(await refreshSessionIdentity(req))) {
+      return res.status(403).json({ error: 'Forbidden: Admin access required' });
+    }
     if (req.session.role === 'admin') return next();
     const perms = await getRolePermissions(req.session.role);
     if (perms.admin === true) return next();
@@ -244,6 +263,7 @@ function requirePermission(key) {
   return async (req, res, next) => {
     try {
       if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
+      if (!(await refreshSessionIdentity(req))) return res.status(401).json({ error: 'Unauthorized' });
       if (req.session.role === 'admin') return next();
       const perms = await getRolePermissions(req.session.role);
       if (perms.admin === true || perms[key] === true) return next();
@@ -492,12 +512,35 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // 2FA Verification Route
+// Both the email code and TOTP are 6 digits (1M possibilities) checked with no attempt limit —
+// an attacker who already has a valid password (having passed the first factor) could brute
+// force the second factor directly. Cap attempts per pending login within the code's window.
+const twoFactorAttempts = new Map(); // tempUserId -> { count, resetAt }
+const TWO_FACTOR_MAX_ATTEMPTS = 5;
+const TWO_FACTOR_ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of twoFactorAttempts.entries()) {
+    if (entry.resetAt < now) twoFactorAttempts.delete(id);
+  }
+}, 10 * 60 * 1000);
+
 app.post('/api/auth/login/verify-2fa', async (req, res) => {
   const { code } = req.body;
   const tempUserId = req.session.tempUserId;
 
   if (!tempUserId || !code) {
     return res.status(400).json({ error: '2FA-Sitzung abgelaufen oder kein Code eingegeben.' });
+  }
+
+  const now = Date.now();
+  const attemptEntry = twoFactorAttempts.get(tempUserId);
+  if (!attemptEntry || attemptEntry.resetAt < now) {
+    twoFactorAttempts.set(tempUserId, { count: 1, resetAt: now + TWO_FACTOR_ATTEMPT_WINDOW_MS });
+  } else if (attemptEntry.count >= TWO_FACTOR_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Zu viele Fehlversuche. Bitte versuche es in ein paar Minuten erneut.' });
+  } else {
+    attemptEntry.count++;
   }
 
   try {
@@ -525,6 +568,8 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
         return res.status(400).json({ error: 'Ungültiger oder abgelaufener E-Mail-Code.' });
       }
     }
+
+    twoFactorAttempts.delete(tempUserId);
 
     req.session.userId = user.id;
     req.session.username = user.username;
@@ -876,9 +921,6 @@ app.post('/api/auth/reset-password-request', async (req, res) => {
     }
 
     const user = userRes.rows[0];
-    if (user.sso_id) {
-      return res.status(400).json({ error: 'Dieser Benutzer wird über SSO verwaltet und kann sein Passwort nicht lokal ändern.' });
-    }
 
     // Determine recipient email
     let recipient = user.email || '';
@@ -886,8 +928,11 @@ app.post('/api/auth/reset-password-request', async (req, res) => {
       recipient = user.username;
     }
 
-    if (!recipient) {
-      return res.status(400).json({ error: 'Für diesen Account ist keine E-Mail-Adresse hinterlegt. Passwort-Reset per E-Mail ist nicht möglich.' });
+    // Neither "this account is SSO-managed" nor "this account has no email on file" may be
+    // distinguishable from "no such account" — otherwise an attacker can enumerate valid
+    // usernames by watching which specific error comes back for a given input.
+    if (user.sso_id || !recipient) {
+      return res.json({ success: true, message: 'Falls der Benutzer existiert, wurde ein Reset-Link gesendet.' });
     }
 
     // Generate random reset token
@@ -3254,6 +3299,14 @@ app.post('/api/settings/email', requireAuth, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required' });
   try {
+    const conflictRes = await pool.query(
+      'SELECT id FROM users WHERE email = $1 AND id != $2',
+      [email, req.session.userId]
+    );
+    if (conflictRes.rows.length > 0) {
+      return res.status(400).json({ error: 'Diese E-Mail-Adresse wird bereits von einem anderen Benutzer verwendet.' });
+    }
+
     await pool.query('UPDATE users SET email = $1 WHERE id = $2', [email, req.session.userId]);
     res.json({ success: true, message: 'E-Mail-Adresse erfolgreich gespeichert.' });
   } catch (err) {
