@@ -3593,6 +3593,8 @@ async function loadAdminUsers() {
 
       container.appendChild(row);
     });
+
+    lucide.createIcons();
   } catch (err) {
     console.error('Error loading admin users:', err);
   }
