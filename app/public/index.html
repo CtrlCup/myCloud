@@ -48,6 +48,9 @@
             <a href="#settings" class="dropdown-item" id="dropdown-settings-btn">
               <i data-lucide="user" style="width: 16px; height: 16px;"></i> Einstellungen
             </a>
+            <a href="#notes" class="dropdown-item" id="dropdown-notes-btn" style="display: none;">
+              <i data-lucide="shield-alert" style="width: 16px; height: 16px;"></i> Einmalnotizen
+            </a>
             <a href="#admin" class="dropdown-item" id="dropdown-admin-btn" style="display: none;">
               <i data-lucide="sliders" style="width: 16px; height: 16px;"></i> Admin-Einstellungen
             </a>
@@ -232,18 +235,6 @@
           <i data-lucide="chevron-up" class="flh-arrow"></i>
         </button>
         <span class="flh-spacer-actions"></span>
-      </div>
-
-      <!-- Einmalnachrichten (eigene Kategorie, nur sichtbar wenn welche existieren) -->
-      <div class="card" id="notes-category-card" style="display: none; margin-bottom: 1.25rem; background: rgba(0,0,0,0.15);">
-        <div style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer;" id="notes-category-header">
-          <i data-lucide="shield-alert" style="width: 18px; height: 18px; color: #ffaa00;"></i>
-          <h3 style="margin: 0; font-size: 1rem;">Einmalnachrichten</h3>
-          <i data-lucide="chevron-down" id="notes-category-chevron" style="width: 16px; height: 16px; color: var(--color-text-muted); margin-left: auto; transition: transform 0.2s ease;"></i>
-        </div>
-        <div id="notes-category-list" style="margin-top: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem;">
-          <!-- Dynamisch generiert -->
-        </div>
       </div>
 
       <!-- Dateiliste -->
@@ -506,6 +497,30 @@
 
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- 3b. EINMALNOTIZEN-ANSICHT (eigene Seite statt Anhängsel im Dashboard) -->
+    <div id="notes-view" class="modal-overlay" style="display: none; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);">
+      <div class="settings-modal-container">
+        <button class="btn-icon close-btn" id="notes-back-to-dashboard-btn" style="position: absolute; top: 1.5rem; right: 1.5rem; z-index: 10; padding: 0.25rem;" title="Zurück zum Dashboard">
+          <i data-lucide="x"></i>
+        </button>
+
+        <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 2rem; border-bottom: 1px solid var(--color-border); padding-bottom: 1rem;">
+          <h2 style="margin: 0;">Einmalnotizen</h2>
+        </div>
+
+        <p style="font-size: 0.85rem; color: var(--color-text-muted); margin-bottom: 1.5rem;">
+          Hier verwaltest du alle deine selbstzerstörenden Einmalnotizen an einem Ort. Sie tauchen bewusst nicht in der normalen Dateiliste auf.
+        </p>
+
+        <div id="notes-page-list" style="display: flex; flex-direction: column; gap: 0.6rem;">
+          <!-- Dynamisch generiert -->
+        </div>
+        <p id="notes-page-empty" style="display: none; font-size: 0.85rem; color: var(--color-text-muted); text-align: center; padding: 3rem 0;">
+          Du hast aktuell keine Einmalnotizen.
+        </p>
       </div>
     </div>
 
@@ -1193,9 +1208,6 @@
           <input type="text" id="note-result-link-input" class="form-control" readonly style="font-weight: 500; font-size: 0.9rem;">
           <button type="button" class="btn btn-primary" id="copy-note-link-btn" style="padding: 0.75rem 1rem; height: 42px;">Kopieren</button>
         </div>
-        <div class="form-actions" style="margin-top: 2rem; display: flex; justify-content: center;">
-          <button type="button" class="btn" id="confirm-note-result-btn" style="padding: 0.5rem 2rem;">Schließen</button>
-        </div>
       </div>
     </div>
   </div>
@@ -1329,6 +1341,22 @@
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- VERSIONSVERLAUF DIFF MODAL -->
+  <div class="modal-overlay" id="editor-diff-modal-overlay" style="z-index: 10020;">
+    <div class="card modal" style="max-width: 1100px; width: 94%; height: 82vh; display: flex; flex-direction: column;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-shrink: 0;">
+        <div>
+          <h3 style="margin: 0;">Änderungen</h3>
+          <div id="editor-diff-summary" style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.25rem;"></div>
+        </div>
+        <button class="btn-icon" id="close-editor-diff-modal-btn" type="button">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div id="editor-diff-container" style="flex: 1; min-height: 0; border-radius: var(--radius-md); overflow: hidden;"></div>
     </div>
   </div>
 
@@ -1542,6 +1570,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.18"></script>
+  <script src="/app.js?v=1.1.20"></script>
 </body>
 </html>

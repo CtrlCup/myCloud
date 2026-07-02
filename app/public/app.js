@@ -197,13 +197,16 @@ async function checkAuthStatus() {
       if (adminBtn) {
         adminBtn.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
       }
-      
+      checkNotesExist();
+
       appHeader.style.display = 'flex';
-      
+
       // Weiche Navigation
       const hash = window.location.hash;
       if (hash === '#settings') {
         showView('settings');
+      } else if (hash === '#notes') {
+        showView('notes');
       } else if (hash === '#admin') {
         showView('admin');
       } else {
@@ -230,6 +233,7 @@ async function checkAuthStatus() {
 }
 
 const adminView = document.getElementById('admin-view');
+const notesView = document.getElementById('notes-view');
 
 // Restart the subtle fade-in animation on a view container
 function playViewEnter(el) {
@@ -246,43 +250,46 @@ function playViewEnter(el) {
 function showView(viewName) {
   currentViewName = viewName;
   applyBackgrounds(viewName);
+
+  // Reset every overlay-style view first; each branch below then opens the one it needs.
+  settingsView.style.display = 'none';
+  settingsView.classList.remove('active');
+  if (adminView) {
+    adminView.style.display = 'none';
+    adminView.classList.remove('active');
+  }
+  if (notesView) {
+    notesView.style.display = 'none';
+    notesView.classList.remove('active');
+  }
+
   if (viewName === 'auth') {
     playViewEnter(authView);
     authView.style.display = 'flex';
     dashboardView.style.display = 'none';
-    settingsView.style.display = 'none';
-    settingsView.classList.remove('active');
-    if (adminView) {
-      adminView.style.display = 'none';
-      adminView.classList.remove('active');
-    }
   } else if (viewName === 'dashboard') {
     authView.style.display = 'none';
     playViewEnter(dashboardView);
     dashboardView.style.display = 'flex';
-    settingsView.style.display = 'none';
-    settingsView.classList.remove('active');
-    if (adminView) {
-      adminView.style.display = 'none';
-      adminView.classList.remove('active');
-    }
     loadFiles(currentFolderId);
   } else if (viewName === 'settings') {
     authView.style.display = 'none';
     dashboardView.style.display = 'flex';
     settingsView.style.display = 'flex';
     settingsView.classList.add('active');
-    if (adminView) {
-      adminView.style.display = 'none';
-      adminView.classList.remove('active');
-    }
     loadSettings();
+  } else if (viewName === 'notes') {
+    authView.style.display = 'none';
+    dashboardView.style.display = 'flex';
+    if (notesView) {
+      notesView.style.display = 'flex';
+      notesView.classList.add('active');
+    }
+    loadNotesPage();
   } else if (viewName === 'admin') {
     if (currentUser && currentUser.role === 'admin') {
       authView.style.display = 'none';
       dashboardView.style.display = 'flex';
-      settingsView.style.display = 'none';
-      settingsView.classList.remove('active');
       if (adminView) {
         adminView.style.display = 'flex';
         adminView.classList.add('active');
@@ -311,6 +318,8 @@ window.addEventListener('hashchange', () => {
   } else if (currentUser) {
     if (hash === '#settings') {
       showView('settings');
+    } else if (hash === '#notes') {
+      showView('notes');
     } else if (hash === '#admin') {
       showView('admin');
     } else {
@@ -605,6 +614,15 @@ if (dropdownSettingsBtn) {
   };
 }
 
+const dropdownNotesBtn = document.getElementById('dropdown-notes-btn');
+if (dropdownNotesBtn) {
+  dropdownNotesBtn.onclick = (e) => {
+    e.preventDefault();
+    userDropdownMenu.classList.remove('show');
+    openHashView('#notes', 'notes');
+  };
+}
+
 const dropdownAdminBtn = document.getElementById('dropdown-admin-btn');
 if (dropdownAdminBtn) {
   dropdownAdminBtn.onclick = (e) => {
@@ -622,6 +640,10 @@ function closeSettingsOrAdmin() {
 document.getElementById('back-to-dashboard-btn').onclick = () => {
   closeSettingsOrAdmin();
 };
+
+document.getElementById('notes-back-to-dashboard-btn')?.addEventListener('click', () => {
+  closeSettingsOrAdmin();
+});
 
 document.getElementById('logo-btn').onclick = (e) => {
   e.preventDefault();
@@ -663,86 +685,89 @@ async function loadFiles(folderId = null) {
     if (grid) grid.classList.remove('grid-exit');
     renderFiles(files);
     renderBreadcrumbs();
-    loadNotesCategory();
   } catch (err) {
     console.error(err);
     showToast('Fehler beim Laden des Datei-Explorers.');
   }
 }
 
-// One-time notes never appear in the regular file grid — they live in this dedicated,
-// collapsible category card instead (shown only while at least one exists).
-async function loadNotesCategory() {
-  const card = document.getElementById('notes-category-card');
-  const list = document.getElementById('notes-category-list');
-  if (!card || !list) return;
+// One-time notes never appear in the regular file grid — they get their own dedicated page
+// (reached via the user dropdown), which itself only shows up in that menu while at least one
+// note exists.
+async function checkNotesExist() {
+  const dropdownBtn = document.getElementById('dropdown-notes-btn');
+  if (!dropdownBtn) return;
+  try {
+    const res = await fetch('/api/files/notes');
+    if (!res.ok) return;
+    const notes = await res.json();
+    dropdownBtn.style.display = notes.length > 0 ? '' : 'none';
+  } catch (err) {
+    console.error('Error checking notes existence:', err);
+  }
+}
+
+function renderNoteRow(note) {
+  const viewsLabel = note.max_downloads
+    ? `${note.download_count}/${note.max_downloads} Aufrufe`
+    : `${note.download_count} Aufrufe (unbegrenzt)`;
+  const expiresLabel = note.expires_at
+    ? `läuft ab ${new Date(note.expires_at).toLocaleString('de-DE')}`
+    : 'läuft nie ab';
+  const row = document.createElement('div');
+  row.className = 'note-row';
+  row.dataset.id = note.id;
+  row.innerHTML = `
+    <i data-lucide="${note.is_folder ? 'folder' : 'file-text'}" style="width: 18px; height: 18px; color: #ffaa00; flex-shrink: 0;"></i>
+    <div style="flex: 1; min-width: 0;">
+      <div style="font-weight: 600; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(note.name)}</div>
+      <div style="font-size: 0.75rem; color: var(--color-text-muted);">${viewsLabel} · ${expiresLabel}</div>
+    </div>
+    <button type="button" class="btn-icon note-copy-link-btn" title="Link kopieren" data-slug="${escapeHtml(note.slug || '')}">
+      <i data-lucide="link"></i>
+    </button>
+    <button type="button" class="btn-icon note-delete-btn" title="Löschen" style="color: #ff5555;" data-id="${note.id}">
+      <i data-lucide="trash-2"></i>
+    </button>
+  `;
+
+  row.querySelector('.note-copy-link-btn').onclick = () => {
+    const slug = row.querySelector('.note-copy-link-btn').dataset.slug;
+    if (!slug) return;
+    navigator.clipboard.writeText(`${window.location.origin}/s/${slug}`);
+    showToast('Link kopiert.');
+  };
+  row.querySelector('.note-delete-btn').onclick = async () => {
+    if (!await showConfirmDialog('Einmalnachricht löschen', 'Diese Einmalnachricht wirklich löschen?')) return;
+    try {
+      const r = await fetch(`/api/files/${note.id}`, { method: 'DELETE' });
+      if (r.ok) { showToast('Gelöscht.'); loadNotesPage(); checkNotesExist(); }
+      else showToast('Fehler beim Löschen.');
+    } catch { showToast('Verbindungsfehler.'); }
+  };
+
+  return row;
+}
+
+async function loadNotesPage() {
+  const list = document.getElementById('notes-page-list');
+  const empty = document.getElementById('notes-page-empty');
+  if (!list) return;
+  list.innerHTML = '';
 
   try {
     const res = await fetch('/api/files/notes');
     if (!res.ok) return;
     const notes = await res.json();
 
-    if (notes.length === 0) {
-      card.style.display = 'none';
-      return;
-    }
-    card.style.display = 'block';
-    list.innerHTML = notes.map(note => {
-      const viewsLabel = note.max_downloads
-        ? `${note.download_count}/${note.max_downloads} Aufrufe`
-        : `${note.download_count} Aufrufe (unbegrenzt)`;
-      const expiresLabel = note.expires_at
-        ? `läuft ab ${new Date(note.expires_at).toLocaleString('de-DE')}`
-        : 'läuft nie ab';
-      return `
-        <div class="note-row" data-id="${note.id}">
-          <i data-lucide="${note.is_folder ? 'folder' : 'file-text'}" style="width: 18px; height: 18px; color: #ffaa00; flex-shrink: 0;"></i>
-          <div style="flex: 1; min-width: 0;">
-            <div style="font-weight: 600; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(note.name)}</div>
-            <div style="font-size: 0.75rem; color: var(--color-text-muted);">${viewsLabel} · ${expiresLabel}</div>
-          </div>
-          <button type="button" class="btn-icon note-copy-link-btn" title="Link kopieren" data-slug="${escapeHtml(note.slug || '')}">
-            <i data-lucide="link"></i>
-          </button>
-          <button type="button" class="btn-icon note-delete-btn" title="Löschen" style="color: #ff5555;" data-id="${note.id}">
-            <i data-lucide="trash-2"></i>
-          </button>
-        </div>
-      `;
-    }).join('');
-
-    list.querySelectorAll('.note-copy-link-btn').forEach(btn => {
-      btn.onclick = () => {
-        const slug = btn.dataset.slug;
-        if (!slug) return;
-        navigator.clipboard.writeText(`${window.location.origin}/s/${slug}`);
-        showToast('Link kopiert.');
-      };
-    });
-    list.querySelectorAll('.note-delete-btn').forEach(btn => {
-      btn.onclick = async () => {
-        if (!await showConfirmDialog('Einmalnachricht löschen', 'Diese Einmalnachricht wirklich löschen?')) return;
-        try {
-          const r = await fetch(`/api/files/${btn.dataset.id}`, { method: 'DELETE' });
-          if (r.ok) { showToast('Gelöscht.'); loadNotesCategory(); }
-          else showToast('Fehler beim Löschen.');
-        } catch { showToast('Verbindungsfehler.'); }
-      };
-    });
+    empty.style.display = notes.length === 0 ? 'block' : 'none';
+    notes.forEach(note => list.appendChild(renderNoteRow(note)));
 
     lucide.createIcons();
   } catch (err) {
-    console.error('Error loading notes category:', err);
+    console.error('Error loading notes page:', err);
   }
 }
-
-document.getElementById('notes-category-header')?.addEventListener('click', () => {
-  const list = document.getElementById('notes-category-list');
-  const chevron = document.getElementById('notes-category-chevron');
-  const collapsed = list.style.display === 'none';
-  list.style.display = collapsed ? 'flex' : 'none';
-  chevron.style.transform = collapsed ? '' : 'rotate(-90deg)';
-});
 
 function renderBreadcrumbs() {
   const container = document.getElementById('breadcrumbs');
@@ -4993,7 +5018,7 @@ window.addEventListener('keydown', (e) => {
     pushIf(document.getElementById('pdf-viewer-overlay'), () => document.getElementById('close-pdf-viewer-btn').click());
 
     // Generic glass modals (share, create-file, totp, confirm, input, …)
-    const handledIds = new Set(['settings-view', 'admin-view', 'office-editor-overlay', 'code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay']);
+    const handledIds = new Set(['settings-view', 'admin-view', 'notes-view', 'office-editor-overlay', 'code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay']);
     document.querySelectorAll('.modal-overlay.active').forEach(o => {
       if (handledIds.has(o.id)) return;
       pushIf(o, () => {
@@ -5009,8 +5034,8 @@ window.addEventListener('keydown', (e) => {
       return;
     }
 
-    // No overlay open → close settings or admin (go back to dashboard)
-    if (window.location.hash === '#settings' || window.location.hash === '#admin') {
+    // No overlay open → close settings/notes/admin (go back to dashboard)
+    if (window.location.hash === '#settings' || window.location.hash === '#notes' || window.location.hash === '#admin') {
       closeSettingsOrAdmin();
       return;
     }
@@ -5021,7 +5046,7 @@ window.addEventListener('keydown', (e) => {
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) {
-      if (overlay.id === 'settings-view' || overlay.id === 'admin-view') {
+      if (overlay.id === 'settings-view' || overlay.id === 'admin-view' || overlay.id === 'notes-view') {
         closeSettingsOrAdmin();
       } else if (overlay.id === 'office-editor-overlay') {
         // Do not close office editor on backdrop click
@@ -5754,15 +5779,19 @@ async function loadEditorHistory(fileId) {
           <div class="editor-history-entry-time">${formatRelativeTime(v.created_at)}</div>
           <div class="editor-history-entry-meta">${new Date(v.created_at).toLocaleString('de-DE')} · ${formatBytes(v.size)}</div>
         </div>
-        <button type="button" class="btn-icon editor-history-restore-btn" title="Wiederherstellen">
+        <button type="button" class="editor-history-restore-btn" title="Wiederherstellen">
           <i data-lucide="rotate-ccw"></i>
         </button>
       </div>
     `).join('');
 
-    list.querySelectorAll('.editor-history-restore-btn').forEach(btn => {
-      btn.onclick = async () => {
-        const versionId = btn.closest('.editor-history-entry').dataset.versionId;
+    list.querySelectorAll('.editor-history-entry').forEach((entry, index) => {
+      entry.onclick = () => showVersionDiff(fileId, versions, index);
+
+      const btn = entry.querySelector('.editor-history-restore-btn');
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        const versionId = entry.dataset.versionId;
         if (!await showConfirmDialog('Version wiederherstellen', 'Der aktuelle Inhalt wird durch diese Version ersetzt (der jetzige Stand wird selbst als Checkpoint gesichert).')) return;
         try {
           const r = await fetch(`/api/files/${fileId}/versions/${versionId}/restore`, { method: 'POST' });
@@ -5786,6 +5815,79 @@ async function loadEditorHistory(fileId) {
     list.innerHTML = '<p style="font-size: 0.82rem; color: var(--color-text-muted);">Verlauf konnte nicht geladen werden.</p>';
   }
 }
+
+let editorDiffInstance = null;
+
+// Diffs a checkpoint against whatever came right after it — the next-newer checkpoint, or the
+// file's current live content if this is the newest one — so the diff always shows exactly
+// what changed *since* this checkpoint.
+async function showVersionDiff(fileId, versions, index) {
+  const overlay = document.getElementById('editor-diff-modal-overlay');
+  const container = document.getElementById('editor-diff-container');
+  const summary = document.getElementById('editor-diff-summary');
+  if (!overlay || !container) return;
+
+  overlay.classList.add('active');
+  container.innerHTML = '';
+  summary.textContent = 'Lade...';
+
+  try {
+    const version = versions[index];
+    const olderRes = await fetch(`/api/files/${fileId}/versions/${version.id}`);
+    const older = await olderRes.json();
+
+    let newerContent, newerLabel;
+    if (index > 0) {
+      const newerRes = await fetch(`/api/files/${fileId}/versions/${versions[index - 1].id}`);
+      const newer = await newerRes.json();
+      newerContent = newer.content;
+      newerLabel = formatRelativeTime(versions[index - 1].created_at);
+    } else {
+      const currentRes = await fetch(`/api/files/content/${fileId}`);
+      newerContent = await currentRes.text();
+      newerLabel = 'aktueller Stand';
+    }
+
+    await loadMonaco();
+    const language = getMonacoLanguage(document.getElementById('code-editor-title').textContent);
+
+    if (editorDiffInstance) {
+      editorDiffInstance.dispose();
+      editorDiffInstance = null;
+    }
+    editorDiffInstance = monaco.editor.createDiffEditor(container, {
+      theme: 'vs-dark',
+      readOnly: true,
+      automaticLayout: true,
+      renderSideBySide: true,
+      fontSize: 13,
+    });
+    const originalModel = monaco.editor.createModel(older.content, language);
+    const modifiedModel = monaco.editor.createModel(newerContent, language);
+    editorDiffInstance.setModel({ original: originalModel, modified: modifiedModel });
+
+    editorDiffInstance.onDidUpdateDiff(() => {
+      const changes = editorDiffInstance.getLineChanges() || [];
+      let added = 0, removed = 0;
+      changes.forEach(c => {
+        if (c.modifiedEndLineNumber > 0) added += (c.modifiedEndLineNumber - c.modifiedStartLineNumber + 1);
+        if (c.originalEndLineNumber > 0) removed += (c.originalEndLineNumber - c.originalStartLineNumber + 1);
+      });
+      summary.innerHTML = `${formatRelativeTime(version.created_at)} → ${newerLabel} · <span style="color:#4ade80;">+${added} Zeilen</span> · <span style="color:#f87171;">-${removed} Zeilen</span>`;
+    });
+  } catch (err) {
+    console.error('Error loading version diff:', err);
+    summary.textContent = 'Diff konnte nicht geladen werden.';
+  }
+}
+
+document.getElementById('close-editor-diff-modal-btn').onclick = () => {
+  document.getElementById('editor-diff-modal-overlay').classList.remove('active');
+  if (editorDiffInstance) {
+    editorDiffInstance.dispose();
+    editorDiffInstance = null;
+  }
+};
 
 document.getElementById('close-code-editor-btn').onclick = () => {
   closeLanguageMenu();
@@ -6313,6 +6415,7 @@ function showCreateNoteModal(defaultName) {
         if (res.ok) {
           showToast('Einmalnotiz erfolgreich erstellt.');
           loadFiles(currentFolderId);
+          checkNotesExist();
           showNoteResultModal(data.shareLink);
         } else {
           showToast(data.error || 'Fehler beim Erstellen der Notiz.');
@@ -6333,7 +6436,6 @@ function showNoteResultModal(link) {
   const linkInput = document.getElementById('note-result-link-input');
   const copyBtn = document.getElementById('copy-note-link-btn');
   const closeBtn = document.getElementById('close-note-result-btn');
-  const confirmBtn = document.getElementById('confirm-note-result-btn');
 
   linkInput.value = link;
   overlay.classList.add('active');
@@ -6342,7 +6444,6 @@ function showNoteResultModal(link) {
     overlay.classList.remove('active');
     copyBtn.onclick = null;
     closeBtn.onclick = null;
-    confirmBtn.onclick = null;
   };
 
   copyBtn.onclick = () => {
@@ -6352,7 +6453,6 @@ function showNoteResultModal(link) {
   };
 
   closeBtn.onclick = cleanup;
-  confirmBtn.onclick = cleanup;
 }
 
 // Plus dropdown menu toggler
