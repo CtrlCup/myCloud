@@ -2313,8 +2313,14 @@ app.get('/api/public/branding', async (req, res) => {
     const smtpHost = await getSetting('email_smtp_host');
     const smtpTested = await getSetting('email_smtp_tested');
     const emailConfigured = (smtpHost && smtpTested === 'true') ? true : false;
+    const registrationEnabled = (await getSetting('registration_enabled')) === 'true';
+    // Registration is always allowed for the very first account (bootstrapping the initial
+    // admin) regardless of the setting — the frontend needs to know that to decide whether to
+    // show the "Registrieren" option on a fresh install where the setting is still off.
+    const hasUsersRes = await pool.query('SELECT EXISTS(SELECT 1 FROM users)');
+    const hasUsers = hasUsersRes.rows[0].exists;
 
-    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, hasDashboardBgLight, hasLoginBgLight, appUrl, emailConfigured });
+    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, hasDashboardBgLight, hasLoginBgLight, appUrl, emailConfigured, registrationEnabled, hasUsers });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }

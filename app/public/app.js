@@ -575,18 +575,27 @@ if (dropdownLogoutBtn) {
   };
 }
 
+// Settings/Admin are opened as an overlay on top of the dashboard, not a real page navigation —
+// use replaceState (no new history entry) instead of assigning location.hash (which pushes one).
+// Otherwise every open added a "back" stop that could resurface the panel unexpectedly on a
+// later, unrelated use of the browser's back button.
+function openHashView(hash, viewName) {
+  window.history.replaceState(null, '', hash);
+  showView(viewName);
+}
+
 // Dropdown Navigation Items
 const dropdownSettingsBtn = document.getElementById('dropdown-settings-btn');
 if (dropdownSettingsBtn) {
   dropdownSettingsBtn.onclick = (e) => {
     e.preventDefault();
     userDropdownMenu.classList.remove('show');
-    window.location.hash = '#settings';
-    
+    openHashView('#settings', 'settings');
+
     // Switch to account settings section inside settings layout
     document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
     document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
-    
+
     const accountTab = document.querySelector('[data-section="account-settings"]');
     const accountSection = document.getElementById('account-settings');
     if (accountTab && accountSection) {
@@ -601,16 +610,13 @@ if (dropdownAdminBtn) {
   dropdownAdminBtn.onclick = (e) => {
     e.preventDefault();
     userDropdownMenu.classList.remove('show');
-    window.location.hash = '#admin';
+    openHashView('#admin', 'admin');
   };
 }
 
 function closeSettingsOrAdmin() {
-  if (window.history.length > 1) {
-    window.history.back();
-  } else {
-    window.location.hash = '#dashboard';
-  }
+  window.history.replaceState(null, '', '#dashboard');
+  showView('dashboard');
 }
 
 document.getElementById('back-to-dashboard-btn').onclick = () => {
@@ -4069,6 +4075,15 @@ async function loadBranding() {
       forgotPasswordContainer.style.display = isEmailConfigured ? 'block' : 'none';
     }
 
+    // Registration is always allowed for the very first account (bootstrapping the initial
+    // admin) even while the setting is off — mirror that here so the button doesn't show on a
+    // normal, already-set-up instance with registration disabled.
+    const canRegister = data.registrationEnabled || data.hasUsers === false;
+    const authDivider = document.getElementById('auth-divider');
+    if (toggleAuthModeBtn) toggleAuthModeBtn.style.display = canRegister ? '' : 'none';
+    if (authDivider) authDivider.style.display = canRegister ? '' : 'none';
+    if (!canRegister && isRegisterMode) updateAuthUI(false);
+
     // Update Header and Login logos
     const logoTexts = document.querySelectorAll('.logo');
     logoTexts.forEach(logo => {
@@ -4572,10 +4587,13 @@ window.addEventListener('keydown', (e) => {
     }
     // Collect every currently-open overlay and close ONLY the top-most one,
     // so stacked windows close one layer per ESC press (newest first).
+    // Every .modal-overlay has display:flex set unconditionally in its base CSS rule —
+    // visibility is toggled via the .active class (opacity/pointer-events), not display —
+    // so checking computed display/visibility here always reported "open" for every overlay
+    // in the DOM, not just the visible one.
     const isOverlayOpen = (el) => {
       if (!el) return false;
-      const cs = window.getComputedStyle(el);
-      return cs.display !== 'none' && cs.visibility !== 'hidden';
+      return el.classList.contains('active');
     };
     const zIndexOf = (el) => {
       const z = parseInt(window.getComputedStyle(el).zIndex, 10);
