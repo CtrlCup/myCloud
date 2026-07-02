@@ -937,17 +937,92 @@ function setSortColumn(column) {
 // Refreshes the sortable header row: visible only in list view, arrow shown on the active column.
 function updateSortHeaderUI() {
   const header = document.getElementById('file-list-header');
-  if (!header) return;
-  header.style.display = viewMode === 'list' ? 'flex' : 'none';
-  header.querySelectorAll('.flh-col').forEach(btn => {
-    if (btn.dataset.sort === sortColumn) {
-      btn.classList.add('active');
-      btn.setAttribute('data-dir', sortDirection);
-    } else {
-      btn.classList.remove('active');
-      btn.removeAttribute('data-dir');
-    }
+  if (header) {
+    header.style.display = viewMode === 'list' ? 'flex' : 'none';
+    header.querySelectorAll('.flh-col').forEach(btn => {
+      if (btn.dataset.sort === sortColumn) {
+        btn.classList.add('active');
+        btn.setAttribute('data-dir', sortDirection);
+      } else {
+        btn.classList.remove('active');
+        btn.removeAttribute('data-dir');
+      }
+    });
+  }
+
+  const sortBtn = document.getElementById('sort-toggle-btn');
+  if (sortBtn) sortBtn.classList.toggle('active', !!sortColumn);
+
+  const openSortMenu = document.querySelector('.sort-menu');
+  if (openSortMenu) renderSortMenuItems(openSortMenu);
+}
+
+const SORT_MENU_COLUMNS = [
+  { key: 'name', label: 'Name' },
+  { key: 'type', label: 'Typ' },
+  { key: 'size', label: 'Größe' },
+  { key: 'date', label: 'Erstellt am' },
+];
+
+// (Re)builds the sort dropdown's items so it reflects the current sortColumn/sortDirection.
+function renderSortMenuItems(menu) {
+  menu.innerHTML = SORT_MENU_COLUMNS.map(col => {
+    const isActive = sortColumn === col.key;
+    const arrowIcon = isActive && sortDirection === 'desc' ? 'arrow-down' : 'arrow-up';
+    return `
+      <button type="button" class="btn-menu-item sort-menu-item ${isActive ? 'active' : ''}" data-sort="${col.key}">
+        <span>${col.label}</span>
+        <i data-lucide="${arrowIcon}" class="sort-menu-arrow" style="opacity: ${isActive ? 1 : 0};"></i>
+      </button>
+    `;
+  }).join('');
+  lucide.createIcons();
+  menu.querySelectorAll('.sort-menu-item').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      setSortColumn(btn.dataset.sort);
+    };
   });
+}
+
+let sortMenuDocListener = null;
+
+function closeSortMenu() {
+  document.querySelectorAll('.sort-menu').forEach(m => m.remove());
+  if (sortMenuDocListener) {
+    document.removeEventListener('click', sortMenuDocListener);
+    sortMenuDocListener = null;
+  }
+}
+
+// Sort dropdown, anchored under the toolbar's sort button — works in both grid and list view.
+function showSortMenu(anchorEl) {
+  if (document.querySelector('.sort-menu')) {
+    closeSortMenu();
+    return;
+  }
+  closeQuickSettingsMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'card context-menu sort-menu';
+  document.body.appendChild(menu);
+  renderSortMenuItems(menu);
+
+  const rect = anchorEl.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  let left = rect.left;
+  if (left + menuRect.width > window.innerWidth - 12) {
+    left = window.innerWidth - menuRect.width - 12;
+  }
+  menu.style.left = `${Math.max(12, left)}px`;
+  menu.style.top = `${rect.bottom + 8}px`;
+
+  sortMenuDocListener = (e) => {
+    if (!menu.contains(e.target) && e.target !== anchorEl && !anchorEl.contains(e.target)) {
+      closeSortMenu();
+    }
+  };
+  setTimeout(() => document.addEventListener('click', sortMenuDocListener), 50);
 }
 
 function renderFiles(files) {
@@ -3975,6 +4050,15 @@ window.onload = () => {
   document.querySelectorAll('#file-list-header .flh-col').forEach(btn => {
     btn.onclick = () => setSortColumn(btn.dataset.sort);
   });
+
+  // Sort dropdown (also works in grid/tile view, where there is no column header)
+  const sortToggleBtn = document.getElementById('sort-toggle-btn');
+  if (sortToggleBtn) {
+    sortToggleBtn.onclick = (e) => {
+      e.stopPropagation();
+      showSortMenu(sortToggleBtn);
+    };
+  }
 
   // Admin back button
   const adminBackBtn = document.getElementById('admin-back-to-dashboard-btn');

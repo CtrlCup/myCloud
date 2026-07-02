@@ -1346,6 +1346,40 @@ tr:hover td {
   color: #ff453a;
 }
 
+#sort-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  transition: var(--transition);
+}
+
+#sort-toggle-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+#sort-toggle-btn:hover:not(.active) {
+  color: var(--color-text);
+}
+
+#sort-toggle-btn.active {
+  color: var(--color-accent);
+  background: rgba(var(--color-accent-rgb), 0.15);
+}
+
+/* ─── Sort Menu (Dropdown für Sortierung, auch in der Kachelansicht) ─── */
+.sort-menu .btn-menu-item {
+  justify-content: space-between;
+}
+
+.sort-menu .btn-menu-item.active {
+  color: var(--color-accent);
+}
+
+.sort-menu .sort-menu-arrow {
+  transition: opacity 0.15s ease;
+}
+
 /* ─── Quick Settings (Kachelgröße / Listenabstand Slider) ─── */
 .quick-settings-menu {
   min-width: 230px;
