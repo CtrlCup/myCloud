@@ -1398,7 +1398,7 @@ header {
   height: 0;
 }
 
-.slider {
+.switch .slider {
   position: absolute;
   cursor: pointer;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -1408,7 +1408,7 @@ header {
   border-radius: 28px;
 }
 
-.slider:before {
+.switch .slider:before {
   position: absolute;
   content: "";
   height: 20px;
@@ -1420,12 +1420,12 @@ header {
   border-radius: 50%;
 }
 
-input:checked + .slider {
+.switch input:checked + .slider {
   background-color: rgba(var(--color-accent-rgb), 0.2);
   border-color: var(--color-accent);
 }
 
-input:checked + .slider:before {
+.switch input:checked + .slider:before {
   transform: translateX(20px);
   background-color: var(--color-accent);
 }
