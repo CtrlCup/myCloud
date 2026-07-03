@@ -6441,12 +6441,7 @@ function showVideoHUD(iconName, label) {
   `;
 
   if (window.lucide) {
-    window.lucide.createIcons({
-      attrs: {
-        style: 'width: 36px; height: 36px;'
-      },
-      nameAttr: 'data-lucide'
-    });
+    window.lucide.createIcons();
   }
 
   hud.classList.add('active');
