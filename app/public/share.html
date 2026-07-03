@@ -287,6 +287,129 @@
     let shareBranding = null;
     let hasAutoOpened = false;   // only auto-open a single-file viewer once
     let noteViewConfirmed = false;   // gate for the one-time-note security confirmation screen
+    let clipboardFileId = null;
+    let clipboardFileName = null;
+    let clipboardAction = null;   // 'copy' | 'cut'
+
+    function closeShareContextMenu() {
+      document.querySelectorAll('.share-context-menu').forEach(m => m.remove());
+    }
+
+    function openShareContextMenu(x, y, items) {
+      closeShareContextMenu();
+      const menu = document.createElement('div');
+      menu.className = 'card context-menu share-context-menu';
+      menu.style.position = 'fixed';
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+      menu.style.zIndex = '10020';
+      menu.innerHTML = items.map(it => `
+        <button type="button" class="btn-menu-item" data-action="${it.action}" ${it.danger ? 'style="color:#ff5555;"' : ''}>
+          <i data-lucide="${it.icon}" style="width:15px;height:15px;"></i>
+          <span>${it.label}</span>
+        </button>
+      `).join('');
+      document.body.appendChild(menu);
+
+      const rect = menu.getBoundingClientRect();
+      if (rect.right > window.innerWidth - 8) menu.style.left = `${window.innerWidth - rect.width - 8}px`;
+      if (rect.bottom > window.innerHeight - 8) menu.style.top = `${window.innerHeight - rect.height - 8}px`;
+
+      menu.querySelectorAll('[data-action]').forEach((btn, i) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          closeShareContextMenu();
+          items[i].onClick();
+        };
+      });
+      lucide.createIcons();
+      setTimeout(() => document.addEventListener('click', closeShareContextMenu, { once: true }), 50);
+    }
+
+    async function createFolderInShare() {
+      const name = prompt('Name des neuen Ordners:');
+      if (!name) return;
+      try {
+        const r = await fetch(`/api/public/shares/${slug}/folder`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, parentId: currentFolderId }),
+        });
+        const d = await r.json();
+        if (r.ok) { showToast('Ordner erstellt.'); loadShareData(currentFolderId); }
+        else showToast(d.error || 'Fehler beim Erstellen.');
+      } catch { showToast('Verbindungsfehler.'); }
+    }
+
+    async function createFileInShare() {
+      const name = prompt('Name der neuen Datei:');
+      if (!name) return;
+      try {
+        const r = await fetch(`/api/public/shares/${slug}/file`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, parentId: currentFolderId }),
+        });
+        const d = await r.json();
+        if (r.ok) { showToast('Datei erstellt.'); loadShareData(currentFolderId); }
+        else showToast(d.error || 'Fehler beim Erstellen.');
+      } catch { showToast('Verbindungsfehler.'); }
+    }
+
+    async function deleteFileInShare(fileId, fileName) {
+      if (!confirm(`"${fileName}" wirklich löschen?`)) return;
+      try {
+        const r = await fetch(`/api/public/shares/${slug}/files/${fileId}`, { method: 'DELETE' });
+        const d = await r.json();
+        if (r.ok) { showToast('Gelöscht.'); loadShareData(currentFolderId); }
+        else showToast(d.error || 'Fehler beim Löschen.');
+      } catch { showToast('Verbindungsfehler.'); }
+    }
+
+    async function pasteInShare() {
+      if (!clipboardFileId) return;
+      try {
+        const r = await fetch(`/api/public/shares/${slug}/paste`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileId: clipboardFileId, targetParentId: currentFolderId, action: clipboardAction }),
+        });
+        const d = await r.json();
+        if (r.ok) {
+          showToast(clipboardAction === 'cut' ? 'Verschoben.' : 'Kopiert.');
+          if (clipboardAction === 'cut') { clipboardFileId = null; clipboardAction = null; clipboardFileName = null; }
+          loadShareData(currentFolderId);
+        } else {
+          showToast(d.error || 'Fehler beim Einfügen.');
+        }
+      } catch { showToast('Verbindungsfehler.'); }
+    }
+
+    function showFileContextMenu(e, file) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!shareConfig.can_write) return;
+      openShareContextMenu(e.clientX, e.clientY, [
+        { action: 'copy', icon: 'copy', label: 'Kopieren', onClick: () => { clipboardFileId = file.id; clipboardFileName = file.name; clipboardAction = 'copy'; showToast(`"${file.name}" kopiert.`); } },
+        { action: 'cut', icon: 'scissors', label: 'Ausschneiden', onClick: () => { clipboardFileId = file.id; clipboardFileName = file.name; clipboardAction = 'cut'; showToast(`"${file.name}" ausgeschnitten.`); } },
+        { action: 'delete', icon: 'trash-2', label: 'Löschen', danger: true, onClick: () => deleteFileInShare(file.id, file.name) },
+      ]);
+    }
+
+    function showBackgroundContextMenu(e) {
+      e.preventDefault();
+      if (!shareConfig || !shareConfig.can_write) return;
+      const items = [
+        { action: 'new-folder', icon: 'folder-plus', label: 'Neuer Ordner', onClick: createFolderInShare },
+        { action: 'new-file', icon: 'file-plus', label: 'Neue Datei', onClick: createFileInShare },
+      ];
+      if (clipboardFileId) {
+        items.push({ action: 'paste', icon: 'clipboard-paste', label: `Einfügen (${clipboardFileName})`, onClick: pasteInShare });
+      }
+      openShareContextMenu(e.clientX, e.clientY, items);
+    }
+
+    document.getElementById('public-file-grid').addEventListener('contextmenu', (e) => {
+      if (e.target.closest('.file-item')) return; // handled per-item below
+      showBackgroundContextMenu(e);
+    });
 
     document.getElementById('note-security-confirm-btn').onclick = () => {
       noteViewConfirmed = true;
@@ -726,6 +849,8 @@
           <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
           <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
         `;
+
+        item.oncontextmenu = (e) => showFileContextMenu(e, file);
 
         item.onclick = () => {
           if (file.is_folder) {

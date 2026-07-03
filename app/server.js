@@ -3262,6 +3262,152 @@ app.post('/api/public/shares/:slug/upload', upload.single('file'), async (req, r
   }
 });
 
+// Shared checks for the write-capable public-share routes below (create/delete/paste): the
+// share must be live, writable, and (if password-protected) already unlocked in this session.
+async function verifyPublicWriteAccess(slug, req) {
+  const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
+  if (shareRes.rows.length === 0) return { error: 'Share link not found.', status: 404 };
+  const share = shareRes.rows[0];
+  if (share.expires_at && new Date(share.expires_at) < new Date()) return { error: 'Share has expired.', status: 410 };
+  if (!share.can_write) return { error: 'Write permissions denied.', status: 403 };
+  const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
+  if (share.password_hash && !isUnlocked) return { error: 'Password required.', status: 401 };
+  const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1', [share.file_id]);
+  if (baseFileRes.rows.length === 0) return { error: 'Shared content no longer exists.', status: 404 };
+  return { share, baseFile: baseFileRes.rows[0] };
+}
+
+// Walks fileId's parent_id chain up to see whether it is baseFileId or one of its descendants
+// — guards every write route below against a guest supplying an id outside the shared subtree.
+async function isWithinSharedFolder(fileId, baseFileId) {
+  let checkId = fileId;
+  while (checkId !== null) {
+    if (checkId === baseFileId) return true;
+    const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
+    if (checkRes.rows.length === 0) return false;
+    checkId = checkRes.rows[0].parent_id;
+  }
+  return false;
+}
+
+// Create a folder inside a writable public share
+app.post('/api/public/shares/:slug/folder', async (req, res) => {
+  const { slug } = req.params;
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name is required.' });
+
+  try {
+    const access = await verifyPublicWriteAccess(slug, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const { baseFile } = access;
+
+    const targetFolderId = req.body.parentId ? parseInt(req.body.parentId) : baseFile.id;
+    if (!(await isWithinSharedFolder(targetFolderId, baseFile.id))) {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO files (name, path, is_folder, parent_id, owner_id) VALUES ($1, 'folder', true, $2, $3) RETURNING *`,
+      [name, targetFolderId, baseFile.owner_id]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Public create-folder error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Create an empty text file inside a writable public share
+app.post('/api/public/shares/:slug/file', async (req, res) => {
+  const { slug } = req.params;
+  const rawName = (req.body.name || '').trim();
+  if (!rawName) return res.status(400).json({ error: 'Name is required.' });
+
+  try {
+    const access = await verifyPublicWriteAccess(slug, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const { baseFile } = access;
+
+    const targetFolderId = req.body.parentId ? parseInt(req.body.parentId) : baseFile.id;
+    if (!(await isWithinSharedFolder(targetFolderId, baseFile.id))) {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    const cleanName = rawName.includes('.') ? rawName : rawName + '.txt';
+    const uniqueFilename = crypto.randomUUID() + '.txt';
+    fs.writeFileSync(path.join(UPLOADS_DIR, uniqueFilename), '');
+
+    const result = await pool.query(
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
+       VALUES ($1, $2, 'text/plain', 0, false, $3, $4, '') RETURNING *`,
+      [cleanName, uniqueFilename, targetFolderId, baseFile.owner_id]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Public create-file error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Delete a file/folder inside a writable public share
+app.delete('/api/public/shares/:slug/files/:fileId', async (req, res) => {
+  const { slug, fileId } = req.params;
+  const fid = parseInt(fileId);
+
+  try {
+    const access = await verifyPublicWriteAccess(slug, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const { baseFile } = access;
+
+    if (fid === baseFile.id) return res.status(403).json({ error: 'Cannot delete the shared root.' });
+    if (!(await isWithinSharedFolder(fid, baseFile.id))) return res.status(403).json({ error: 'Access denied.' });
+
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fid, baseFile.owner_id]);
+    if (fileRes.rows.length === 0) return res.status(404).json({ error: 'Not found.' });
+    const file = fileRes.rows[0];
+
+    if (file.is_folder) {
+      await deleteFolderRecursive(file.id, baseFile.owner_id);
+    } else {
+      const filePath = path.join(UPLOADS_DIR, file.path);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Public delete error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Copy or move (cut+paste) a file/folder within a writable public share
+app.post('/api/public/shares/:slug/paste', async (req, res) => {
+  const { slug } = req.params;
+  const fid = parseInt(req.body.fileId);
+  const action = req.body.action === 'cut' ? 'cut' : 'copy';
+
+  try {
+    const access = await verifyPublicWriteAccess(slug, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const { baseFile } = access;
+
+    const targetFolderId = req.body.targetParentId ? parseInt(req.body.targetParentId) : baseFile.id;
+    if (!(await isWithinSharedFolder(fid, baseFile.id)) || !(await isWithinSharedFolder(targetFolderId, baseFile.id))) {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    if (action === 'cut') {
+      await pool.query('UPDATE files SET parent_id = $1 WHERE id = $2 AND owner_id = $3', [targetFolderId, fid, baseFile.owner_id]);
+    } else {
+      await copyFileOrFolderRecursive(fid, targetFolderId, baseFile.owner_id);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Public paste error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
 // Public Share ZIP Download
 app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
   const { slug, folderId } = req.params;
