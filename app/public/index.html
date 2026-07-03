@@ -74,7 +74,7 @@
         <form id="auth-form">
           <div class="form-group">
             <label for="username" id="username-label">Benutzername</label>
-            <input type="text" id="username" class="form-control" placeholder="z. B. alex" required autocomplete="username">
+            <input type="text" id="username" class="form-control" placeholder="Alex" required autocomplete="username">
           </div>
           
           <div class="form-group" id="password-group">
@@ -676,6 +676,26 @@
                 </div>
               </div>
               
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
+                  <div>
+                    <h3 style="margin: 0;">Footer</h3>
+                    <p style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.35rem;">Zeigt eine schmale Fußzeile mit Cloud-Name, Copyright, Versionsnummer und optionalen Links (z. B. Datenschutz) auf der Login- und Dashboard-Seite.</p>
+                  </div>
+                  <label class="switch" style="flex-shrink: 0;">
+                    <input type="checkbox" id="admin-footer-enabled">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <div id="admin-footer-links-list" style="margin-top: 1.25rem; display: flex; flex-direction: column; gap: 0.6rem;">
+                  <!-- Dynamisch generiert -->
+                </div>
+                <button type="button" id="admin-footer-add-link-btn" class="btn" style="margin-top: 0.75rem;">
+                  <i data-lucide="plus"></i> Link hinzufügen
+                </button>
+              </div>
+
               <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
                 Branding speichern
               </button>
@@ -1584,6 +1604,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.27"></script>
+  <script src="/app.js?v=1.1.28"></script>
 </body>
 </html>

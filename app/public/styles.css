@@ -30,8 +30,10 @@
   --radius-md: 14px;
   --radius-lg: 24px;
   --radius-xl: 34px;
-  --shadow: 0 1px 2px rgba(31, 41, 71, 0.04), 0 4px 8px rgba(31, 41, 71, 0.05), 0 10px 22px rgba(31, 41, 71, 0.06), 0 22px 48px rgba(31, 41, 71, 0.07);
-  --shadow-lg: 0 2px 6px rgba(31, 41, 71, 0.04), 0 8px 18px rgba(31, 41, 71, 0.05), 0 20px 44px rgba(31, 41, 71, 0.07), 0 40px 90px rgba(31, 41, 71, 0.09);
+  /* Every layer's blur radius is several times its offset so the shadow fades out gradually —
+     no layer is tight/crisp enough to read as a hard edge. */
+  --shadow: 0 3px 10px rgba(31, 41, 71, 0.05), 0 10px 26px rgba(31, 41, 71, 0.06), 0 26px 60px rgba(31, 41, 71, 0.07);
+  --shadow-lg: 0 6px 18px rgba(31, 41, 71, 0.05), 0 18px 44px rgba(31, 41, 71, 0.07), 0 44px 96px rgba(31, 41, 71, 0.09);
   --transition: all 0.32s cubic-bezier(0.25, 0.8, 0.25, 1);
 
   --modal-bg: rgba(0, 0, 0, 0.3);
@@ -59,8 +61,8 @@
   --glass-border: rgba(255, 255, 255, 0.13);
   --glass-highlight: linear-gradient(135deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.02) 100%);
 
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 4px 8px rgba(0, 0, 0, 0.20), 0 10px 22px rgba(0, 0, 0, 0.24), 0 22px 48px rgba(0, 0, 0, 0.28);
-  --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.18), 0 8px 18px rgba(0, 0, 0, 0.22), 0 20px 44px rgba(0, 0, 0, 0.28), 0 40px 90px rgba(0, 0, 0, 0.36);
+  --shadow: 0 3px 12px rgba(0, 0, 0, 0.22), 0 12px 30px rgba(0, 0, 0, 0.26), 0 30px 68px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 6px 20px rgba(0, 0, 0, 0.26), 0 22px 50px rgba(0, 0, 0, 0.32), 0 50px 104px rgba(0, 0, 0, 0.4);
 
   --modal-bg: rgba(0, 0, 0, 0.45);
   --input-bg: rgba(255, 255, 255, 0.06);
@@ -88,8 +90,8 @@
     --glass-border: rgba(255, 255, 255, 0.13);
     --glass-highlight: linear-gradient(135deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.02) 100%);
 
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.18), 0 4px 8px rgba(0, 0, 0, 0.20), 0 10px 22px rgba(0, 0, 0, 0.24), 0 22px 48px rgba(0, 0, 0, 0.28);
-    --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.18), 0 8px 18px rgba(0, 0, 0, 0.22), 0 20px 44px rgba(0, 0, 0, 0.28), 0 40px 90px rgba(0, 0, 0, 0.36);
+    --shadow: 0 3px 12px rgba(0, 0, 0, 0.22), 0 12px 30px rgba(0, 0, 0, 0.26), 0 30px 68px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 6px 20px rgba(0, 0, 0, 0.26), 0 22px 50px rgba(0, 0, 0, 0.32), 0 50px 104px rgba(0, 0, 0, 0.4);
 
     --modal-bg: rgba(0, 0, 0, 0.45);
     --input-bg: rgba(255, 255, 255, 0.06);
@@ -128,13 +130,24 @@ html {
 }
 
 /* Applied to <html> only while the login/register screen is showing — the dashboard keeps its
-   normal scrollbar. Page stays scrollable either way, just without a visible track/thumb. */
+   normal, scrollable page. The login screen is meant to be a fixed one-pager: it doesn't just
+   hide the scrollbar, it actually disables scrolling since the auth card always fits the
+   viewport by design. */
 html.hide-scrollbar {
+  overflow: hidden;
+  height: 100vh;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
 html.hide-scrollbar::-webkit-scrollbar {
   display: none;
+}
+html.hide-scrollbar body {
+  height: 100vh;
+  overflow: hidden;
+}
+html.hide-scrollbar .auth-container {
+  overflow: hidden;
 }
 
 body {
@@ -147,6 +160,36 @@ body {
   flex-direction: column;
   overflow-x: hidden;
   transition: background 0.4s ease, color 0.4s ease;
+}
+
+/* ─── App Footer (login + dashboard, opt-in via admin setting) ─── */
+#app-footer {
+  display: none;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  padding: 0.85rem 1.5rem;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+  border-top: 1px solid var(--color-border);
+  text-align: center;
+}
+
+#app-footer a {
+  color: var(--color-text-muted);
+  text-decoration: none;
+  transition: var(--transition);
+}
+
+#app-footer a:hover {
+  color: var(--color-accent);
+}
+
+#app-footer .app-footer-version {
+  font-family: monospace;
+  opacity: 0.7;
 }
 
 /* ─── Container ─── */

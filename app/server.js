@@ -18,6 +18,7 @@ const {
 
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail } = require('./email');
+const { version: APP_VERSION } = require('./package.json');
 
 require('dotenv').config();
 
@@ -2552,7 +2553,11 @@ app.get('/api/public/branding', async (req, res) => {
     const hasUsersRes = await pool.query('SELECT EXISTS(SELECT 1 FROM users)');
     const hasUsers = hasUsersRes.rows[0].exists;
 
-    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, hasDashboardBgLight, hasLoginBgLight, appUrl, emailConfigured, registrationEnabled, hasUsers });
+    const footerEnabled = (await getSetting('footer_enabled')) === 'true';
+    let footerLinks = [];
+    try { footerLinks = JSON.parse((await getSetting('footer_links')) || '[]'); } catch { footerLinks = []; }
+
+    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, hasDashboardBgLight, hasLoginBgLight, appUrl, emailConfigured, registrationEnabled, hasUsers, footerEnabled, footerLinks, appVersion: APP_VERSION });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }

@@ -3465,6 +3465,12 @@ async function loadAdminSettings() {
       setBgPreview('admin-login-bg-preview', 'admin-login-bg-remove', !!conf.login_bg_image, '/api/public/branding/login-bg?');
       setBgPreview('admin-login-bg-light-preview', 'admin-login-bg-light-remove', !!conf.login_bg_image_light, '/api/public/branding/login-bg?variant=light');
 
+      // Footer
+      document.getElementById('admin-footer-enabled').checked = conf.footer_enabled === 'true';
+      let footerLinks = [];
+      try { footerLinks = JSON.parse(conf.footer_links || '[]'); } catch { footerLinks = []; }
+      renderAdminFooterLinks(footerLinks);
+
       // Systemeinstellungen befüllen
       document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
       document.getElementById('admin-sso-enabled').checked = conf.sso_enabled === 'true';
@@ -3511,13 +3517,50 @@ async function saveAdminConfig(payload) {
 }
 
 // Submit Forms inside Admin View
+function renderAdminFooterLinks(links) {
+  const container = document.getElementById('admin-footer-links-list');
+  container.innerHTML = links.map((link, i) => `
+    <div class="admin-footer-link-row" style="display: flex; gap: 0.5rem; align-items: center;">
+      <input type="text" class="form-control admin-footer-link-label" data-idx="${i}" placeholder="z. B. Datenschutz" value="${escapeHtml(link.label || '')}" style="flex: 1; padding: 0.5rem;">
+      <input type="url" class="form-control admin-footer-link-url" data-idx="${i}" placeholder="https://..." value="${escapeHtml(link.url || '')}" style="flex: 2; padding: 0.5rem;">
+      <button type="button" class="btn-icon admin-footer-link-remove" data-idx="${i}" title="Entfernen" style="background: transparent; border: none; color: #ff5555; flex-shrink: 0;">
+        <i data-lucide="x"></i>
+      </button>
+    </div>
+  `).join('');
+  lucide.createIcons();
+  container.querySelectorAll('.admin-footer-link-remove').forEach(btn => {
+    btn.onclick = () => {
+      const links = readAdminFooterLinks();
+      links.splice(parseInt(btn.dataset.idx), 1);
+      renderAdminFooterLinks(links);
+    };
+  });
+}
+
+function readAdminFooterLinks() {
+  const rows = document.querySelectorAll('#admin-footer-links-list .admin-footer-link-row');
+  return Array.from(rows).map(row => ({
+    label: row.querySelector('.admin-footer-link-label').value.trim(),
+    url: row.querySelector('.admin-footer-link-url').value.trim()
+  })).filter(link => link.label && link.url);
+}
+
+document.getElementById('admin-footer-add-link-btn').onclick = () => {
+  const links = readAdminFooterLinks();
+  links.push({ label: '', url: '' });
+  renderAdminFooterLinks(links);
+};
+
 document.getElementById('admin-branding-form').onsubmit = async (e) => {
   e.preventDefault();
   const payload = {
     cloud_name: document.getElementById('admin-cloud-name').value.trim(),
     cloud_tab_name: document.getElementById('admin-cloud-tab-name').value.trim(),
     custom_color_bg: document.getElementById('admin-color-bg').value,
-    custom_color_accent: document.getElementById('admin-color-accent').value
+    custom_color_accent: document.getElementById('admin-color-accent').value,
+    footer_enabled: document.getElementById('admin-footer-enabled').checked ? 'true' : 'false',
+    footer_links: JSON.stringify(readAdminFooterLinks())
   };
   await saveAdminConfig(payload);
   loadBranding(); // Reload headers & document title instantly
@@ -4580,9 +4623,32 @@ async function loadBranding() {
     } else {
       favicon.href = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="%2300d2ff"><path d="M75,45 C75,32 64,22 50,22 C40,22 31,28 27,37 C25,36 23,36 21,36 C10,36 2,44 2,55 C2,66 10,74 21,74 L75,74 C85,74 93,66 93,55 C93,45 85,37 75,37 C75,37 75,45 75,45 Z"/></svg>';
     }
+
+    renderAppFooter(data);
   } catch (err) {
     console.error('Error loading branding:', err);
   }
+}
+
+function renderAppFooter(data) {
+  let footer = document.getElementById('app-footer');
+  if (!data.footerEnabled) {
+    if (footer) footer.style.display = 'none';
+    return;
+  }
+  if (!footer) {
+    footer = document.createElement('footer');
+    footer.id = 'app-footer';
+    document.body.appendChild(footer);
+  }
+  const year = new Date().getFullYear();
+  const links = (data.footerLinks || []).map(link => `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`).join('');
+  footer.innerHTML = `
+    ${links}
+    <span>&copy; ${year} ${escapeHtml(data.name || 'myCloud')}</span>
+    <span class="app-footer-version">v${escapeHtml(data.appVersion || '')}</span>
+  `;
+  footer.style.display = 'flex';
 }
 
 // Theme follows system preferences automatically (no manual override)
