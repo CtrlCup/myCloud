@@ -235,6 +235,29 @@ function regenerateSession(req) {
   });
 }
 
+// Helper to recursively check if a fileId is a descendant of ancestorId using a CTE.
+// This replaces O(N) sequential database queries in loops with a single efficient index-backed query.
+async function isDescendantOf(fileId, ancestorId) {
+  if (fileId === ancestorId) return true;
+  if (!fileId || !ancestorId) return false;
+  try {
+    const res = await pool.query(
+      `WITH RECURSIVE file_path AS (
+        SELECT id, parent_id FROM files WHERE id = $1
+        UNION ALL
+        SELECT f.id, f.parent_id FROM files f JOIN file_path fp ON f.id = fp.parent_id
+      )
+      SELECT EXISTS(SELECT 1 FROM file_path WHERE id = $2) AS is_descendant`,
+      [fileId, ancestorId]
+    );
+    return res.rows[0].is_descendant;
+  } catch (err) {
+    console.error('Error checking isDescendantOf:', err);
+    return false;
+  }
+}
+
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -430,7 +453,15 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required' });
   }
 
+  const normalizedEmail = email.trim().toLowerCase();
+
   try {
+    // Check if email already exists to prevent duplicate email registrations
+    const existingEmailRes = await pool.query('SELECT id FROM users WHERE LOWER(email) = $1', [normalizedEmail]);
+    if (existingEmailRes.rows.length > 0) {
+      return res.status(409).json({ error: 'Diese E-Mail-Adresse oder dieser Name wird bereits verwendet.' });
+    }
+
     const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
     const userCount = parseInt(userCountRes.rows[0].count);
     const regEnabled = await getSetting('registration_enabled');
@@ -479,7 +510,7 @@ app.post('/api/auth/register', async (req, res) => {
       `INSERT INTO users (username, email, password_hash, role, is_verified, verification_token, has_custom_username) 
        VALUES ($1, $2, $3, $4, $5, $6, false) 
        RETURNING id, username, email, role, is_verified`,
-      [username, email, passwordHash, role, isVerified, verificationToken]
+      [username, normalizedEmail, passwordHash, role, isVerified, verificationToken]
     );
 
     const newUser = result.rows[0];
@@ -882,8 +913,16 @@ app.post('/api/auth/passkey/login-verify', async (req, res) => {
     }
 
     const passkey = passkeyRes.rows[0];
-    const userRes = await pool.query('SELECT id, username, role FROM users WHERE id = $1', [passkey.user_id]);
+    const userRes = await pool.query('SELECT id, username, role, is_active FROM users WHERE id = $1', [passkey.user_id]);
     const user = userRes.rows[0];
+
+    if (!user) {
+      return res.status(404).json({ error: 'No user found with this passkey ID' });
+    }
+
+    if (user.is_active === false) {
+      return res.status(403).json({ error: 'Ihr Account wurde gesperrt. Bitte wenden Sie sich an einen Administrator.' });
+    }
 
     const verification = await verifyAuthenticationResponse({
       response: body,
@@ -1033,6 +1072,9 @@ app.get('/auth/sso/callback', async (req, res) => {
     }
 
     const user = userRes.rows[0];
+    if (user.is_active === false) {
+      return res.status(403).send('Ihr Account wurde gesperrt. Bitte wenden Sie sich an einen Administrator.');
+    }
     await regenerateSession(req);
     req.session.userId = user.id;
     req.session.username = user.username;
@@ -1428,7 +1470,7 @@ async function addFolderToZip(zip, folderId, currentPath, userId) {
 }
 
 // Download folder as ZIP
-app.get('/api/files/download-zip/:id', requireAuth, async (req, res) => {
+app.get('/api/files/download-zip/:id', requireAuth, requirePermission('download'), async (req, res) => {
   const folderId = parseInt(req.params.id);
   const userId = req.session.userId;
 
@@ -1534,7 +1576,11 @@ app.put('/api/files/:id/rename', requireAuth, requirePermission('rename'), async
     const isOwner = await verifyFileOwner(fileId, userId);
     if (!isOwner) return res.status(403).json({ error: 'Access denied' });
 
-    const result = await pool.query('UPDATE files SET name = $1 WHERE id = $2 RETURNING id, name', [newName, fileId]);
+    const newMimeType = getSafeMimeType(newName);
+    const result = await pool.query(
+      'UPDATE files SET name = $1, mime_type = CASE WHEN is_folder = false THEN $2 ELSE mime_type END WHERE id = $3 RETURNING id, name',
+      [newName, newMimeType, fileId]
+    );
     res.json({ success: true, name: result.rows[0].name });
   } catch (err) {
     console.error('Error renaming file:', err);
@@ -1739,7 +1785,7 @@ app.post('/api/files/delete-multiple', requireAuth, requirePermission('delete'),
 });
 
 // Download multiple files/folders as a single ZIP
-app.get('/api/files/download-zip-multiple', requireAuth, async (req, res) => {
+app.get('/api/files/download-zip-multiple', requireAuth, requirePermission('download'), async (req, res) => {
   const idsParam = req.query.ids;
   const userId = req.session.userId;
 
@@ -3012,18 +3058,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
     let currentFolderId = baseFile.id;
     if (parentId !== null) {
       // Validate that parentId is a child of the base shared folder
-      let checkParentId = parentId;
-      let isValidChild = false;
-      
-      while (checkParentId !== null) {
-        if (checkParentId === baseFile.id) {
-          isValidChild = true;
-          break;
-        }
-        const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkParentId]);
-        if (checkRes.rows.length === 0) break;
-        checkParentId = checkRes.rows[0].parent_id;
-      }
+      const isValidChild = await isDescendantOf(parentId, baseFile.id);
 
       if (!isValidChild) {
         return res.status(403).json({ error: 'Access denied.' });
@@ -3166,18 +3201,7 @@ async function verifyPublicShareAccess(slug, fileId, req) {
   if (fileRes.rows.length === 0) return { error: 'File not found.', status: 404 };
 
   const file = fileRes.rows[0];
-  let checkId = file.id;
-  let isValid = false;
-
-  while (checkId !== null) {
-    if (checkId === share.file_id) {
-      isValid = true;
-      break;
-    }
-    const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
-    if (checkRes.rows.length === 0) break;
-    checkId = checkRes.rows[0].parent_id;
-  }
+  const isValid = await isDescendantOf(file.id, share.file_id);
 
   if (!isValid) return { error: 'Access denied.', status: 403 };
 
@@ -3540,14 +3564,7 @@ async function verifyPublicWriteAccess(slug, req) {
 // Walks fileId's parent_id chain up to see whether it is baseFileId or one of its descendants
 // — guards every write route below against a guest supplying an id outside the shared subtree.
 async function isWithinSharedFolder(fileId, baseFileId) {
-  let checkId = fileId;
-  while (checkId !== null) {
-    if (checkId === baseFileId) return true;
-    const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
-    if (checkRes.rows.length === 0) return false;
-    checkId = checkRes.rows[0].parent_id;
-  }
-  return false;
+  return isDescendantOf(fileId, baseFileId);
 }
 
 // Create a folder inside a writable public share

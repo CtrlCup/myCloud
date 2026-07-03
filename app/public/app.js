@@ -2307,7 +2307,14 @@ async function uploadMultipleFiles(filesList) {
   
   updateUploadUI();
   loadFiles(currentFolderId);
-  showToast('Alle Datei-Uploads abgeschlossen!');
+
+  const errors = currentUploadQueue.filter(item => item.status === 'error');
+  const done = currentUploadQueue.filter(item => item.status === 'done');
+  if (errors.length > 0) {
+    showToast(`${done.length} von ${currentUploadQueue.filter(item => item.status !== 'cancelled').length} erfolgreich hochgeladen, ${errors.length} fehlgeschlagen.`);
+  } else {
+    showToast('Alle Datei-Uploads erfolgreich abgeschlossen!');
+  }
 
   checkAndTriggerAutoHide();
 }
@@ -2513,6 +2520,43 @@ document.getElementById('multi-share-btn').onclick = async () => {
   }
 };
 
+// Helper to recursively traverse DirectoryEntry/FileEntry objects and collect all files with relative paths
+async function getAllFilesFromEntries(entries) {
+  const fileList = [];
+
+  async function traverseEntry(entry, path = '') {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      const newPath = path ? path + '/' + file.name : file.name;
+      Object.defineProperty(file, 'webkitRelativePath', {
+        value: newPath,
+        writable: true,
+        configurable: true,
+        enumerable: true
+      });
+      fileList.push(file);
+    } else if (entry.isDirectory) {
+      const dirReader = entry.createReader();
+      const readBatch = () => new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
+      
+      let batch = await readBatch();
+      while (batch.length > 0) {
+        for (const childEntry of batch) {
+          await traverseEntry(childEntry, path ? path + '/' + entry.name : entry.name);
+        }
+        batch = await readBatch();
+      }
+    }
+  }
+
+  const traversePromises = [];
+  for (const entry of entries) {
+    traversePromises.push(traverseEntry(entry));
+  }
+  await Promise.all(traversePromises);
+  return fileList;
+}
+
 // Fullscreen Drag & Drop on Dashboard
 const dragOverlay = document.getElementById('drag-overlay');
 const dashboard = document.getElementById('dashboard-view');
@@ -2548,7 +2592,31 @@ dashboard.addEventListener('drop', async (e) => {
   // Internal drag-and-drop (moving items into folders) is handled by folder items themselves
   if (e.dataTransfer.types.includes('text/x-mycloud-ids')) return;
 
-  const files = e.dataTransfer.files;
+  const entries = [];
+  if (e.dataTransfer.items) {
+    for (let i = 0; i < e.dataTransfer.items.length; i++) {
+      const item = e.dataTransfer.items[i];
+      if (item.kind === 'file') {
+        const entry = item.webkitGetAsEntry();
+        if (entry) {
+          entries.push(entry);
+        }
+      }
+    }
+  }
+
+  let files = [];
+  if (entries.length > 0) {
+    try {
+      files = await getAllFilesFromEntries(entries);
+    } catch (err) {
+      console.error('Error traversing dropped folder structure:', err);
+      files = Array.from(e.dataTransfer.files);
+    }
+  } else {
+    files = Array.from(e.dataTransfer.files);
+  }
+
   if (files.length === 0) return;
 
   await uploadMultipleFiles(files);

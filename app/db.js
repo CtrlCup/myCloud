@@ -121,6 +121,8 @@ async function initDb() {
     `);
 
     await client.query('ALTER TABLE passkeys ADD COLUMN IF NOT EXISTS name VARCHAR(255)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_passkeys_user_id ON passkeys(user_id)');
+
 
     // Files Table
     await client.query(`
@@ -136,6 +138,8 @@ async function initDb() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_files_owner_id ON files(owner_id)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_files_parent_id ON files(parent_id)');
 
     // API Keys Table (personal access tokens for third-party/app clients)
     await client.query(`
@@ -149,6 +153,7 @@ async function initDb() {
         last_used_at TIMESTAMP
       )
     `);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id)');
 
     // Shares Table
     await client.query(`
@@ -164,6 +169,7 @@ async function initDb() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await client.query('CREATE INDEX IF NOT EXISTS idx_shares_file_id ON shares(file_id)');
 
     // Update shares table columns if not exists
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255)');
@@ -191,10 +197,13 @@ async function initDb() {
     // Settings Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS settings (
-        key VARCHAR(50) PRIMARY KEY,
+        key VARCHAR(100) PRIMARY KEY,
         value TEXT NOT NULL
       )
     `);
+    // Alter settings key type if already exists, to support password reset tokens (70 chars)
+    await client.query('ALTER TABLE settings ALTER COLUMN key TYPE VARCHAR(100)');
+
 
     // Seed/sync settings from environment variables if set, otherwise seed defaults
     const getEnvOrSeed = (key, envVal, seedVal) => {

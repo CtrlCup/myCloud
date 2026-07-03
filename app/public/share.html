@@ -1145,6 +1145,43 @@
       e.target.value = '';
     };
 
+    // Helper to recursively traverse DirectoryEntry/FileEntry objects and collect all files with relative paths
+    async function getAllFilesFromEntries(entries) {
+      const fileList = [];
+
+      async function traverseEntry(entry, path = '') {
+        if (entry.isFile) {
+          const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+          const newPath = path ? path + '/' + file.name : file.name;
+          Object.defineProperty(file, 'webkitRelativePath', {
+            value: newPath,
+            writable: true,
+            configurable: true,
+            enumerable: true
+          });
+          fileList.push(file);
+        } else if (entry.isDirectory) {
+          const dirReader = entry.createReader();
+          const readBatch = () => new Promise((resolve, reject) => dirReader.readEntries(resolve, reject));
+          
+          let batch = await readBatch();
+          while (batch.length > 0) {
+            for (const childEntry of batch) {
+              await traverseEntry(childEntry, path ? path + '/' + entry.name : entry.name);
+            }
+            batch = await readBatch();
+          }
+        }
+      }
+
+      const traversePromises = [];
+      for (const entry of entries) {
+        traversePromises.push(traverseEntry(entry));
+      }
+      await Promise.all(traversePromises);
+      return fileList;
+    }
+
     // Fullscreen drag&drop overlay — only appears while a file is actively being dragged over
     // the window, and only when the current share/folder is writable.
     const dragOverlay = document.getElementById('public-drag-overlay');
@@ -1162,13 +1199,40 @@
       shareDragCounter--;
       if (shareDragCounter <= 0) { shareDragCounter = 0; dragOverlay.style.display = 'none'; }
     });
-    document.addEventListener('drop', (e) => {
+    document.addEventListener('drop', async (e) => {
       e.preventDefault();
       shareDragCounter = 0;
       dragOverlay.style.display = 'none';
       if (!shareConfig || !shareConfig.can_write) return;
-      const files = e.dataTransfer.files;
-      if (files.length > 0) uploadMultipleFiles(files);
+
+      const entries = [];
+      if (e.dataTransfer.items) {
+        for (let i = 0; i < e.dataTransfer.items.length; i++) {
+          const item = e.dataTransfer.items[i];
+          if (item.kind === 'file') {
+            const entry = item.webkitGetAsEntry();
+            if (entry) {
+              entries.push(entry);
+            }
+          }
+        }
+      }
+
+      let files = [];
+      if (entries.length > 0) {
+        try {
+          files = await getAllFilesFromEntries(entries);
+        } catch (err) {
+          console.error('Error traversing dropped folder structure:', err);
+          files = Array.from(e.dataTransfer.files);
+        }
+      } else {
+        files = Array.from(e.dataTransfer.files);
+      }
+
+      if (files.length > 0) {
+        await uploadFolderFiles(files);
+      }
     });
 
     async function loadBranding() {
