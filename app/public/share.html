@@ -197,6 +197,9 @@
           <i data-lucide="image"></i> Bild-Vorschau
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-icon" id="image-viewer-download-btn" title="Herunterladen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
+            <i data-lucide="download"></i>
+          </button>
           <button class="btn btn-icon" id="image-viewer-info-btn" title="Informationen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
             <i data-lucide="info"></i>
           </button>
@@ -226,6 +229,9 @@
           <i data-lucide="video"></i> Video-Vorschau
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-icon" id="video-viewer-download-btn" title="Herunterladen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
+            <i data-lucide="download"></i>
+          </button>
           <button class="btn btn-icon" id="video-viewer-info-btn" title="Informationen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
             <i data-lucide="info"></i>
           </button>
@@ -302,6 +308,42 @@
     let clipboardFileId = null;
     let clipboardFileName = null;
     let clipboardAction = null;   // 'copy' | 'cut'
+    let viewerMediaList = [];
+    let viewerMediaIndex = -1;
+
+    const VIEWER_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+    const VIEWER_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+
+    function navigateViewer(direction) {
+      if (viewerMediaList.length === 0 || viewerMediaIndex === -1) return;
+      const newIndex = viewerMediaIndex + direction;
+      if (newIndex < 0 || newIndex >= viewerMediaList.length) return;
+      viewerMediaIndex = newIndex;
+      const next = viewerMediaList[newIndex];
+      const ext = next.name.split('.').pop().toLowerCase();
+
+      const imageOverlay = document.getElementById('image-viewer-overlay');
+      const videoOverlay = document.getElementById('video-viewer-overlay');
+      if (VIEWER_IMAGE_EXTS.includes(ext)) {
+        if (videoOverlay.classList.contains('active')) document.getElementById('close-video-viewer-btn').click();
+        openImageViewer(next.id, next.name, true, slug);
+      } else if (VIEWER_VIDEO_EXTS.includes(ext)) {
+        if (imageOverlay.classList.contains('active')) document.getElementById('close-image-viewer-btn').click();
+        openVideoViewer(next.id, next.name, true, slug);
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      const imageOverlay = document.getElementById('image-viewer-overlay');
+      const videoOverlay = document.getElementById('video-viewer-overlay');
+      const imageActive = imageOverlay.classList.contains('active');
+      const videoActive = videoOverlay.classList.contains('active');
+      if (!imageActive && !videoActive) return;
+
+      if (e.key === 'ArrowRight') { e.preventDefault(); navigateViewer(1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateViewer(-1); }
+      else if (e.key === ' ' && imageActive) { e.preventDefault(); navigateViewer(1); }
+    });
 
     function closeShareContextMenu() {
       document.querySelectorAll('.share-context-menu').forEach(m => m.remove());
@@ -904,6 +946,11 @@
             const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
             const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
             const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
+
+            if (imageExts.includes(ext) || videoExts.includes(ext)) {
+              viewerMediaList = files.filter(f => !f.is_folder && [...imageExts, ...videoExts].includes(f.name.split('.').pop().toLowerCase()));
+              viewerMediaIndex = viewerMediaList.findIndex(f => f.id === file.id);
+            }
 
             if (imageExts.includes(ext)) {
               openImageViewer(file.id, file.name, true, slug);
@@ -1799,12 +1846,14 @@
         currentImageObjectUrl = null;
       }
 
-      const downloadUrl = isPublic 
+      const downloadUrl = isPublic
         ? `/api/public/shares/${slug}/download/${fileId}`
         : `/api/files/download/${fileId}`;
 
+      document.getElementById('image-viewer-download-btn').onclick = () => { window.location.href = downloadUrl; };
+
       const ext = fileName.split('.').pop().toLowerCase();
-      
+
       try {
         if (['heic', 'heif'].includes(ext)) {
           const response = await fetch(downloadUrl);
@@ -1874,6 +1923,8 @@
       const sourceUrl = isPublic
         ? `/api/public/shares/${slug}/download/${fileId}`
         : `/api/files/download/${fileId}`;
+
+      document.getElementById('video-viewer-download-btn').onclick = () => { window.location.href = sourceUrl; };
 
       player.src = sourceUrl;
       overlay.classList.add('active');

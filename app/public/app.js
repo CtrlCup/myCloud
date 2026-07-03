@@ -6,6 +6,12 @@ let isRegisterMode = false;
 let allShares = []; // Alle Shares des Users
 let selectedFileIds = [];
 let renderedFilesList = [];
+// Lets ArrowLeft/ArrowRight (and Space, image-viewer only) step through the image/video
+// viewer without closing it — populated right before openImageViewer/openVideoViewer is called.
+let viewerMediaList = [];
+let viewerMediaIndex = -1;
+let viewerIsPublic = false;
+let viewerSlug = '';
 let lastSelectedId = null; // Für Shift-Auswahl
 let viewMode = localStorage.getItem('viewMode') || 'grid';
 let gridSizeIndex = parseInt(localStorage.getItem('gridSizeIndex') || '2');
@@ -1346,6 +1352,13 @@ function renderFiles(files) {
         const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
         const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
         const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
+
+        if (imageExts.includes(ext) || videoExts.includes(ext)) {
+          viewerMediaList = renderedFilesList.filter(f => !f.is_folder && [...imageExts, ...videoExts].includes(f.name.split('.').pop().toLowerCase()));
+          viewerMediaIndex = viewerMediaList.findIndex(f => f.id === file.id);
+          viewerIsPublic = false;
+          viewerSlug = '';
+        }
 
         if (imageExts.includes(ext)) {
           openImageViewer(file.id, file.name);
@@ -6028,12 +6041,14 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
     currentImageObjectUrl = null;
   }
 
-  const downloadUrl = isPublic 
+  const downloadUrl = isPublic
     ? `/api/public/shares/${slug}/download/${fileId}`
     : `/api/files/download/${fileId}`;
 
+  document.getElementById('image-viewer-download-btn').onclick = () => { window.location.href = downloadUrl; };
+
   const ext = fileName.split('.').pop().toLowerCase();
-  
+
   try {
     if (['heic', 'heif'].includes(ext)) {
       const response = await fetch(downloadUrl);
@@ -6104,6 +6119,8 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
     ? `/api/public/shares/${slug}/download/${fileId}`
     : `/api/files/download/${fileId}`;
 
+  document.getElementById('video-viewer-download-btn').onclick = () => { window.location.href = sourceUrl; };
+
   player.src = sourceUrl;
   overlay.classList.add('active');
 }
@@ -6114,6 +6131,45 @@ document.getElementById('close-video-viewer-btn').onclick = () => {
   player.pause();
   player.src = '';
 };
+
+const VIEWER_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+const VIEWER_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+
+function navigateViewer(direction) {
+  if (viewerMediaList.length === 0 || viewerMediaIndex === -1) return;
+  const newIndex = viewerMediaIndex + direction;
+  if (newIndex < 0 || newIndex >= viewerMediaList.length) return;
+  viewerMediaIndex = newIndex;
+  const next = viewerMediaList[newIndex];
+  const ext = next.name.split('.').pop().toLowerCase();
+
+  const imageOverlay = document.getElementById('image-viewer-overlay');
+  const videoOverlay = document.getElementById('video-viewer-overlay');
+  if (VIEWER_IMAGE_EXTS.includes(ext)) {
+    if (videoOverlay.classList.contains('active')) document.getElementById('close-video-viewer-btn').click();
+    openImageViewer(next.id, next.name, viewerIsPublic, viewerSlug);
+  } else if (VIEWER_VIDEO_EXTS.includes(ext)) {
+    if (imageOverlay.classList.contains('active')) document.getElementById('close-image-viewer-btn').click();
+    openVideoViewer(next.id, next.name, viewerIsPublic, viewerSlug);
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  const imageOverlay = document.getElementById('image-viewer-overlay');
+  const videoOverlay = document.getElementById('video-viewer-overlay');
+  const imageActive = imageOverlay.classList.contains('active');
+  const videoActive = videoOverlay.classList.contains('active');
+  if (!imageActive && !videoActive) return;
+
+  if (e.key === 'ArrowRight') { e.preventDefault(); navigateViewer(1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateViewer(-1); }
+  else if (e.key === ' ' && imageActive) {
+    // Space only advances in the image viewer — in the video viewer it's the native
+    // play/pause shortcut, which takes priority.
+    e.preventDefault();
+    navigateViewer(1);
+  }
+});
 
 // pdfjs-dist only ships the library + the reusable PDFViewer component on npm (not the
 // prebuilt viewer.html app, which Mozilla only distributes as a separate GitHub release ZIP) —
