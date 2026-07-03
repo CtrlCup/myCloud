@@ -6403,6 +6403,7 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
   document.getElementById('video-viewer-download-btn').onclick = () => { window.location.href = sourceUrl; };
 
   player.src = sourceUrl;
+  player._playbackHUDAllowed = false;
   overlay.classList.add('active');
   resetCustomVideoControls();
 }
@@ -6420,6 +6421,40 @@ document.getElementById('close-video-viewer-btn').onclick = () => {
 // re-synced on every openVideoViewer() call since a new src resets playback state.
 const VIDEO_SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.5, 0.75];
 let videoSpeedIndex = 0;
+
+let videoHudTimeout = null;
+function showVideoHUD(iconName, label) {
+  const stage = document.getElementById('video-viewer-stage');
+  if (!stage) return;
+
+  let hud = document.getElementById('video-hud');
+  if (!hud) {
+    hud = document.createElement('div');
+    hud.id = 'video-hud';
+    hud.className = 'video-hud';
+    stage.appendChild(hud);
+  }
+
+  hud.innerHTML = `
+    <i data-lucide="${iconName}"></i>
+    <span class="video-hud-text">${label}</span>
+  `;
+
+  if (window.lucide) {
+    window.lucide.createIcons({
+      attrs: {
+        style: 'width: 36px; height: 36px;'
+      },
+      nameAttr: 'data-lucide'
+    });
+  }
+
+  hud.classList.add('active');
+  if (videoHudTimeout) clearTimeout(videoHudTimeout);
+  videoHudTimeout = setTimeout(() => {
+    hud.classList.remove('active');
+  }, 800);
+}
 
 function formatVideoTime(seconds) {
   if (!isFinite(seconds) || seconds < 0) seconds = 0;
@@ -6460,8 +6495,21 @@ function wireCustomVideoControls() {
   const stage = document.getElementById('video-viewer-stage');
 
   playBtn.onclick = () => { if (player.paused) player.play(); else player.pause(); };
-  player.onplay = () => { playBtn.innerHTML = '<i data-lucide="pause"></i>'; lucide.createIcons(); };
-  player.onpause = () => { playBtn.innerHTML = '<i data-lucide="play"></i>'; lucide.createIcons(); };
+  player.onplay = () => {
+    playBtn.innerHTML = '<i data-lucide="pause"></i>';
+    lucide.createIcons();
+    if (player._playbackHUDAllowed) {
+      showVideoHUD('play', 'Wiedergabe');
+    }
+    player._playbackHUDAllowed = true;
+  };
+  player.onpause = () => {
+    playBtn.innerHTML = '<i data-lucide="play"></i>';
+    lucide.createIcons();
+    if (player._playbackHUDAllowed) {
+      showVideoHUD('pause', 'Pause');
+    }
+  };
 
   player.ontimeupdate = () => {
     if (!player.duration) return;
@@ -6490,6 +6538,7 @@ function wireCustomVideoControls() {
     player.muted = !player.muted;
     muteBtn.innerHTML = player.muted ? '<i data-lucide="volume-x"></i>' : '<i data-lucide="volume-2"></i>';
     lucide.createIcons();
+    showVideoHUD(player.muted ? 'volume-x' : 'volume-2', player.muted ? 'Stumm' : 'Ton an');
   };
   volumeSlider.oninput = () => {
     player.volume = parseFloat(volumeSlider.value);
@@ -6591,23 +6640,29 @@ document.addEventListener('keydown', (e) => {
       e.preventDefault();
       if (player && player.duration) {
         player.currentTime = Math.max(0, player.currentTime - 10);
+        showVideoHUD('rewind', '-10s');
       }
     } else if (e.key === 'ArrowRight') {
       e.preventDefault();
       if (player && player.duration) {
         player.currentTime = Math.min(player.duration, player.currentTime + 10);
+        showVideoHUD('fast-forward', '+10s');
       }
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (volumeSlider) {
         volumeSlider.value = Math.min(1, parseFloat(volumeSlider.value) + 0.05);
         volumeSlider.oninput();
+        const percent = Math.round(parseFloat(volumeSlider.value) * 100);
+        showVideoHUD('volume-2', `Lautstärke: ${percent}%`);
       }
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (volumeSlider) {
         volumeSlider.value = Math.max(0, parseFloat(volumeSlider.value) - 0.05);
         volumeSlider.oninput();
+        const percent = Math.round(parseFloat(volumeSlider.value) * 100);
+        showVideoHUD(percent === 0 ? 'volume-x' : 'volume-2', `Lautstärke: ${percent}%`);
       }
     } else if (e.key === 'm' || e.key === 'M' || e.key === 's' || e.key === 'S') {
       e.preventDefault();

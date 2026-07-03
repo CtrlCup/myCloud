@@ -225,6 +225,49 @@ body {
   right: 1.25rem;
 }
 
+/* ─── Video HUD Overlay ─── */
+.video-hud {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.85);
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  padding: 1rem 1.5rem;
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  z-index: 1000;
+  min-width: 100px;
+}
+
+.video-hud.active {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.video-hud svg {
+  width: 36px !important;
+  height: 36px !important;
+  stroke: currentColor;
+  stroke-width: 2px;
+}
+
+.video-hud-text {
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
 /* ─── Custom video player controls (replaces native <video controls>) ─── */
 .video-controls-bar {
   position: absolute;
