@@ -196,6 +196,114 @@ body {
   right: 1.25rem;
 }
 
+/* ─── Custom video player controls (replaces native <video controls>) ─── */
+.video-controls-bar {
+  position: absolute;
+  left: 1.25rem;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 4;
+  background: rgba(20, 20, 28, 0.6);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 1rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  color: #f2f2f7;
+}
+
+.video-progress-track {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+}
+
+.video-progress-buffered,
+.video-progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.video-progress-buffered {
+  background: rgba(255, 255, 255, 0.28);
+  width: 0%;
+}
+
+.video-progress-fill {
+  background: var(--color-accent);
+  width: 0%;
+}
+
+.video-progress-handle {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 3px rgba(var(--color-accent-rgb), 0.25);
+  pointer-events: none;
+}
+
+.video-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.video-ctrl-btn {
+  background: transparent;
+  border: none;
+  color: #f2f2f7;
+  cursor: pointer;
+  padding: 0.3rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: var(--transition);
+}
+.video-ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.video-ctrl-btn svg {
+  width: 19px;
+  height: 19px;
+}
+.video-speed-btn {
+  font-size: 0.78rem;
+  font-weight: 600;
+  width: 34px;
+}
+
+.video-volume-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.video-volume-group input[type="range"] {
+  width: 70px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.video-time {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(242, 242, 247, 0.85);
+  white-space: nowrap;
+}
+
 /* ─── App Footer (login + dashboard, opt-in via admin setting) ─── */
 #app-footer {
   display: none;

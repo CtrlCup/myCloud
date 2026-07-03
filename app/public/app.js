@@ -6277,6 +6277,7 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
 
   player.src = sourceUrl;
   overlay.classList.add('active');
+  resetCustomVideoControls();
 }
 
 document.getElementById('close-video-viewer-btn').onclick = () => {
@@ -6285,6 +6286,113 @@ document.getElementById('close-video-viewer-btn').onclick = () => {
   player.pause();
   player.src = '';
 };
+
+// Custom video control bar — the native <video controls> UI is replaced entirely because its
+// right-click context menu is outside CSS's reach; this rebuilds play/pause, seek, volume,
+// speed, and fullscreen in the app's own styling. Wired once (idempotent via a guard flag),
+// re-synced on every openVideoViewer() call since a new src resets playback state.
+const VIDEO_SPEEDS = [1, 1.25, 1.5, 1.75, 2, 0.5, 0.75];
+let videoSpeedIndex = 0;
+
+function formatVideoTime(seconds) {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function resetCustomVideoControls() {
+  videoSpeedIndex = 0;
+  const player = document.getElementById('video-viewer-player');
+  player.playbackRate = 1;
+  document.getElementById('video-speed-btn').textContent = '1x';
+  document.getElementById('video-progress-fill').style.width = '0%';
+  document.getElementById('video-progress-handle').style.left = '0%';
+  document.getElementById('video-progress-buffered').style.width = '0%';
+  document.getElementById('video-time-display').textContent = '0:00 / 0:00';
+  document.getElementById('video-play-btn').innerHTML = '<i data-lucide="pause"></i>';
+  lucide.createIcons();
+}
+
+function wireCustomVideoControls() {
+  const player = document.getElementById('video-viewer-player');
+  if (player._customControlsWired) return;
+  player._customControlsWired = true;
+
+  const playBtn = document.getElementById('video-play-btn');
+  const muteBtn = document.getElementById('video-mute-btn');
+  const volumeSlider = document.getElementById('video-volume-slider');
+  const speedBtn = document.getElementById('video-speed-btn');
+  const pipBtn = document.getElementById('video-pip-btn');
+  const fullscreenBtn = document.getElementById('video-fullscreen-btn');
+  const track = document.getElementById('video-progress-track');
+  const fill = document.getElementById('video-progress-fill');
+  const handle = document.getElementById('video-progress-handle');
+  const buffered = document.getElementById('video-progress-buffered');
+  const timeDisplay = document.getElementById('video-time-display');
+  const stage = document.getElementById('video-viewer-stage');
+
+  playBtn.onclick = () => { if (player.paused) player.play(); else player.pause(); };
+  player.onplay = () => { playBtn.innerHTML = '<i data-lucide="pause"></i>'; lucide.createIcons(); };
+  player.onpause = () => { playBtn.innerHTML = '<i data-lucide="play"></i>'; lucide.createIcons(); };
+
+  player.ontimeupdate = () => {
+    if (!player.duration) return;
+    const pct = (player.currentTime / player.duration) * 100;
+    fill.style.width = `${pct}%`;
+    handle.style.left = `${pct}%`;
+    timeDisplay.textContent = `${formatVideoTime(player.currentTime)} / ${formatVideoTime(player.duration)}`;
+  };
+  player.onprogress = () => {
+    if (!player.duration || player.buffered.length === 0) return;
+    const end = player.buffered.end(player.buffered.length - 1);
+    buffered.style.width = `${(end / player.duration) * 100}%`;
+  };
+
+  const seekToEvent = (e) => {
+    const rect = track.getBoundingClientRect();
+    const pct = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    if (player.duration) player.currentTime = pct * player.duration;
+  };
+  let seeking = false;
+  track.onmousedown = (e) => { seeking = true; seekToEvent(e); };
+  document.addEventListener('mousemove', (e) => { if (seeking) seekToEvent(e); });
+  document.addEventListener('mouseup', () => { seeking = false; });
+
+  muteBtn.onclick = () => {
+    player.muted = !player.muted;
+    muteBtn.innerHTML = player.muted ? '<i data-lucide="volume-x"></i>' : '<i data-lucide="volume-2"></i>';
+    lucide.createIcons();
+  };
+  volumeSlider.oninput = () => {
+    player.volume = parseFloat(volumeSlider.value);
+    player.muted = player.volume === 0;
+    muteBtn.innerHTML = player.muted ? '<i data-lucide="volume-x"></i>' : '<i data-lucide="volume-2"></i>';
+    lucide.createIcons();
+  };
+
+  speedBtn.onclick = () => {
+    videoSpeedIndex = (videoSpeedIndex + 1) % VIDEO_SPEEDS.length;
+    const speed = VIDEO_SPEEDS[videoSpeedIndex];
+    player.playbackRate = speed;
+    speedBtn.textContent = `${speed}x`;
+  };
+
+  pipBtn.onclick = async () => {
+    try {
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await player.requestPictureInPicture();
+    } catch { /* not supported on this browser/video */ }
+  };
+
+  fullscreenBtn.onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else stage.requestFullscreen();
+  };
+
+  player.ondblclick = () => fullscreenBtn.onclick();
+}
+wireCustomVideoControls();
 
 const VIEWER_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
 const VIEWER_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
