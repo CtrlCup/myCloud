@@ -606,6 +606,25 @@
       setTimeout(() => toast.classList.remove('show'), 3000);
     }
 
+    // Guards against double-clicks/rapid re-clicks on download triggers — each download hits a
+    // real GET endpoint that increments the share's download_count and can trigger self-destruct
+    // once max_downloads is reached, so firing the request twice for one intended download can
+    // burn through a share's download limit (or destroy a one-time file) before the user actually
+    // received it.
+    let lastDownloadTriggerAt = 0;
+    function canProceedWithDownload() {
+      const now = Date.now();
+      if (now - lastDownloadTriggerAt < 1500) {
+        showToast('Download läuft bereits – bitte kurz warten.');
+        return false;
+      }
+      lastDownloadTriggerAt = now;
+      return true;
+    }
+    function guardedDownload(url) {
+      if (canProceedWithDownload()) window.location.href = url;
+    }
+
     // Escapes untrusted strings (filenames, uploader-chosen names, ...) before they're
     // interpolated into innerHTML — this page shows files/names contributed by whoever holds
     // the link, so they must never be trusted enough to render as raw HTML.
@@ -764,7 +783,7 @@
           const zipBtn = document.getElementById('download-all-zip-btn');
           zipBtn.style.display = 'inline-flex';
           zipBtn.onclick = () => {
-            window.location.href = `/api/public/shares/${slug}/download-zip/${currentFolderId}`;
+            guardedDownload(`/api/public/shares/${slug}/download-zip/${currentFolderId}`);
           };
         } else {
           document.getElementById('download-all-zip-btn').style.display = 'none';
@@ -781,7 +800,12 @@
 
         // Layout elements visibility based on Only-Upload
         if (isOnlyUpload) {
-          toolbar.style.display = 'none';
+          // The toolbar also hosts the "Datei/Ordner hochladen" buttons (see above) — they are
+          // the only click-driven way to upload into a submission-only share (drag & drop being
+          // the alternative, which isn't available on mobile), so the toolbar itself must stay
+          // visible here. Only the breadcrumbs (there's nothing to browse) and file grid don't apply.
+          toolbar.style.display = 'flex';
+          document.getElementById('share-breadcrumbs').innerHTML = '';
           grid.style.display = 'none';
         } else {
           toolbar.style.display = 'flex';
@@ -866,12 +890,14 @@
         btns.push(`<button class="btn" id="single-file-open-btn">${label}</button>`);
       }
       if (shareConfig.can_download) {
-        btns.push(`<a class="btn btn-primary" href="/api/public/shares/${slug}/download/${file.id}"><i data-lucide="download"></i> Herunterladen</a>`);
+        btns.push(`<a class="btn btn-primary" id="single-file-download-link" href="/api/public/shares/${slug}/download/${file.id}"><i data-lucide="download"></i> Herunterladen</a>`);
       }
       actions.innerHTML = btns.join('');
 
       const openBtn = document.getElementById('single-file-open-btn');
       if (openBtn) openBtn.onclick = () => openShareFile(file);
+      const downloadLink = document.getElementById('single-file-download-link');
+      if (downloadLink) downloadLink.onclick = (e) => { if (!canProceedWithDownload()) e.preventDefault(); };
 
       card.style.display = 'flex';
       lucide.createIcons();
@@ -1023,7 +1049,7 @@
               openOfficeEditorPublic(file.id, file.name, slug);
             } else {
               if (shareConfig.can_download) {
-                window.location.href = `/api/public/shares/${slug}/download/${file.id}`;
+                guardedDownload(`/api/public/shares/${slug}/download/${file.id}`);
               } else {
                 showToast('Download für diese Freigabe deaktiviert.');
               }
@@ -1843,6 +1869,10 @@
     }
 
     let currentImageObjectUrl = null;
+    // Bumped on every openImageViewer() call so a slow-resolving async load (HEIC conversion,
+    // info-panel fetch) started for a previous file can detect it's stale and not overwrite the
+    // now-displayed file once it finally finishes.
+    let imageViewerLoadToken = 0;
 
     function formatDuration(seconds) {
       if (!seconds || !isFinite(seconds)) return null;
@@ -1870,6 +1900,10 @@
         panel.classList.remove('active');
         return;
       }
+      // Guards against a slow fetch for a previously-open file resolving after the user has
+      // already navigated to another one and overwriting this panel with stale data.
+      const loadingFor = `${fileId}`;
+      panel.dataset.loadingFor = loadingFor;
       panel.innerHTML = '<h4>Informationen</h4><div style="opacity:0.6;font-size:0.85rem;">Lade...</div>';
       panel.classList.add('active');
       try {
@@ -1877,13 +1911,16 @@
         const res = await fetch(url);
         const file = await res.json();
         if (!res.ok) throw new Error(file.error || 'Fehler beim Laden');
+        if (panel.dataset.loadingFor !== loadingFor) return;
         panel.innerHTML = renderViewerInfoPanel(file, getExtra ? getExtra() : {});
       } catch (err) {
+        if (panel.dataset.loadingFor !== loadingFor) return;
         panel.innerHTML = '<h4>Informationen</h4><div style="opacity:0.6;font-size:0.85rem;">Konnte nicht geladen werden.</div>';
       }
     }
 
     async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
+      const loadToken = ++imageViewerLoadToken;
       const overlay = document.getElementById('image-viewer-overlay');
       const img = document.getElementById('image-viewer-img');
       const loading = document.getElementById('image-viewer-loading');
@@ -1912,7 +1949,13 @@
         ? `/api/public/shares/${slug}/download/${fileId}`
         : `/api/files/download/${fileId}`;
 
-      document.getElementById('image-viewer-download-btn').onclick = () => { window.location.href = downloadUrl; };
+      // The download endpoint 403s (as a raw JSON response, replacing the whole page since this
+      // is a full navigation, not a fetch) when the share doesn't allow downloads — so the button
+      // must not be offered at all in that case rather than relying on the server to reject it.
+      const imageDownloadBtn = document.getElementById('image-viewer-download-btn');
+      const imageCanDownload = !isPublic || (shareConfig && shareConfig.can_download);
+      imageDownloadBtn.style.display = imageCanDownload ? '' : 'none';
+      imageDownloadBtn.onclick = () => guardedDownload(downloadUrl);
 
       const ext = fileName.split('.').pop().toLowerCase();
 
@@ -1928,7 +1971,8 @@
             toType: 'image/jpeg',
             quality: 0.8
           });
-          
+
+          if (loadToken !== imageViewerLoadToken) return; // user navigated away meanwhile
           currentImageObjectUrl = URL.createObjectURL(convertedBlob);
           img.src = currentImageObjectUrl;
         } else if (['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) {
@@ -1951,6 +1995,7 @@
         };
       } catch (err) {
         console.error('Image viewer error:', err);
+        if (loadToken !== imageViewerLoadToken) return; // user navigated away meanwhile
         loading.style.display = 'none';
         title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
         lucide.createIcons();
@@ -1987,7 +2032,12 @@
         ? `/api/public/shares/${slug}/download/${fileId}`
         : `/api/files/download/${fileId}`;
 
-      document.getElementById('video-viewer-download-btn').onclick = () => { window.location.href = sourceUrl; };
+      // Same reasoning as the image viewer: hide the button rather than let a can_download=false
+      // share hit the 403 JSON response as a full-page navigation.
+      const videoDownloadBtn = document.getElementById('video-viewer-download-btn');
+      const videoCanDownload = !isPublic || (shareConfig && shareConfig.can_download);
+      videoDownloadBtn.style.display = videoCanDownload ? '' : 'none';
+      videoDownloadBtn.onclick = () => guardedDownload(sourceUrl);
 
       player.src = sourceUrl;
       overlay.classList.add('active');
