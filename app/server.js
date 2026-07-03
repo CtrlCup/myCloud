@@ -1971,6 +1971,30 @@ if (!fs.existsSync(THUMBNAILS_DIR)) {
   fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
 }
 
+// Reads camera make/model + lens out of an image's EXIF data via exiftool (already used above
+// for RAW thumbnail extraction). Returns null if the file has no such tags at all (e.g.
+// screenshots, AI-generated images, anything stripped of EXIF) so the caller can hide the whole
+// section rather than showing empty fields.
+function getExifSummary(physicalFilename) {
+  return new Promise((resolve) => {
+    const inputPath = path.join(UPLOADS_DIR, physicalFilename);
+    const { exec } = require('child_process');
+    const cmd = `exiftool -j -Make -Model -LensModel -LensID "${inputPath}"`;
+    exec(cmd, (err, stdout) => {
+      if (err) return resolve(null);
+      try {
+        const data = JSON.parse(stdout)[0];
+        const camera = [data.Make, data.Model].filter(Boolean).join(' ').trim();
+        const lens = data.LensModel || data.LensID || null;
+        if (!camera && !lens) return resolve(null);
+        resolve({ camera: camera || null, lens });
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
 // Helper to generate a thumbnail using ffmpeg or dcraw/exiftool
 function generateThumbnail(physicalFilename, extension) {
   return new Promise((resolve) => {
@@ -2057,13 +2081,20 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
 // Single-file metadata, used by the image/video viewer's info panel. Registered after every
 // other literal-segment /api/files/... GET route above so this catch-all :id pattern can't
 // shadow them.
+const EXIF_CAPABLE_EXTS = ['jpg', 'jpeg', 'tif', 'tiff', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+
 app.get('/api/files/:id', requireAuth, async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
   try {
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fileId, userId]);
     if (fileRes.rows.length === 0) return res.status(404).json({ error: 'File not found' });
-    res.json(fileRes.rows[0]);
+    const file = fileRes.rows[0];
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!file.is_folder && EXIF_CAPABLE_EXTS.includes(ext)) {
+      file.exif = await getExifSummary(file.path);
+    }
+    res.json(file);
   } catch (err) {
     console.error('Error fetching file metadata:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -3013,7 +3044,12 @@ app.get('/api/public/shares/:slug/meta/:fileId', async (req, res) => {
   try {
     const access = await verifyPublicShareAccess(slug, fileId, req);
     if (access.error) return res.status(access.status).json({ error: access.error });
-    res.json(access.file);
+    const file = access.file;
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!file.is_folder && EXIF_CAPABLE_EXTS.includes(ext)) {
+      file.exif = await getExifSummary(file.path);
+    }
+    res.json(file);
   } catch (err) {
     console.error('Public metadata fetch error:', err);
     res.status(500).json({ error: 'Internal server error.' });
