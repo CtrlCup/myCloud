@@ -4725,10 +4725,31 @@ function renderAppFooter(data) {
 
 // Theme follows system preferences automatically (no manual override)
 
+function detectSoftwareRendering() {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (!gl) return true;
+    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+    if (!debugInfo) return false;
+    const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
+    const vendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || '';
+    return /swiftshader|llvmpipe|software|mesa|google swift|google rendering/i.test(renderer) || 
+           /swiftshader/i.test(vendor);
+  } catch (e) {
+    return true;
+  }
+}
+
 /* ==========================================================================
    INITIALIZATION
    ========================================================================== */
 window.onload = () => {
+  // Detect software rendering and add class for performance fallback
+  if (detectSoftwareRendering()) {
+    document.documentElement.classList.add('software-render');
+  }
+
   // Clear any previously saved manual theme so system preference takes over
   localStorage.removeItem('theme');
   document.documentElement.removeAttribute('data-theme');

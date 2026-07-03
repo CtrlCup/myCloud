@@ -115,6 +115,35 @@
   50% { transform: translate(26px, 32px); }
 }
 
+/* ─── Software Rendering Fallbacks (GPU-less performance mode) ─── */
+.software-render {
+  --glass-bg: #ffffff;
+  --color-surface: #f4f5f8;
+  --modal-bg: rgba(0, 0, 0, 0.5);
+  --dropdown-bg: #ffffff;
+  --glass-blur: blur(0px) !important;
+  --shadow: 0 2px 6px rgba(0,0,0,0.15);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,0.22);
+}
+
+[data-theme="dark"].software-render,
+.software-render[data-theme="dark"] {
+  --glass-bg: #1e1f26;
+  --color-surface: #2c2e38;
+  --modal-bg: rgba(0, 0, 0, 0.6);
+  --dropdown-bg: #2c2e38;
+  --glass-blur: blur(0px) !important;
+  --shadow: 0 2px 8px rgba(0,0,0,0.3);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,0.4);
+}
+
+.software-render *,
+.software-render *::before,
+.software-render *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 /* ─── Reset & Basis ─── */
 *, *::before, *::after {
   box-sizing: border-box;
