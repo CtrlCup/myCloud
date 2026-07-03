@@ -2076,7 +2076,7 @@ app.get('/api/files/:id', requireAuth, async (req, res) => {
 
 // Create a share link
 app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res) => {
-  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, canCollab } = req.body;
+  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, canCollab, message } = req.body;
   const userId = req.session.userId;
 
   try {
@@ -2106,11 +2106,12 @@ app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res
     const passwordHash = password ? await bcrypt.hash(password, 10) : null;
     const maxDownloadsVal = maxDownloads ? parseInt(maxDownloads) : null;
     const onlyUploadVal = onlyUpload === true;
+    const messageVal = message ? String(message).trim().slice(0, 2000) || null : null;
 
     const result = await pool.query(
-      `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, password_hash, max_downloads, only_upload, can_collab)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal, canCollab === true]
+      `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, password_hash, max_downloads, only_upload, can_collab, message)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal, canCollab === true, messageVal]
     );
 
     res.status(201).json(result.rows[0]);
@@ -2123,7 +2124,7 @@ app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res
 // Update an existing share link
 app.put('/api/shares/:id', requireAuth, async (req, res) => {
   const shareId = parseInt(req.params.id);
-  const { customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, removePassword, canCollab } = req.body;
+  const { customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, removePassword, canCollab, message } = req.body;
   const userId = req.session.userId;
 
   try {
@@ -2181,13 +2182,17 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
       ? (canCollab === true)
       : share.can_collab;
 
+    const messageVal = (message !== undefined)
+      ? (message ? String(message).trim().slice(0, 2000) || null : null)
+      : share.message;
+
     const result = await pool.query(
       `UPDATE shares
        SET slug = $1, can_read = $2, can_write = $3, can_download = $4, can_zip = $5, expires_at = $6,
-           password_hash = $7, max_downloads = $8, only_upload = $9, can_collab = $10
-       WHERE id = $11 RETURNING *`,
+           password_hash = $7, max_downloads = $8, only_upload = $9, can_collab = $10, message = $11
+       WHERE id = $12 RETURNING *`,
       [slug, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt,
-       passwordHash, maxDownloadsVal, onlyUploadVal, canCollabVal, shareId]
+       passwordHash, maxDownloadsVal, onlyUploadVal, canCollabVal, messageVal, shareId]
     );
 
     res.json(result.rows[0]);
@@ -2828,6 +2833,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         expires_at: share.expires_at,
         only_upload: share.only_upload,
         can_collab: share.can_collab,
+        message: share.message,
       },
       baseFile: {
         id: baseFile.id,

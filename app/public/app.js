@@ -2567,6 +2567,12 @@ const shareCanWriteCheck = document.getElementById('share-can-write');
 const shareCanDownloadCheck = document.getElementById('share-can-download');
 const shareCanZipCheck = document.getElementById('share-can-zip');
 const shareCanCollabCheck = document.getElementById('share-can-collab');
+const shareAddMessageCheck = document.getElementById('share-add-message');
+const shareMessageInput = document.getElementById('share-message-input');
+shareAddMessageCheck.onchange = () => {
+  shareMessageInput.style.display = shareAddMessageCheck.checked ? 'block' : 'none';
+  if (!shareAddMessageCheck.checked) shareMessageInput.value = '';
+};
 
 // Which permission rows apply to the file currently open in the share modal — set by
 // openShareModal(), read by updateSharePermissionsUI() so it knows what to restore when
@@ -2821,6 +2827,9 @@ async function openShareModal(file) {
   document.getElementById('share-password').value = '';
   document.getElementById('share-max-downloads').value = '';
   document.getElementById('share-only-upload').checked = false;
+  shareAddMessageCheck.checked = false;
+  shareMessageInput.value = '';
+  shareMessageInput.style.display = 'none';
   document.getElementById('share-password-remove-container').style.display = 'none';
   document.getElementById('share-password-remove').checked = false;
   deleteShareBtn.style.display = 'none';
@@ -2872,7 +2881,12 @@ async function openShareModal(file) {
       shareCanDownloadCheck.checked = existing.can_download;
       shareCanZipCheck.checked = existing.can_zip;
       shareCanCollabCheck.checked = existing.can_collab;
-      
+      if (existing.message) {
+        shareAddMessageCheck.checked = true;
+        shareMessageInput.value = existing.message;
+        shareMessageInput.style.display = 'block';
+      }
+
       if (existing.expires_at) {
         const expiryDate = new Date(existing.expires_at);
         const year = expiryDate.getFullYear();
@@ -2966,7 +2980,8 @@ shareForm.onsubmit = async (e) => {
     maxDownloads: document.getElementById('share-max-downloads').value ? parseInt(document.getElementById('share-max-downloads').value) : null,
     onlyUpload: document.getElementById('share-only-upload').checked,
     removePassword: document.getElementById('share-password-remove').checked,
-    canCollab: shareCanCollabCheck.checked
+    canCollab: shareCanCollabCheck.checked,
+    message: shareAddMessageCheck.checked ? shareMessageInput.value.trim() : null
   };
 
   const url = existingId ? `/api/shares/${existingId}` : '/api/shares';
