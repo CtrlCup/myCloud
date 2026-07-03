@@ -83,10 +83,59 @@ function getSafeMimeType(filename) {
 
 const pdfParse = require('pdf-parse');
 
+// OCR support (tesseract-ocr + poppler-utils, installed in the Dockerfile alongside the
+// existing ffmpeg/exiftool system tools) so images and scanned PDFs without a text layer are
+// still findable via deep search, not just by filename.
+const OCR_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif'];
+
+function ocrImage(imagePath) {
+  return new Promise((resolve) => {
+    const { exec } = require('child_process');
+    const outputBase = imagePath + '.ocrtmp';
+    exec(`tesseract "${imagePath}" "${outputBase}" -l deu+eng`, { timeout: 30000 }, () => {
+      try {
+        const text = fs.readFileSync(outputBase + '.txt', 'utf8');
+        fs.unlinkSync(outputBase + '.txt');
+        resolve(text.trim());
+      } catch {
+        resolve('');
+      }
+    });
+  });
+}
+
+// Scanned PDFs have no embedded text layer to extract — render the first 10 pages to images
+// (poppler's pdftoppm) and OCR each one instead. Page cap keeps a pathological huge scan from
+// blocking the upload response for minutes.
+async function ocrPdf(pdfPath) {
+  const { exec } = require('child_process');
+  const tmpPrefix = pdfPath + '.ocrpage';
+  await new Promise((resolve) => {
+    exec(`pdftoppm -png -r 150 -l 10 "${pdfPath}" "${tmpPrefix}"`, { timeout: 60000 }, () => resolve());
+  });
+
+  const dir = path.dirname(pdfPath);
+  const base = path.basename(tmpPrefix);
+  let pageFiles = [];
+  try {
+    pageFiles = fs.readdirSync(dir).filter(f => f.startsWith(base)).sort();
+  } catch {
+    return '';
+  }
+
+  let combined = '';
+  for (const pf of pageFiles) {
+    const pagePath = path.join(dir, pf);
+    combined += (await ocrImage(pagePath)) + '\n';
+    try { fs.unlinkSync(pagePath); } catch { /* best-effort cleanup */ }
+  }
+  return combined.trim();
+}
+
 async function extractTextContent(filePath, mimeType, fileName) {
   try {
     const ext = path.extname(fileName).toLowerCase();
-    
+
     // 1. PDF files
     if (ext === '.pdf' || mimeType === 'application/pdf') {
       if (!fs.existsSync(filePath)) return null;
@@ -94,9 +143,13 @@ async function extractTextContent(filePath, mimeType, fileName) {
       const uint8Array = new Uint8Array(dataBuffer);
       const parser = new pdfParse.PDFParse(uint8Array);
       const parsed = await parser.getText();
-      return parsed.text || '';
+      const text = parsed.text || '';
+      if (text.trim().length > 20) return text;
+      // Likely a scanned PDF with no text layer — fall back to OCR.
+      const ocrText = await ocrPdf(filePath);
+      return ocrText || text;
     }
-    
+
     // 2. Plain text / code files
     const textExts = ['.txt', '.md', '.json', '.js', '.css', '.html', '.py', '.sh', '.xml', '.yaml', '.yml', '.csv', '.ini', '.conf'];
     if (textExts.includes(ext) || (mimeType && mimeType.startsWith('text/'))) {
@@ -104,6 +157,13 @@ async function extractTextContent(filePath, mimeType, fileName) {
       const text = fs.readFileSync(filePath, 'utf8');
       // Cap size to 500KB to prevent db bloat
       return text.substring(0, 500000);
+    }
+
+    // 3. Images — OCR any visible text (screenshots, scanned documents, photos of signs, etc.)
+    if (OCR_IMAGE_EXTS.includes(ext)) {
+      if (!fs.existsSync(filePath)) return null;
+      const ocrText = await ocrImage(filePath);
+      return ocrText || null;
     }
   } catch (err) {
     console.error('Error extracting text content from file:', fileName, err);
