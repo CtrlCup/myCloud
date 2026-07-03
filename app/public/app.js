@@ -4860,8 +4860,6 @@ function loadOfficeScript(publicUrl) {
 }
 
 async function openOfficeEditor(fileId, fileName) {
-  showToast('Bereite Office-Editor vor...');
-
   try {
     const res = await fetch(`/api/eurooffice/config/${fileId}`);
     if (!res.ok) {
@@ -5631,7 +5629,6 @@ function updateCollabUsersListUI(users) {
 let currentEditingFileId = null;
 
 async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
-  showToast('Lade Code-Editor...');
   currentEditingFileId = fileId;
 
   try {

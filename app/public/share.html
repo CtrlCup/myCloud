@@ -1714,7 +1714,6 @@
     let currentEditingFileId = null;
 
     async function openCodeEditor(fileId, fileName, isPublic = false, slug = '') {
-      showToast('Lade Code-Editor...');
       currentEditingFileId = fileId;
 
       try {
@@ -1863,7 +1862,6 @@
         if (!readOnly) {
           const doSave = async () => {
             const updatedContent = monacoEditorInstance.getValue();
-            showToast('Speichere Datei...');
 
             try {
               const saveUrl = isPublic
@@ -2345,8 +2343,6 @@
     }
 
     async function openOfficeEditorPublic(fileId, fileName, slug) {
-      showToast('Bereite Office-Editor vor...');
-
       try {
         const res = await fetch(`/api/public/shares/${slug}/eurooffice/config/${fileId}`);
         if (!res.ok) {
