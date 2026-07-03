@@ -3128,49 +3128,6 @@ app.post('/api/public/shares/:slug/unlock', async (req, res) => {
 });
 
 
-// Helper to increment download count and check if a file/share should self-destruct
-async function incrementDownloadCountAndCheckSelfDestruct(shareId) {
-  try {
-    // Atomic increment bounded by max_downloads (a plain read-then-write let concurrent
-    // requests all pass the limit check before any of them recorded their download).
-    const shareRes = await pool.query(
-      `UPDATE shares SET download_count = download_count + 1
-       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
-       RETURNING *`,
-      [shareId]
-    );
-    if (shareRes.rows.length === 0) return;
-    const share = shareRes.rows[0];
-
-    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [share.file_id]);
-    if (fileRes.rows.length === 0) return;
-    const file = fileRes.rows[0];
-
-    // Self-destruct is specifically for one-time notes. It must NOT also fire just because a
-    // share's overall download limit was reached — for a regular (non-note) folder share that
-    // would delete the entire shared folder tree the moment the cap is hit, not just stop
-    // further downloads. The counter check at the top of every share route already stops
-    // further downloads once the limit is reached; no deletion is needed for that case. A note
-    // with attachments is a folder (holding the note text + attachment files) that is itself
-    // flagged is_one_time_note — its children are plain files, deleted recursively below.
-    if (file.is_one_time_note) {
-      if (file.is_folder) {
-        await deleteFolderRecursive(file.id, file.owner_id);
-      } else {
-        const filePath = path.join(UPLOADS_DIR, file.path);
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-        await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-      }
-      // Cascades automatically to delete corresponding share record
-      console.log(`Self-destructed one-time note ${file.name} (ID: ${file.id})`);
-    }
-  } catch (err) {
-    console.error('Self-destruct check error:', err);
-  }
-}
-
 // Helper for public share validation
 async function verifyPublicShareAccess(slug, fileId, req) {
   const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
@@ -3241,13 +3198,34 @@ app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
 
-    const content = fs.readFileSync(filePath, 'utf8');
-    res.type('text/plain').send(content);
+    // Atomic increment bounded by max_downloads, done before reading/sending content so two
+    // concurrent views of a one-time note can't both succeed before either's increment runs
+    // (mirrors the fix applied to the file/ZIP download routes for the same race).
+    const incRes = await pool.query(
+      `UPDATE shares SET download_count = download_count + 1
+       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+       RETURNING *`,
+      [share.id]
+    );
+    if (incRes.rows.length === 0) {
+      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    }
 
-    // Increment and check self-destruction after content is fully sent
-    res.on('finish', async () => {
-      await incrementDownloadCountAndCheckSelfDestruct(share.id);
-    });
+    const content = fs.readFileSync(filePath, 'utf8');
+
+    if (file.is_one_time_note) {
+      res.on('finish', async () => {
+        try {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+          console.log(`Self-destructed one-time note ${file.name} (ID: ${file.id})`);
+        } catch (err) {
+          console.error('Self-destruct cleanup error:', err);
+        }
+      });
+    }
+
+    res.type('text/plain').send(content);
   } catch (err) {
     console.error('Public content fetch error:', err);
     res.status(500).json({ error: 'Internal server error.' });
@@ -3409,16 +3387,37 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 
     const { file, share } = access;
     if (!share.can_download) return res.status(403).json({ error: 'Download permissions denied.' });
-
-    // Check download limit
-    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
-      return res.status(410).json({ error: 'This share has reached its download limit.' });
-    }
-
     if (file.is_folder) return res.status(400).json({ error: 'Cannot download folder.' });
 
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found.' });
+
+    // Atomic increment bounded by max_downloads, done before streaming starts so two
+    // concurrent downloads can't both slip past the limit (a plain read-then-write, as this
+    // route used to do via a post-stream callback, lets that race through — mirrors the fix
+    // already applied to the ZIP download route).
+    const incRes = await pool.query(
+      `UPDATE shares SET download_count = download_count + 1
+       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+       RETURNING *`,
+      [share.id]
+    );
+    if (incRes.rows.length === 0) {
+      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    }
+
+    // A one-time note self-destructs only after the file has been fully sent.
+    if (file.is_one_time_note) {
+      res.on('finish', async () => {
+        try {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+          console.log(`Self-destructed one-time note ${file.name} (ID: ${file.id})`);
+        } catch (err) {
+          console.error('Self-destruct cleanup error:', err);
+        }
+      });
+    }
 
     if (req.query.inline === 'true') {
       let mimeType = file.mime_type;
@@ -3436,19 +3435,10 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
           'Content-Type': mimeType,
           'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
         }
-      }, async (err) => {
-        if (!err) {
-          await incrementDownloadCountAndCheckSelfDestruct(share.id);
-        }
       });
     }
 
-    // Increment download count and check self-destruct after download completes
-    res.download(filePath, file.name, async (err) => {
-      if (!err) {
-        await incrementDownloadCountAndCheckSelfDestruct(share.id);
-      }
-    });
+    res.download(filePath, file.name);
   } catch (err) {
     console.error('Public download error:', err);
     res.status(500).json({ error: 'Internal server error.' });
