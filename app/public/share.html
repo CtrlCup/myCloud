@@ -76,14 +76,6 @@
 
     <main class="explorer" id="main-explorer">
 
-      <!-- Nachricht des Freigebenden an den Besucher -->
-      <div class="card" id="share-message-card" style="display: none; margin-bottom: 1.5rem; background: rgba(var(--color-accent-rgb), 0.08); border-color: rgba(var(--color-accent-rgb), 0.25);">
-        <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
-          <i data-lucide="message-square" style="width: 20px; height: 20px; color: var(--color-accent); flex-shrink: 0; margin-top: 0.1rem;"></i>
-          <p id="share-message-text" style="margin: 0; font-size: 0.9rem; white-space: pre-wrap; word-break: break-word;"></p>
-        </div>
-      </div>
-
       <!-- Einzeldatei-Ansicht (Download / Vorschau) -->
       <div class="card share-single-card" id="single-file-card" style="display: none;">
         <div class="share-single-thumb" id="single-file-thumb"></div>
@@ -106,6 +98,14 @@
           <button class="btn btn-primary" id="download-all-zip-btn" style="display: none;">
             <i data-lucide="file-archive"></i> Als ZIP herunterladen
           </button>
+        </div>
+      </div>
+
+      <!-- Nachricht des Freigebenden an den Besucher -->
+      <div class="card" id="share-message-card" style="display: none; margin-bottom: 1.5rem; background: rgba(var(--color-accent-rgb), 0.08); border-color: rgba(var(--color-accent-rgb), 0.25);">
+        <div style="display: flex; gap: 0.75rem; align-items: flex-start;">
+          <i data-lucide="message-square" style="width: 20px; height: 20px; color: var(--color-accent); flex-shrink: 0; margin-top: 0.1rem;"></i>
+          <p id="share-message-text" style="margin: 0; font-size: 0.9rem; white-space: pre-wrap; word-break: break-word;"></p>
         </div>
       </div>
 
@@ -686,7 +686,6 @@
           metaCard.style.display = 'none';
           toolbar.style.display = 'none';
           grid.style.display = 'none';
-          dropzone.style.display = 'none';
           renderSingleFileCard(data.baseFile);
           if (!hasAutoOpened) {
             hasAutoOpened = true;

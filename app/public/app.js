@@ -269,6 +269,8 @@ function showView(viewName) {
     notesView.classList.remove('active');
   }
 
+  document.documentElement.classList.toggle('hide-scrollbar', viewName === 'auth');
+
   if (viewName === 'auth') {
     playViewEnter(authView);
     authView.style.display = 'flex';

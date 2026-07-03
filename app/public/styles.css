@@ -127,6 +127,16 @@ html {
   font-size: 16px;
 }
 
+/* Applied to <html> only while the login/register screen is showing — the dashboard keeps its
+   normal scrollbar. Page stays scrollable either way, just without a visible track/thumb. */
+html.hide-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+html.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 body {
   position: relative;
   z-index: 1;
