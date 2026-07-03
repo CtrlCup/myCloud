@@ -6102,13 +6102,77 @@ async function toggleViewerInfoPanel(panel, fileId, isPublic, slug, getExtra) {
   }
 }
 
+// Double-click on the viewer's filename (image/video) to rename in place — mirrors
+// startEditorTitleRename's finish/keydown/blur pattern. Dashboard-only: there is no rename
+// endpoint for the public share viewer.
+function startViewerRename(prefix, fileId) {
+  const nameEl = document.getElementById(`${prefix}-viewer-filename`);
+  const input = document.getElementById(`${prefix}-viewer-filename-input`);
+  if (!nameEl || !input || input.style.display !== 'none') return;
+
+  const originalName = nameEl.textContent;
+  input.value = originalName;
+  nameEl.style.display = 'none';
+  input.style.display = '';
+  input.focus();
+  const dotIndex = originalName.lastIndexOf('.');
+  input.setSelectionRange(0, dotIndex > 0 ? dotIndex : originalName.length);
+
+  let settled = false;
+  const finish = async (commit) => {
+    if (settled) return;
+    settled = true;
+    const newName = input.value.trim();
+
+    if (!commit || !newName || newName === originalName) {
+      nameEl.style.display = '';
+      input.style.display = 'none';
+      return;
+    }
+
+    try {
+      const r = await fetch(`/api/files/${fileId}/rename`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        nameEl.textContent = data.name;
+        const listEntry = viewerMediaList.find(f => f.id === fileId);
+        if (listEntry) listEntry.name = data.name;
+        showToast('Umbenannt.');
+        loadFiles(currentFolderId);
+      } else {
+        nameEl.textContent = originalName;
+        showToast(data.error || 'Fehler beim Umbenennen.');
+      }
+    } catch {
+      nameEl.textContent = originalName;
+      showToast('Verbindungsfehler.');
+    }
+
+    nameEl.style.display = '';
+    input.style.display = 'none';
+  };
+
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  };
+  input.onblur = () => finish(true);
+}
+
 async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
   const overlay = document.getElementById('image-viewer-overlay');
   const img = document.getElementById('image-viewer-img');
   const loading = document.getElementById('image-viewer-loading');
   const title = document.getElementById('image-viewer-title');
+  const filenameEl = document.getElementById('image-viewer-filename');
 
-  title.innerHTML = `<i data-lucide="image"></i> ${escapeHtml(fileName)}`;
+  filenameEl.textContent = fileName;
+  filenameEl.ondblclick = isPublic ? null : () => startViewerRename('image', fileId);
+  filenameEl.style.cursor = isPublic ? '' : 'text';
   updateViewerNavButtons('image');
   lucide.createIcons();
 
@@ -6190,8 +6254,11 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
   const overlay = document.getElementById('video-viewer-overlay');
   const player = document.getElementById('video-viewer-player');
   const title = document.getElementById('video-viewer-title');
+  const filenameEl = document.getElementById('video-viewer-filename');
 
-  title.innerHTML = `<i data-lucide="video"></i> ${escapeHtml(fileName)}`;
+  filenameEl.textContent = fileName;
+  filenameEl.ondblclick = isPublic ? null : () => startViewerRename('video', fileId);
+  filenameEl.style.cursor = isPublic ? '' : 'text';
   updateViewerNavButtons('video');
   lucide.createIcons();
 

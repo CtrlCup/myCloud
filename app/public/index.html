@@ -1393,7 +1393,9 @@
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="image-viewer-title">
-          <i data-lucide="image"></i> Bild-Vorschau
+          <i data-lucide="image"></i>
+          <span id="image-viewer-filename" title="Doppelklick zum Umbenennen" style="cursor: text; border-bottom: 1px dashed transparent;">Bild-Vorschau</span>
+          <input id="image-viewer-filename-input" type="text" style="display: none; background: var(--input-bg); border: 1px solid var(--color-accent); border-radius: 4px; color: var(--color-text); font-weight: 600; font-size: inherit; font-family: inherit; padding: 0.1rem 0.4rem;">
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
           <button class="btn btn-icon" id="image-viewer-download-btn" title="Herunterladen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
@@ -1431,7 +1433,9 @@
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
         <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="video-viewer-title">
-          <i data-lucide="video"></i> Video-Vorschau
+          <i data-lucide="video"></i>
+          <span id="video-viewer-filename" title="Doppelklick zum Umbenennen" style="cursor: text; border-bottom: 1px dashed transparent;">Video-Vorschau</span>
+          <input id="video-viewer-filename-input" type="text" style="display: none; background: var(--input-bg); border: 1px solid var(--color-accent); border-radius: 4px; color: var(--color-text); font-weight: 600; font-size: inherit; font-family: inherit; padding: 0.1rem 0.4rem;">
         </div>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
           <button class="btn btn-icon" id="video-viewer-download-btn" title="Herunterladen" style="padding: 0.4rem; background: transparent; border: none; color: var(--color-text);">
@@ -1616,6 +1620,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.29"></script>
+  <script src="/app.js?v=1.1.30"></script>
 </body>
 </html>
