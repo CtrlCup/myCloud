@@ -32,6 +32,16 @@ if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
+// Physical filenames (on disk) are built from this extension rather than the raw
+// path.extname() of a user-supplied name: several code paths (thumbnailing, OCR, EXIF read)
+// shell out via exec() with the physical filename interpolated into a double-quoted string,
+// so an extension containing a `"` or other shell metacharacter would be command injection.
+// Restricting to a short alphanumeric extension closes that off at the source.
+function safeFileExtension(originalName) {
+  const ext = path.extname(originalName || '');
+  return /^\.[A-Za-z0-9]{1,15}$/.test(ext) ? ext : '';
+}
+
 // Multer storage engine
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -39,7 +49,7 @@ const storage = multer.diskStorage({
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = crypto.randomUUID();
-    cb(null, uniqueSuffix + path.extname(file.originalname));
+    cb(null, uniqueSuffix + safeFileExtension(file.originalname));
   }
 });
 // Without a limit, multer will happily write an unbounded request body to disk before the
@@ -206,11 +216,24 @@ const sessionMiddleware = session({
   saveUninitialized: false,
   cookie: {
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    secure: false, // Set to true if running over HTTPS
+    // Hardcoding this to false meant the session cookie never got the Secure flag even when
+    // the app is deployed behind HTTPS (directly or via a reverse proxy), letting it leak over
+    // a plain-HTTP downgrade. Derive it from the configured public URL instead.
+    secure: (process.env.APP_URL || '').startsWith('https'),
     sameSite: 'lax',
   }
 });
 app.use(sessionMiddleware);
+
+// Regenerates the session ID before granting an authenticated identity, so a session ID an
+// attacker planted before login (session fixation — e.g. via a shared/kiosk browser or a cookie
+// set from a subdomain) doesn't silently become authenticated once the victim logs in. Wraps
+// express-session's callback-based regenerate() in a promise for use in async route handlers.
+function regenerateSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.regenerate(err => (err ? reject(err) : resolve()));
+  });
+}
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -353,9 +376,11 @@ const getRpId = (req) => {
   return host.split(':')[0];
 };
 const getExpectedOrigin = (req) => {
-  if (req.headers.origin) {
-    return req.headers.origin;
-  }
+  // Deliberately NOT trusting req.headers.origin here: it's attacker-controlled on any raw
+  // request that isn't a real browser fetch (e.g. a replayed WebAuthn response sent via curl),
+  // so accepting it as the "expected" origin makes the check tautological — it would always
+  // match whatever the caller claims, defeating the point of validating the origin at all.
+  // Derive it the same way getRpId() derives the RP ID, from the request's own host.
   const host = req.get('host') || 'localhost';
   const proto = req.protocol || 'http';
   return `${proto}://${host}`;
@@ -382,15 +407,20 @@ app.get('/api/auth/status', async (req, res) => {
   }
   
   // Also check if any users exist to determine if registration should be open
-  const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
-  const userCount = parseInt(userCountRes.rows[0].count);
-  const ssoEnabled = (await getSetting('sso_enabled')) === 'true';
+  try {
+    const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
+    const userCount = parseInt(userCountRes.rows[0].count);
+    const ssoEnabled = (await getSetting('sso_enabled')) === 'true';
 
-  res.json({
-    loggedIn: false,
-    firstRun: userCount === 0,
-    ssoEnabled,
-  });
+    res.json({
+      loggedIn: false,
+      firstRun: userCount === 0,
+      ssoEnabled,
+    });
+  } catch (err) {
+    console.error('Error fetching auth status:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Standard Register Route
@@ -470,6 +500,7 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     // Log in automatically if no verification is required
+    await regenerateSession(req);
     req.session.userId = newUser.id;
     req.session.username = newUser.username;
     req.session.role = newUser.role;
@@ -509,6 +540,29 @@ app.get('/api/auth/verify-email', async (req, res) => {
   }
 });
 
+// The password login had no brute-force protection at all: unlike the 2FA step below, an
+// attacker could try unlimited password guesses against a known username/email. Simple
+// in-memory counter per identifier (username/email as typed), mirroring the twoFactorAttempts
+// pattern already used further down — no new infrastructure, just closes the obvious gap.
+const loginAttempts = new Map(); // identifier -> { count, resetAt }
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of loginAttempts.entries()) {
+    if (entry.resetAt < now) loginAttempts.delete(id);
+  }
+}, 10 * 60 * 1000);
+function recordFailedLoginAttempt(key) {
+  const now = Date.now();
+  const entry = loginAttempts.get(key);
+  if (!entry || entry.resetAt < now) {
+    loginAttempts.set(key, { count: 1, resetAt: now + LOGIN_ATTEMPT_WINDOW_MS });
+  } else {
+    entry.count++;
+  }
+}
+
 // Standard Login Route
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
@@ -516,9 +570,17 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(400).json({ error: 'Username/Email and password are required' });
   }
 
+  const loginKey = username.trim().toLowerCase();
+  const now = Date.now();
+  const attemptEntry = loginAttempts.get(loginKey);
+  if (attemptEntry && attemptEntry.resetAt >= now && attemptEntry.count >= LOGIN_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Zu viele Fehlversuche. Bitte versuche es in ein paar Minuten erneut.' });
+  }
+
   try {
     const result = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
     if (result.rows.length === 0) {
+      recordFailedLoginAttempt(loginKey);
       return res.status(401).json({ error: 'Ungültiger Benutzername oder E-Mail oder Passwort.' });
     }
 
@@ -533,9 +595,12 @@ app.post('/api/auth/login', async (req, res) => {
 
     const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) {
+      recordFailedLoginAttempt(loginKey);
       await pool.query('UPDATE users SET last_failed_login_at = NOW() WHERE id = $1', [user.id]);
       return res.status(401).json({ error: 'Ungültiger Benutzername oder E-Mail oder Passwort.' });
     }
+
+    loginAttempts.delete(loginKey);
 
     // Check email verification
     if (!user.is_verified) {
@@ -568,6 +633,7 @@ app.post('/api/auth/login', async (req, res) => {
       }
     }
 
+    await regenerateSession(req);
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
@@ -643,16 +709,13 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
 
     twoFactorAttempts.delete(tempUserId);
 
+    // regenerateSession() replaces the session store entry wholesale, which also takes care of
+    // clearing tempUserId/twoFactorCode/etc. — no need to delete them individually afterwards.
+    await regenerateSession(req);
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
     await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
-
-    delete req.session.tempUserId;
-    delete req.session.tempUsername;
-    delete req.session.tempUserRole;
-    delete req.session.twoFactorCode;
-    delete req.session.twoFactorCodeExpires;
 
     res.json({
       success: true,
@@ -841,10 +904,10 @@ app.post('/api/auth/passkey/login-verify', async (req, res) => {
         passkey.id,
       ]);
 
+      await regenerateSession(req);
       req.session.userId = user.id;
       req.session.username = user.username;
       req.session.role = user.role;
-      delete req.session.currentChallenge;
       await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
 
       return res.json({ success: true, user: { id: user.id, username: user.username, role: user.role } });
@@ -863,31 +926,36 @@ app.post('/api/auth/passkey/login-verify', async (req, res) => {
 
 // Redirect to SSO Provider
 app.get('/auth/sso', async (req, res) => {
-  const ssoEnabled = await getSetting('sso_enabled');
-  if (ssoEnabled !== 'true') {
-    return res.status(400).send('SSO is currently disabled.');
+  try {
+    const ssoEnabled = await getSetting('sso_enabled');
+    if (ssoEnabled !== 'true') {
+      return res.status(400).send('SSO is currently disabled.');
+    }
+
+    const clientId = await getSetting('sso_client_id');
+    const issuerUrl = await getSetting('sso_issuer_url');
+    const redirectUri = await getSetting('sso_redirect_uri');
+
+    if (!clientId || !issuerUrl || !redirectUri) {
+      return res.status(500).send('SSO configuration is incomplete.');
+    }
+
+    const state = crypto.randomBytes(16).toString('hex');
+    req.session.ssoState = state;
+
+    // Build Auth URL (Assuming standard OIDC endpoint /protocol/openid-connect/auth)
+    const authUrl = `${issuerUrl.replace(/\/$/, '')}/protocol/openid-connect/auth?` +
+      `client_id=${encodeURIComponent(clientId)}&` +
+      `redirect_uri=${encodeURIComponent(redirectUri)}&` +
+      `response_type=code&` +
+      `scope=openid%20profile%20email&` +
+      `state=${state}`;
+
+    res.redirect(authUrl);
+  } catch (err) {
+    console.error('SSO redirect error:', err);
+    res.status(500).send('Internal server error');
   }
-
-  const clientId = await getSetting('sso_client_id');
-  const issuerUrl = await getSetting('sso_issuer_url');
-  const redirectUri = await getSetting('sso_redirect_uri');
-
-  if (!clientId || !issuerUrl || !redirectUri) {
-    return res.status(500).send('SSO configuration is incomplete.');
-  }
-
-  const state = crypto.randomBytes(16).toString('hex');
-  req.session.ssoState = state;
-
-  // Build Auth URL (Assuming standard OIDC endpoint /protocol/openid-connect/auth)
-  const authUrl = `${issuerUrl.replace(/\/$/, '')}/protocol/openid-connect/auth?` +
-    `client_id=${encodeURIComponent(clientId)}&` +
-    `redirect_uri=${encodeURIComponent(redirectUri)}&` +
-    `response_type=code&` +
-    `scope=openid%20profile%20email&` +
-    `state=${state}`;
-
-  res.redirect(authUrl);
 });
 
 // SSO Callback
@@ -965,6 +1033,7 @@ app.get('/auth/sso/callback', async (req, res) => {
     }
 
     const user = userRes.rows[0];
+    await regenerateSession(req);
     req.session.userId = user.id;
     req.session.username = user.username;
     req.session.role = user.role;
@@ -1079,7 +1148,11 @@ app.post('/api/auth/reset-password-execute', async (req, res) => {
 
 // Helper to check recursively if a file/folder belongs to an owner
 async function verifyFileOwner(fileId, userId) {
-  if (!fileId) return true;
+  // Only treat an explicit "no parent/file specified" (null/undefined, i.e. root) as
+  // automatically authorized. A plain falsy check (`!fileId`) would also match `0`, `NaN`
+  // and `''` — e.g. an id that failed `parseInt()` — and silently grant access instead of
+  // failing the lookup below.
+  if (fileId === null || fileId === undefined) return true;
   const res = await pool.query('SELECT owner_id FROM files WHERE id = $1', [fileId]);
   if (res.rows.length === 0) return false;
   return res.rows[0].owner_id === userId;
@@ -1226,7 +1299,7 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.s
   try {
     // Check per-user storage quota
     const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [userId]);
-    const quotaBytes = userRes.rows[0].storage_quota ? parseInt(userRes.rows[0].storage_quota) : null;
+    const quotaBytes = parseQuotaBytes(userRes.rows[0].storage_quota).value;
 
     if (quotaBytes !== null) {
       const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [userId]);
@@ -1240,7 +1313,7 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.s
     // Check group (role) storage quota — combined usage of all members of the role
     const roleName = userRes.rows[0].role;
     const roleQuotaRes = await pool.query('SELECT storage_quota FROM roles WHERE name = $1', [roleName]);
-    const roleQuotaBytes = (roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota) ? parseInt(roleQuotaRes.rows[0].storage_quota) : null;
+    const roleQuotaBytes = parseQuotaBytes(roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota).value;
     if (roleQuotaBytes !== null) {
       const groupUsedRes = await pool.query(
         `SELECT COALESCE(SUM(f.size), 0) as total
@@ -1395,8 +1468,14 @@ async function deleteFolderRecursive(folderId, userId) {
       await deleteFolderRecursive(file.id, userId);
     } else {
       const filePath = path.join(UPLOADS_DIR, file.path);
-      if (fs.existsSync(filePath)) {
+      // fs.existsSync() + fs.unlinkSync() is a TOCTOU race: if the file disappears between
+      // the check and the unlink (e.g. an overlapping delete-multiple call on the same
+      // subtree), unlinkSync throws ENOENT here and aborts the recursion partway through,
+      // leaving some rows deleted and others not. Best-effort delete instead.
+      try {
         fs.unlinkSync(filePath);
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
       }
     }
   }
@@ -1424,8 +1503,10 @@ app.delete('/api/files/:id', requireAuth, requirePermission('delete'), async (re
       await deleteFolderRecursive(file.id, userId);
     } else {
       const filePath = path.join(UPLOADS_DIR, file.path);
-      if (fs.existsSync(filePath)) {
+      try {
         fs.unlinkSync(filePath);
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
       }
       await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
     }
@@ -1527,7 +1608,7 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
     const oldPath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(oldPath)) return;
 
-    const newFilename = crypto.randomUUID() + path.extname(file.name);
+    const newFilename = crypto.randomUUID() + safeFileExtension(file.name);
     const newPath = path.join(UPLOADS_DIR, newFilename);
     fs.copyFileSync(oldPath, newPath);
 
@@ -1541,6 +1622,24 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
       [newName, newFilename, file.mime_type, file.size, targetFolderId, userId, file.content]
     );
   }
+}
+
+// Sums the on-disk size of a set of root ids plus everything nested under them (for folders),
+// scoped to the given owner. Used to enforce the same storage quota on copy as on upload —
+// without this, copying was a way to duplicate storage past a user's/group's quota for free.
+async function calculateCopySize(fileIds, userId) {
+  const result = await pool.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id, size, is_folder FROM files WHERE id = ANY($1) AND owner_id = $2
+       UNION ALL
+       SELECT f.id, f.size, f.is_folder FROM files f
+       JOIN subtree s ON f.parent_id = s.id
+       WHERE f.owner_id = $2
+     )
+     SELECT COALESCE(SUM(size), 0) as total FROM subtree WHERE is_folder = false`,
+    [fileIds, userId]
+  );
+  return parseInt(result.rows[0].total || 0);
 }
 
 // Copy multiple files/folders
@@ -1559,8 +1658,40 @@ app.post('/api/files/copy-multiple', requireAuth, async (req, res) => {
       if (!isOwner) return res.status(403).json({ error: 'Access denied to target folder' });
     }
 
-    for (const id of fileIds) {
-      await copyFileOrFolderRecursive(parseInt(id), targetFolderId, userId);
+    // Enforce the same per-user and per-group storage quota as uploads (see /api/files/upload) —
+    // copying creates new physical files/rows too, so it must count against quota just the same.
+    const parsedIds = fileIds.map(id => parseInt(id));
+    const copySize = await calculateCopySize(parsedIds, userId);
+    if (copySize > 0) {
+      const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [userId]);
+      const quotaBytes = userRes.rows[0].storage_quota ? parseInt(userRes.rows[0].storage_quota) : null;
+      if (quotaBytes !== null) {
+        const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [userId]);
+        const usedBytes = parseInt(usedRes.rows[0].total || 0);
+        if (usedBytes + copySize > quotaBytes) {
+          return res.status(413).json({ error: 'Speicherplatzlimit überschritten! Bitte lösche Dateien oder wende dich an einen Admin.' });
+        }
+      }
+
+      const roleName = userRes.rows[0].role;
+      const roleQuotaRes = await pool.query('SELECT storage_quota FROM roles WHERE name = $1', [roleName]);
+      const roleQuotaBytes = (roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota) ? parseInt(roleQuotaRes.rows[0].storage_quota) : null;
+      if (roleQuotaBytes !== null) {
+        const groupUsedRes = await pool.query(
+          `SELECT COALESCE(SUM(f.size), 0) as total
+           FROM files f JOIN users u ON f.owner_id = u.id
+           WHERE u.role = $1 AND f.is_folder = false`,
+          [roleName]
+        );
+        const groupUsed = parseInt(groupUsedRes.rows[0].total || 0);
+        if (groupUsed + copySize > roleQuotaBytes) {
+          return res.status(413).json({ error: 'Das gemeinsame Speicherkontingent deiner Gruppe ist erschöpft. Bitte wende dich an einen Admin.' });
+        }
+      }
+    }
+
+    for (const id of parsedIds) {
+      await copyFileOrFolderRecursive(id, targetFolderId, userId);
     }
 
     res.json({ success: true });
@@ -1592,8 +1723,10 @@ app.post('/api/files/delete-multiple', requireAuth, requirePermission('delete'),
         await deleteFolderRecursive(file.id, userId);
       } else {
         const filePath = path.join(UPLOADS_DIR, file.path);
-        if (fs.existsSync(filePath)) {
+        try {
           fs.unlinkSync(filePath);
+        } catch (e) {
+          if (e.code !== 'ENOENT') throw e;
         }
         await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
       }
@@ -1721,7 +1854,12 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
       finalName += ext;
     }
 
-    const uniqueFilename = crypto.randomUUID() + ext;
+    // The physical on-disk extension must go through the same allowlist as uploads/copies
+    // (see safeFileExtension above) — `ext` above can come straight from the user-supplied
+    // `name` (the `.txt`/`codex`/`other` branch splits on the raw string), and several code
+    // paths (thumbnailing, OCR, EXIF read) later shell out with the physical filename
+    // interpolated into an exec() string.
+    const uniqueFilename = crypto.randomUUID() + safeFileExtension(finalName);
     const physicalPath = path.join(UPLOADS_DIR, uniqueFilename);
     
     let fileSize = 0;
@@ -2012,7 +2150,15 @@ app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermi
 
     // Checkpoint the current (about-to-be-overwritten) state unconditionally, ignoring the
     // usual throttle — a restore is a deliberate action the user should be able to undo too.
+    // The FILE_VERSION_MAX_PER_FILE cap still applies though (only the throttle is skipped),
+    // otherwise repeated restores would grow file_versions for this file forever.
     await pool.query('INSERT INTO file_versions (file_id, content) VALUES ($1, $2)', [fileId, file.content]);
+    await pool.query(
+      `DELETE FROM file_versions WHERE file_id = $1 AND id NOT IN (
+         SELECT id FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC LIMIT $2
+       )`,
+      [fileId, FILE_VERSION_MAX_PER_FILE]
+    );
 
     const filePath = path.join(UPLOADS_DIR, file.path);
     fs.writeFileSync(filePath, restoredContent);
@@ -2887,8 +3033,11 @@ app.get('/api/public/shares/:slug', async (req, res) => {
 
     // List files inside the current folder
     let files = [];
-    if (share.only_upload && baseFile.is_folder) {
-      // "Only Upload" Mode: Return empty list, user can't see files
+    if ((share.only_upload || !share.can_read) && baseFile.is_folder) {
+      // "Only Upload" mode, or a share with read access explicitly disabled: return an empty
+      // list — folder browsing must not be possible just because can_read wasn't re-checked
+      // here (single-file shares still return the base file below regardless of can_read, since
+      // those are meant to keep working as plain direct-download links).
       files = [];
     } else if (baseFile.is_folder) {
       const filesRes = await pool.query(
@@ -3030,6 +3179,13 @@ async function verifyPublicShareAccess(slug, fileId, req) {
   const share = shareRes.rows[0];
   if (share.expires_at && new Date(share.expires_at) < new Date()) {
     return { error: 'Share has expired.', status: 410 };
+  }
+
+  // Check download limit — this must be enforced here too (not just in the top-level listing
+  // and single-file-download routes), otherwise content/meta/thumbnail/eurooffice-config all
+  // keep working forever once the cap is reached.
+  if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+    return { error: 'This share has reached its download limit.', status: 410 };
   }
 
   // Check password protection
@@ -3318,6 +3474,10 @@ app.post('/api/public/shares/:slug/upload', upload.single('file'), async (req, r
       fs.unlinkSync(req.file.path);
       return res.status(410).json({ error: 'Share has expired.' });
     }
+    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+      fs.unlinkSync(req.file.path);
+      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    }
     if (!share.can_write) {
       fs.unlinkSync(req.file.path);
       return res.status(403).json({ error: 'Upload permissions denied.' });
@@ -3376,6 +3536,9 @@ async function verifyPublicWriteAccess(slug, req) {
   if (shareRes.rows.length === 0) return { error: 'Share link not found.', status: 404 };
   const share = shareRes.rows[0];
   if (share.expires_at && new Date(share.expires_at) < new Date()) return { error: 'Share has expired.', status: 410 };
+  if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+    return { error: 'This share has reached its download limit.', status: 410 };
+  }
   if (!share.can_write) return { error: 'Write permissions denied.', status: 403 };
   const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
   if (share.password_hash && !isUnlocked) return { error: 'Password required.', status: 401 };
@@ -3553,7 +3716,18 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     }
 
     const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => { throw err; });
+    // archiver emits 'error' asynchronously (e.g. the client aborting the download mid-stream,
+    // or a file disappearing while being zipped) — by then this handler runs outside the
+    // surrounding try/catch's call stack, so `throw`ing here would be an uncaught exception
+    // that crashes the whole process for every user. Log and just end the response instead.
+    archive.on('error', (err) => {
+      console.error('ZIP archive error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to create ZIP.' });
+      } else {
+        res.end();
+      }
+    });
     archive.pipe(res);
 
     const baseFileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1', [share.file_id]);
@@ -3677,6 +3851,11 @@ app.get('/api/settings', requireAuth, async (req, res) => {
         data.adminConfig.email_smtp_pass_configured = true;
         delete data.adminConfig.email_smtp_pass;
       }
+      // Same for the SSO client secret — never send the plaintext value back, even to admins
+      if (data.adminConfig.sso_client_secret) {
+        data.adminConfig.sso_client_secret_configured = true;
+        delete data.adminConfig.sso_client_secret;
+      }
     }
 
     res.json(data);
@@ -3749,7 +3928,8 @@ app.get('/api/users/storage', requireAuth, async (req, res) => {
 
     // 2. User quota
     const userRes = await pool.query('SELECT storage_quota FROM users WHERE id = $1', [userId]);
-    const quotaBytes = userRes.rows[0].storage_quota ? parseInt(userRes.rows[0].storage_quota) : null;
+    const rawQuota = userRes.rows[0].storage_quota;
+    const quotaBytes = (rawQuota !== null && rawQuota !== undefined) ? parseInt(rawQuota) : null;
 
     // 3. Free disk space
     let freeDiskBytes = 0;
@@ -4000,17 +4180,23 @@ function updateEnvFile(configs) {
       const envKey = mapping[key];
       if (!envKey) continue;
 
+      // A settings value containing a newline would otherwise let it break out of its own
+      // "KEY=value" line and inject arbitrary extra environment variables into the .env file.
+      // Strip line breaks — none of the mapped settings (URLs, hosts, ports, credentials) are
+      // legitimately multi-line.
+      const safeValue = String(value).replace(/[\r\n]+/g, ' ');
+
       let found = false;
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         if (line.startsWith(`${envKey}=`)) {
-          lines[i] = `${envKey}=${value}`;
+          lines[i] = `${envKey}=${safeValue}`;
           found = true;
           break;
         }
       }
       if (!found) {
-        lines.push(`${envKey}=${value}`);
+        lines.push(`${envKey}=${safeValue}`);
       }
     }
 
@@ -4032,8 +4218,9 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
 
     const activeConfigs = {};
     for (const [key, value] of Object.entries(configs)) {
-      // Avoid overwriting password with placeholder
-      if (key === 'email_smtp_pass' && value === '__placeholder__') {
+      // Avoid overwriting password/secret with the placeholder the client echoes back
+      // when it never received the real value (see GET /api/settings redaction above).
+      if ((key === 'email_smtp_pass' || key === 'sso_client_secret') && value === '__placeholder__') {
         continue;
       }
       await setSetting(key, value);
@@ -4093,6 +4280,16 @@ app.get('/api/settings/admin/users', requireAdmin, async (req, res) => {
 // The permission keys the UI exposes (single source of truth)
 const ROLE_PERMISSION_KEYS = ['admin', 'upload', 'create_folder', 'delete', 'rename', 'share', 'download', 'edit_files'];
 
+// Parse a storage-quota value from client input: empty/null/undefined means "unlimited" (null),
+// anything else must be a non-negative integer. Returns { ok: false } on invalid input so
+// callers can reject the request instead of writing NaN or a negative quota to the DB.
+function parseQuotaBytes(raw) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, value: null };
+  const n = parseInt(raw);
+  if (!Number.isFinite(n) || n < 0) return { ok: false };
+  return { ok: true, value: n };
+}
+
 // Admin Role-Management: list roles with member counts & combined storage usage
 app.get('/api/settings/admin/roles', requireAdmin, async (req, res) => {
   try {
@@ -4123,12 +4320,13 @@ app.post('/api/settings/admin/roles', requireAdmin, async (req, res) => {
 
     const perms = {};
     for (const k of ROLE_PERMISSION_KEYS) perms[k] = !!(permissions && permissions[k]);
-    const quota = storageQuota ? parseInt(storageQuota) : null;
+    const parsedQuota = parseQuotaBytes(storageQuota);
+    if (!parsedQuota.ok) return res.status(400).json({ error: 'Ungültiges Speicherplatzlimit.' });
 
     const result = await pool.query(
       `INSERT INTO roles (name, is_default, is_system, permissions, storage_quota)
        VALUES ($1, false, false, $2, $3) RETURNING *`,
-      [cleanName, JSON.stringify(perms), quota]
+      [cleanName, JSON.stringify(perms), parsedQuota.value]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -4151,12 +4349,12 @@ app.put('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
     // The built-in admin role must always keep full access
     if (role.name === 'admin') for (const k of ROLE_PERMISSION_KEYS) perms[k] = true;
 
-    const quota = (storageQuota !== undefined && storageQuota !== null && storageQuota !== '')
-      ? parseInt(storageQuota) : null;
+    const parsedQuota = parseQuotaBytes(storageQuota);
+    if (!parsedQuota.ok) return res.status(400).json({ error: 'Ungültiges Speicherplatzlimit.' });
     const weightVal = Number.isFinite(parseInt(weight)) ? parseInt(weight) : 0;
 
     await pool.query('UPDATE roles SET permissions = $1, storage_quota = $2, weight = $3 WHERE id = $4',
-      [JSON.stringify(perms), quota, weightVal, roleId]);
+      [JSON.stringify(perms), parsedQuota.value, weightVal, roleId]);
     res.json({ success: true, message: 'Rolle aktualisiert.' });
   } catch (err) {
     console.error('Admin update role error:', err);
@@ -4187,6 +4385,10 @@ app.delete('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
     if (roleRes.rows.length === 0) return res.status(404).json({ error: 'Rolle nicht gefunden.' });
     const role = roleRes.rows[0];
     if (role.is_system) return res.status(400).json({ error: 'System-Rollen können nicht gelöscht werden.' });
+    // Deleting the current default role would leave its members pointing at a role name that
+    // no longer exists (the fallback lookup below would just find this same role again, since
+    // it is still is_default at this point) and leave no default role for new sign-ups.
+    if (role.is_default) return res.status(400).json({ error: 'Die Standardrolle kann nicht gelöscht werden. Bitte setze zuerst eine andere Rolle als Standard.' });
 
     // Reassign members to the current default role
     const defRes = await pool.query('SELECT name FROM roles WHERE is_default = true LIMIT 1');
@@ -4259,8 +4461,11 @@ app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
       await pool.query('DELETE FROM users WHERE id = $1', [targetUserId]);
       return res.json({ success: true, message: 'Benutzer und alle seine Dateien wurden gelöscht.' });
     } else if (action === 'quota') {
-      const quotaBytes = req.body.quotaBytes !== undefined ? (req.body.quotaBytes ? parseInt(req.body.quotaBytes) : null) : null;
-      await pool.query('UPDATE users SET storage_quota = $1 WHERE id = $2', [quotaBytes, targetUserId]);
+      // (previously used `req.body.quotaBytes ? ... : null`, which silently treated an explicit
+      // 0-byte quota the same as "unlimited" since 0 is falsy in JS)
+      const parsedQuota = parseQuotaBytes(req.body.quotaBytes);
+      if (!parsedQuota.ok) return res.status(400).json({ error: 'Ungültiges Speicherplatzlimit.' });
+      await pool.query('UPDATE users SET storage_quota = $1 WHERE id = $2', [parsedQuota.value, targetUserId]);
       return res.json({ success: true, message: 'Speicherplatzlimit aktualisiert.' });
     } else if (action === 'role' && role) {
       const roleCheck = await pool.query('SELECT name FROM roles WHERE name = $1', [role]);
@@ -4290,13 +4495,20 @@ app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
       const tempPassword = crypto.randomBytes(6).toString('hex'); // 12 characters
       const saltRounds = 10;
       const hash = await bcrypt.hash(tempPassword, saltRounds);
-      await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, targetUserId]);
 
-      await sendMail({
+      // Send the new password before persisting it: if delivery fails, the user's old
+      // password must keep working rather than being silently replaced by one nobody received.
+      const sent = await sendMail({
         to: user.email,
         subject: 'myCloud - Passwort zurückgesetzt',
         text: `Hallo ${user.username},\n\ndein Passwort wurde von einem Administrator zurückgesetzt.\nDein neues temporäres Passwort lautet: ${tempPassword}\n\nBitte melde dich an und ändere dein Passwort in den Einstellungen.`
       });
+
+      if (!sent) {
+        return res.status(500).json({ error: 'E-Mail konnte nicht gesendet werden. Das Passwort wurde nicht zurückgesetzt.' });
+      }
+
+      await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, targetUserId]);
 
       return res.json({ success: true, message: 'Passwort erfolgreich zurückgesetzt und E-Mail versendet.' });
     }
