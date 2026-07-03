@@ -2040,6 +2040,9 @@ app.get('/api/files/notes', requireAuth, async (req, res) => {
        LEFT JOIN shares s ON s.file_id = f.id
        WHERE f.owner_id = $1 AND f.is_one_time_note = true
          AND (parent.id IS NULL OR parent.is_one_time_note IS NOT TRUE)
+         AND s.id IS NOT NULL
+         AND (s.expires_at IS NULL OR s.expires_at > NOW())
+         AND (s.max_downloads IS NULL OR s.download_count < s.max_downloads)
        ORDER BY f.created_at DESC`,
       [userId]
     );
