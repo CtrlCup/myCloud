@@ -28,7 +28,7 @@
   <div class="container">
     <!-- HEADER -->
     <header>
-      <div class="logo">
+      <div class="logo" id="share-logo-home" style="cursor: pointer;" title="Zum Anfang der Freigabe">
         <i data-lucide="cloud"></i> my<span>Cloud</span> Shared
       </div>
       <div class="user-nav" style="display: flex; align-items: center; gap: 0.75rem;">
@@ -107,18 +107,25 @@
           <!-- Dynamisch -->
         </div>
         <div style="display: flex; gap: 0.75rem;">
-          <!-- Upload Button, nur sichtbar bei Schreibrechten -->
+          <!-- Upload Buttons, nur sichtbar bei Schreibrechten -->
           <label class="btn btn-primary" id="public-upload-label" style="display: none; margin: 0; cursor: pointer;">
             <i data-lucide="upload"></i> Datei hochladen
-            <input type="file" id="public-file-upload-input" style="display: none;">
+            <input type="file" id="public-file-upload-input" multiple style="display: none;">
+          </label>
+          <label class="btn btn-primary" id="public-folder-upload-label" style="display: none; margin: 0; cursor: pointer;">
+            <i data-lucide="folder-up"></i> Ordner hochladen
+            <input type="file" id="public-folder-upload-input" webkitdirectory multiple style="display: none;">
           </label>
         </div>
       </div>
 
-      <!-- Dropzone (nur sichtbar bei Schreibrechten) -->
-      <div id="public-dropzone" class="dropzone" style="display: none; padding: 4rem 2rem;">
-        <i data-lucide="upload-cloud" style="width: 56px; height: 56px; color: var(--color-accent); margin-bottom: 0.5rem;"></i>
-        <p id="dropzone-text">Dateien per Drag & Drop in diese Freigabe hochladen</p>
+      <!-- Vollflächiges Drag&Drop-Overlay — erscheint nur während eine Datei aktiv über das
+           Fenster gezogen wird, statt permanent Platz im Layout zu belegen -->
+      <div id="public-drag-overlay" class="drag-overlay-fs" style="display: none;">
+        <div class="drag-overlay-content">
+          <i data-lucide="upload-cloud" style="width: 56px; height: 56px; color: var(--color-accent);"></i>
+          <p>Dateien hier ablegen zum Hochladen</p>
+        </div>
       </div>
 
       <!-- Dateiliste -->
@@ -285,6 +292,11 @@
     let shareConfig = null;
     let breadcrumbsHistory = [];
     let shareBranding = null;
+
+    document.getElementById('share-logo-home').onclick = () => {
+      breadcrumbsHistory = [];
+      loadShareData(null);
+    };
     let hasAutoOpened = false;   // only auto-open a single-file viewer once
     let noteViewConfirmed = false;   // gate for the one-time-note security confirmation screen
     let clipboardFileId = null;
@@ -382,9 +394,15 @@
       } catch { showToast('Verbindungsfehler.'); }
     }
 
+    // Tracks the file a keyboard shortcut (Strg+C/X/Entf) should act on — there's no
+    // multi-select in this simple public viewer, so right-clicking (or the context menu it
+    // opens) is what "selects" a file for these shortcuts.
+    let selectedShareFile = null;
+
     function showFileContextMenu(e, file) {
       e.preventDefault();
       e.stopPropagation();
+      selectedShareFile = file;
       if (!shareConfig.can_write) return;
       openShareContextMenu(e.clientX, e.clientY, [
         { action: 'copy', icon: 'copy', label: 'Kopieren', onClick: () => { clipboardFileId = file.id; clipboardFileName = file.name; clipboardAction = 'copy'; showToast(`"${file.name}" kopiert.`); } },
@@ -392,6 +410,30 @@
         { action: 'delete', icon: 'trash-2', label: 'Löschen', danger: true, onClick: () => deleteFileInShare(file.id, file.name) },
       ]);
     }
+
+    // Strg+C / Strg+X / Strg+V / Entf mirror the context menu's copy/cut/paste/delete, acting
+    // on whichever file was last right-clicked (see selectedShareFile above).
+    document.addEventListener('keydown', (e) => {
+      const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || document.activeElement?.closest('.monaco-editor')) return;
+      if (!shareConfig || !shareConfig.can_write) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && selectedShareFile) {
+        e.preventDefault();
+        clipboardFileId = selectedShareFile.id; clipboardFileName = selectedShareFile.name; clipboardAction = 'copy';
+        showToast(`"${selectedShareFile.name}" kopiert.`);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x' && selectedShareFile) {
+        e.preventDefault();
+        clipboardFileId = selectedShareFile.id; clipboardFileName = selectedShareFile.name; clipboardAction = 'cut';
+        showToast(`"${selectedShareFile.name}" ausgeschnitten.`);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && clipboardFileId) {
+        e.preventDefault();
+        pasteInShare();
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedShareFile) {
+        e.preventDefault();
+        deleteFileInShare(selectedShareFile.id, selectedShareFile.name);
+      }
+    });
 
     function showBackgroundContextMenu(e) {
       e.preventDefault();
@@ -580,7 +622,6 @@
         const toolbar = document.getElementById('share-toolbar');
         const grid = document.getElementById('public-file-grid');
         const singleCard = document.getElementById('single-file-card');
-        const dropzone = document.getElementById('public-dropzone');
 
         if (isSingleFile) {
           // Clean, download-focused single-file card — no folder chrome
@@ -631,13 +672,10 @@
         // Schreibrechte aktivieren
         if (shareConfig.can_write && isFolder) {
           document.getElementById('public-upload-label').style.display = 'inline-flex';
-          dropzone.style.display = 'block';
-          document.getElementById('dropzone-text').textContent = isOnlyUpload
-            ? 'Dateien ablegen, um sie anonym abzugeben'
-            : 'Dateien per Drag & Drop in diese Freigabe hochladen';
+          document.getElementById('public-folder-upload-label').style.display = 'inline-flex';
         } else {
           document.getElementById('public-upload-label').style.display = 'none';
-          dropzone.style.display = 'none';
+          document.getElementById('public-folder-upload-label').style.display = 'none';
         }
 
         // Layout elements visibility based on Only-Upload
@@ -894,76 +932,111 @@
       lucide.createIcons();
     }
 
-    // Datei-Upload per Input
-    document.getElementById('public-file-upload-input').onchange = async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-
+    // Uploads one file into a specific target folder (falls back to the currently browsed
+    // folder when none given) via the single-file public upload endpoint.
+    async function uploadOneFile(file, targetParentId) {
       const formData = new FormData();
       formData.append('file', file);
-      if (currentFolderId) formData.append('parentId', currentFolderId);
+      const pid = targetParentId !== undefined ? targetParentId : currentFolderId;
+      if (pid) formData.append('parentId', pid);
 
-      showToast('Lade Datei hoch...');
-
-      try {
-        const res = await fetch(`/api/public/shares/${slug}/upload`, {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (res.ok) {
-          showToast('Erfolgreich hochgeladen!');
-          loadShareData(currentFolderId);
-        } else {
-          const err = await res.json();
-          showToast(`Fehler: ${err.error}`);
-        }
-      } catch (err) {
-        showToast('Verbindungsfehler beim Upload.');
+      const res = await fetch(`/api/public/shares/${slug}/upload`, { method: 'POST', body: formData });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Upload fehlgeschlagen.');
       }
+    }
+
+    // Flat multi-file upload (no folder structure) — used by the "Datei hochladen" button and
+    // by drag&drop of loose files.
+    async function uploadMultipleFiles(fileList) {
+      const files = Array.from(fileList);
+      if (files.length === 0) return;
+      showToast(`Lade ${files.length} Datei(en) hoch...`);
+      let failed = 0;
+      for (const file of files) {
+        try { await uploadOneFile(file); } catch { failed++; }
+      }
+      showToast(failed === 0 ? 'Erfolgreich hochgeladen!' : `${files.length - failed} von ${files.length} hochgeladen, ${failed} fehlgeschlagen.`);
+      loadShareData(currentFolderId);
+    }
+
+    // Folder upload (webkitdirectory) — files carry webkitRelativePath like
+    // "MyFolder/sub/file.txt". Recreates that directory structure via the create-folder
+    // endpoint (shallowest paths first, deduped) before uploading each file into its resolved
+    // parent, since the backend only knows about flat file uploads otherwise.
+    async function uploadFolderFiles(fileList) {
+      const files = Array.from(fileList);
+      if (files.length === 0) return;
+      showToast(`Lade Ordner mit ${files.length} Datei(en) hoch...`);
+
+      const folderIdByPath = new Map();
+      folderIdByPath.set('', currentFolderId || null);
+
+      const ensureFolder = async (dirPath) => {
+        if (folderIdByPath.has(dirPath)) return folderIdByPath.get(dirPath);
+        const parts = dirPath.split('/');
+        const name = parts[parts.length - 1];
+        const parentPath = parts.slice(0, -1).join('/');
+        const parentId = await ensureFolder(parentPath);
+        const r = await fetch(`/api/public/shares/${slug}/folder`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, parentId }),
+        });
+        const d = await r.json();
+        const id = r.ok ? d.id : null;
+        folderIdByPath.set(dirPath, id);
+        return id;
+      };
+
+      let failed = 0;
+      for (const file of files) {
+        const relPath = file.webkitRelativePath || file.name;
+        const dirPath = relPath.split('/').slice(0, -1).join('/');
+        try {
+          const parentId = await ensureFolder(dirPath);
+          await uploadOneFile(file, parentId);
+        } catch {
+          failed++;
+        }
+      }
+      showToast(failed === 0 ? 'Ordner erfolgreich hochgeladen!' : `${files.length - failed} von ${files.length} Dateien hochgeladen, ${failed} fehlgeschlagen.`);
+      loadShareData(currentFolderId);
+    }
+
+    document.getElementById('public-file-upload-input').onchange = (e) => {
+      uploadMultipleFiles(e.target.files);
+      e.target.value = '';
+    };
+    document.getElementById('public-folder-upload-input').onchange = (e) => {
+      uploadFolderFiles(e.target.files);
+      e.target.value = '';
     };
 
-    // Drag and Drop implementation
-    const dropzone = document.getElementById('public-dropzone');
-    ['dragenter', 'dragover'].forEach(name => {
-      dropzone.addEventListener(name, (e) => {
-        e.preventDefault();
-        dropzone.classList.add('dragover');
-      });
+    // Fullscreen drag&drop overlay — only appears while a file is actively being dragged over
+    // the window, and only when the current share/folder is writable.
+    const dragOverlay = document.getElementById('public-drag-overlay');
+    let shareDragCounter = 0;
+    document.addEventListener('dragenter', (e) => {
+      if (!shareConfig || !shareConfig.can_write) return;
+      e.preventDefault();
+      shareDragCounter++;
+      if (shareDragCounter === 1) dragOverlay.style.display = 'flex';
     });
-    ['dragleave', 'drop'].forEach(name => {
-      dropzone.addEventListener(name, (e) => {
-        e.preventDefault();
-        dropzone.classList.remove('dragover');
-      });
+    document.addEventListener('dragover', (e) => { e.preventDefault(); });
+    document.addEventListener('dragleave', (e) => {
+      if (!shareConfig || !shareConfig.can_write) return;
+      e.preventDefault();
+      shareDragCounter--;
+      if (shareDragCounter <= 0) { shareDragCounter = 0; dragOverlay.style.display = 'none'; }
     });
-    dropzone.addEventListener('drop', async (e) => {
+    document.addEventListener('drop', (e) => {
+      e.preventDefault();
+      shareDragCounter = 0;
+      dragOverlay.style.display = 'none';
+      if (!shareConfig || !shareConfig.can_write) return;
       const files = e.dataTransfer.files;
-      if (files.length === 0) return;
-      
-      const file = files[0];
-      const formData = new FormData();
-      formData.append('file', file);
-      if (currentFolderId) formData.append('parentId', currentFolderId);
-
-      showToast('Lade Datei hoch...');
-
-      try {
-        const res = await fetch(`/api/public/shares/${slug}/upload`, {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (res.ok) {
-          showToast('Erfolgreich hochgeladen!');
-          loadShareData(currentFolderId);
-        } else {
-          const err = await res.json();
-          showToast(`Fehler: ${err.error}`);
-        }
-      } catch (err) {
-        showToast('Verbindungsfehler beim Upload.');
-      }
+      if (files.length > 0) uploadMultipleFiles(files);
     });
 
     async function loadBranding() {
