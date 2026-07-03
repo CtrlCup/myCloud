@@ -6565,21 +6565,56 @@ function navigateViewer(direction) {
 document.addEventListener('keydown', (e) => {
   const imageOverlay = document.getElementById('image-viewer-overlay');
   const videoOverlay = document.getElementById('video-viewer-overlay');
-  const imageActive = imageOverlay.classList.contains('active');
-  const videoActive = videoOverlay.classList.contains('active');
+  const imageActive = imageOverlay && imageOverlay.classList.contains('active');
+  const videoActive = videoOverlay && videoOverlay.classList.contains('active');
   if (!imageActive && !videoActive) return;
   // Don't hijack Arrow/Space navigation while the filename rename <input> is focused (e.g.
   // moving the text cursor or typing a space) — that used to jump to the next/prev file mid-edit,
   // leaving the rename input open and bound to the wrong (now stale) file.
   if (e.target.id === 'image-viewer-filename-input' || e.target.id === 'video-viewer-filename-input') return;
 
-  if (e.key === 'ArrowRight') { e.preventDefault(); navigateViewer(1); }
-  else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateViewer(-1); }
-  else if (e.key === ' ' && imageActive) {
-    // Space only advances in the image viewer — in the video viewer it's the native
-    // play/pause shortcut, which takes priority.
-    e.preventDefault();
-    navigateViewer(1);
+  if (imageActive) {
+    if (e.key === 'ArrowRight') { e.preventDefault(); navigateViewer(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateViewer(-1); }
+    else if (e.key === ' ') { e.preventDefault(); navigateViewer(1); }
+  } else if (videoActive) {
+    const player = document.getElementById('video-viewer-player');
+    const muteBtn = document.getElementById('video-mute-btn');
+    const volumeSlider = document.getElementById('video-volume-slider');
+
+    if (e.key === ' ') {
+      e.preventDefault();
+      if (player) {
+        if (player.paused) player.play(); else player.pause();
+      }
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (player && player.duration) {
+        player.currentTime = Math.max(0, player.currentTime - 10);
+      }
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (player && player.duration) {
+        player.currentTime = Math.min(player.duration, player.currentTime + 10);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (volumeSlider) {
+        volumeSlider.value = Math.min(1, parseFloat(volumeSlider.value) + 0.05);
+        volumeSlider.oninput();
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (volumeSlider) {
+        volumeSlider.value = Math.max(0, parseFloat(volumeSlider.value) - 0.05);
+        volumeSlider.oninput();
+      }
+    } else if (e.key === 'm' || e.key === 'M' || e.key === 's' || e.key === 'S') {
+      e.preventDefault();
+      if (muteBtn) {
+        muteBtn.click();
+      }
+    }
   }
 });
 
