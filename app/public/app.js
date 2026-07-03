@@ -6107,6 +6107,7 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
   const title = document.getElementById('image-viewer-title');
 
   title.innerHTML = `<i data-lucide="image"></i> ${escapeHtml(fileName)}`;
+  updateViewerNavButtons('image');
   lucide.createIcons();
 
   const infoPanel = document.getElementById('image-viewer-info-panel');
@@ -6189,6 +6190,7 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
   const title = document.getElementById('video-viewer-title');
 
   title.innerHTML = `<i data-lucide="video"></i> ${escapeHtml(fileName)}`;
+  updateViewerNavButtons('video');
   lucide.createIcons();
 
   const infoPanel = document.getElementById('video-viewer-info-panel');
@@ -6217,6 +6219,18 @@ document.getElementById('close-video-viewer-btn').onclick = () => {
 
 const VIEWER_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
 const VIEWER_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+
+function updateViewerNavButtons(prefix) {
+  const prevBtn = document.getElementById(`${prefix}-viewer-prev-btn`);
+  const nextBtn = document.getElementById(`${prefix}-viewer-next-btn`);
+  if (!prevBtn || !nextBtn) return;
+  const hasPrev = viewerMediaIndex > 0;
+  const hasNext = viewerMediaIndex !== -1 && viewerMediaIndex < viewerMediaList.length - 1;
+  prevBtn.style.display = hasPrev ? 'flex' : 'none';
+  nextBtn.style.display = hasNext ? 'flex' : 'none';
+  prevBtn.onclick = () => navigateViewer(-1);
+  nextBtn.onclick = () => navigateViewer(1);
+}
 
 function navigateViewer(direction) {
   if (viewerMediaList.length === 0 || viewerMediaIndex === -1) return;

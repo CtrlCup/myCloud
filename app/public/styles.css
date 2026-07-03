@@ -162,6 +162,40 @@ body {
   transition: background 0.4s ease, color 0.4s ease;
 }
 
+/* ─── Image/Video viewer prev/next navigation buttons ─── */
+.viewer-nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(20, 20, 28, 0.5);
+  backdrop-filter: blur(8px);
+  color: #f2f2f7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.viewer-nav-btn:hover {
+  background: rgba(var(--color-accent-rgb), 0.35);
+  border-color: rgba(var(--color-accent-rgb), 0.5);
+}
+.viewer-nav-btn svg {
+  width: 26px;
+  height: 26px;
+}
+.viewer-nav-btn-prev {
+  left: 1.25rem;
+}
+.viewer-nav-btn-next {
+  right: 1.25rem;
+}
+
 /* ─── App Footer (login + dashboard, opt-in via admin setting) ─── */
 #app-footer {
   display: none;
