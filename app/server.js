@@ -3025,11 +3025,6 @@ app.get('/api/public/shares/:slug', async (req, res) => {
       return res.status(410).json({ error: 'This share link has expired.' });
     }
 
-    // Check download limit
-    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
-      return res.status(410).json({ error: 'This share has reached its download limit.' });
-    }
-
     // Get the base file/folder shared
     const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size, is_one_time_note FROM files WHERE id = $1', [share.file_id]);
     if (baseFileRes.rows.length === 0) {
@@ -3037,6 +3032,34 @@ app.get('/api/public/shares/:slug', async (req, res) => {
     }
 
     const baseFile = baseFileRes.rows[0];
+
+    // Handle one-time note session activation & lock
+    if (baseFile.is_one_time_note) {
+      if (share.accessed_at) {
+        // Already accessed. Check if it's the same session.
+        const isSameSession = req.session.accessedOneTimeShares && req.session.accessedOneTimeShares[slug];
+        if (!isSameSession) {
+          return res.status(410).json({ error: 'This one-time link has already been opened and burned.' });
+        }
+      } else if (req.query.confirmed === 'true') {
+        // First access and confirmed. Record it, increment download_count, and bind to session.
+        await pool.query(
+          'UPDATE shares SET accessed_at = NOW(), last_heartbeat = NOW(), download_count = download_count + 1 WHERE id = $1',
+          [share.id]
+        );
+        req.session.accessedOneTimeShares = req.session.accessedOneTimeShares || {};
+        req.session.accessedOneTimeShares[slug] = true;
+        share.download_count += 1;
+      }
+    }
+
+    // Check download limit
+    if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
+      const isSameSession = baseFile.is_one_time_note && req.session.accessedOneTimeShares && req.session.accessedOneTimeShares[slug];
+      if (!isSameSession) {
+        return res.status(410).json({ error: 'This share has reached its download limit.' });
+      }
+    }
 
     // Check password protection
     const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
@@ -3177,7 +3200,12 @@ async function verifyPublicShareAccess(slug, fileId, req) {
   // and single-file-download routes), otherwise content/meta/thumbnail/eurooffice-config all
   // keep working forever once the cap is reached.
   if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
-    return { error: 'This share has reached its download limit.', status: 410 };
+    const fileRes = await pool.query('SELECT is_one_time_note FROM files WHERE id = $1', [share.file_id]);
+    const baseFile = fileRes.rows[0];
+    const isSameSession = baseFile && baseFile.is_one_time_note && req.session.accessedOneTimeShares && req.session.accessedOneTimeShares[slug];
+    if (!isSameSession) {
+      return { error: 'This share has reached its download limit.', status: 410 };
+    }
   }
 
   // Check password protection
@@ -3236,18 +3264,6 @@ app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     }
 
     const content = fs.readFileSync(filePath, 'utf8');
-
-    if (file.is_one_time_note) {
-      res.on('finish', async () => {
-        try {
-          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-          console.log(`Self-destructed one-time note ${file.name} (ID: ${file.id})`);
-        } catch (err) {
-          console.error('Self-destruct cleanup error:', err);
-        }
-      });
-    }
 
     res.type('text/plain').send(content);
   } catch (err) {
@@ -3420,27 +3436,16 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
     // concurrent downloads can't both slip past the limit (a plain read-then-write, as this
     // route used to do via a post-stream callback, lets that race through — mirrors the fix
     // already applied to the ZIP download route).
-    const incRes = await pool.query(
-      `UPDATE shares SET download_count = download_count + 1
-       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
-       RETURNING *`,
-      [share.id]
-    );
-    if (incRes.rows.length === 0) {
-      return res.status(410).json({ error: 'This share has reached its download limit.' });
-    }
-
-    // A one-time note self-destructs only after the file has been fully sent.
-    if (file.is_one_time_note) {
-      res.on('finish', async () => {
-        try {
-          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-          console.log(`Self-destructed one-time note ${file.name} (ID: ${file.id})`);
-        } catch (err) {
-          console.error('Self-destruct cleanup error:', err);
-        }
-      });
+    if (!file.is_one_time_note) {
+      const incRes = await pool.query(
+        `UPDATE shares SET download_count = download_count + 1
+         WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+         RETURNING *`,
+        [share.id]
+      );
+      if (incRes.rows.length === 0) {
+        return res.status(410).json({ error: 'This share has reached its download limit.' });
+      }
     }
 
     if (req.query.inline === 'true') {
@@ -3697,30 +3702,20 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     if (!targetFolder.is_folder) return res.status(404).json({ error: 'Folder not found.' });
     if (!share.can_zip) return res.status(403).json({ error: 'ZIP Download permissions denied.' });
 
-    // Atomic increment bounded by max_downloads, done before streaming starts so two
-    // concurrent ZIP downloads can't both slip past the limit (a plain read-then-write would
-    // let that race through).
-    const incRes = await pool.query(
-      `UPDATE shares SET download_count = download_count + 1
-       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
-       RETURNING *`,
-      [share.id]
-    );
-    if (incRes.rows.length === 0) {
-      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    if (!targetFolder.is_one_time_note) {
+      const incRes = await pool.query(
+        `UPDATE shares SET download_count = download_count + 1
+         WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+         RETURNING *`,
+        [share.id]
+      );
+      if (incRes.rows.length === 0) {
+        return res.status(410).json({ error: 'This share has reached its download limit.' });
+      }
     }
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(targetFolder.name)}.zip"`);
-    // A one-time note bundle self-destructs only after the ZIP has been fully sent — deleting
-    // mid-stream would break addFolderToZip() while it's still reading the files.
-    if (targetFolder.is_one_time_note) {
-      res.on('finish', () => {
-        deleteFolderRecursive(targetFolder.id, targetFolder.owner_id)
-          .then(() => console.log(`Self-destructed one-time note ${targetFolder.name} (ID: ${targetFolder.id})`))
-          .catch(err => console.error('Self-destruct cleanup error:', err));
-      });
-    }
 
     const archive = archiver('zip', { zlib: { level: 9 } });
     // archiver emits 'error' asynchronously (e.g. the client aborting the download mid-stream,
@@ -4584,6 +4579,108 @@ setInterval(async () => {
     console.error('Expired cleanup interval error:', err);
   }
 }, 5 * 60 * 1000); // Run every 5 minutes
+
+// Heartbeat endpoint for one-time links
+app.post('/api/public/shares/:slug/heartbeat', async (req, res) => {
+  const { slug } = req.params;
+  try {
+    const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
+    if (shareRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Share not found.' });
+    }
+    const share = shareRes.rows[0];
+
+    const baseFileRes = await pool.query('SELECT is_one_time_note FROM files WHERE id = $1', [share.file_id]);
+    if (baseFileRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Shared content no longer exists.' });
+    }
+    const baseFile = baseFileRes.rows[0];
+    if (!baseFile.is_one_time_note) {
+      return res.json({ success: true });
+    }
+
+    const isSameSession = req.session.accessedOneTimeShares && req.session.accessedOneTimeShares[slug];
+    if (!isSameSession) {
+      return res.status(410).json({ error: 'Access denied.' });
+    }
+
+    await pool.query(
+      'UPDATE shares SET last_heartbeat = NOW() WHERE id = $1',
+      [share.id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Heartbeat error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Burn endpoint for one-time links (called on window unload)
+app.post('/api/public/shares/:slug/burn', async (req, res) => {
+  const { slug } = req.params;
+  try {
+    const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
+    if (shareRes.rows.length > 0) {
+      const share = shareRes.rows[0];
+      const isSameSession = req.session.accessedOneTimeShares && req.session.accessedOneTimeShares[slug];
+      if (isSameSession) {
+        const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [share.file_id]);
+        if (fileRes.rows.length > 0) {
+          const file = fileRes.rows[0];
+          if (file.is_folder) {
+            await deleteFolderRecursive(file.id, file.owner_id);
+          } else {
+            const filePath = path.join(UPLOADS_DIR, file.path);
+            if (fs.existsSync(filePath)) {
+              fs.unlinkSync(filePath);
+            }
+            await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+          }
+          console.log(`Self-destructed one-time note share ${slug} immediately via burn call.`);
+        }
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Burn error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Background cleanup task for active one-time shares with expired heartbeats (client closed tab/browser)
+setInterval(async () => {
+  try {
+    // Select all one-time shares that have been accessed and whose last_heartbeat is older than 15 seconds
+    const expiredOneTimeRes = await pool.query(
+      `SELECT s.id, s.file_id, s.slug FROM shares s
+       JOIN files f ON f.id = s.file_id
+       WHERE f.is_one_time_note = true
+         AND s.accessed_at IS NOT NULL
+         AND s.last_heartbeat < NOW() - INTERVAL '15 seconds'`
+    );
+
+    for (const share of expiredOneTimeRes.rows) {
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [share.file_id]);
+      if (fileRes.rows.length > 0) {
+        const file = fileRes.rows[0];
+        if (file.is_folder) {
+          await deleteFolderRecursive(file.id, file.owner_id);
+        } else {
+          const filePath = path.join(UPLOADS_DIR, file.path);
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+          }
+          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+        }
+        console.log(`Self-destructed expired one-time note share ${share.slug} (ID: ${file.id}) due to lost heartbeat.`);
+      } else {
+        await pool.query('DELETE FROM shares WHERE id = $1', [share.id]);
+      }
+    }
+  } catch (err) {
+    console.error('One-time heartbeat cleanup interval error:', err);
+  }
+}, 10000); // Run every 10 seconds
 
 // Start Database & Express Server
 const WebSocket = require('ws');

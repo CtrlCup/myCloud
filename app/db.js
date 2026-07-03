@@ -178,6 +178,8 @@ async function initDb() {
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS only_upload BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS can_collab BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS message TEXT');
+    await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS accessed_at TIMESTAMP');
+    await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMP');
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS is_one_time_note BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS content TEXT');
 

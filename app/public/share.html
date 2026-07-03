@@ -727,11 +727,36 @@
       lucide.createIcons();
     }
 
+    let heartbeatInterval = null;
+    function startHeartbeat() {
+      if (heartbeatInterval) return;
+      heartbeatInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/public/shares/${slug}/heartbeat`, { method: 'POST' });
+          if (res.status === 410 || res.status === 404) {
+            clearInterval(heartbeatInterval);
+            window.location.reload();
+          }
+        } catch (e) {
+          // ignore network issues
+        }
+      }, 5000);
+    }
+
+    window.addEventListener('beforeunload', () => {
+      if (heartbeatInterval) {
+        navigator.sendBeacon(`/api/public/shares/${slug}/burn`);
+      }
+    });
+
     // Daten laden
     async function loadShareData(folderId = null) {
       try {
         let url = `/api/public/shares/${slug}`;
-        if (folderId) url += `?parentId=${folderId}`;
+        const params = [];
+        if (folderId) params.push(`parentId=${folderId}`);
+        if (noteViewConfirmed) params.push('confirmed=true');
+        if (params.length > 0) url += `?${params.join('&')}`;
 
         const res = await fetch(url);
         if (!res.ok) {
@@ -756,11 +781,15 @@
         // One-time notes must never be shown (and therefore consumed/counted) just because the
         // page loaded — show a confirmation screen first and only proceed once the visitor
         // deliberately opts in.
-        if (data.baseFile.is_one_time_note && !noteViewConfirmed) {
-          document.getElementById('note-security-block-view').style.display = 'block';
-          document.getElementById('main-explorer').style.display = 'none';
-          lucide.createIcons();
-          return;
+        if (data.baseFile.is_one_time_note) {
+          if (!noteViewConfirmed) {
+            document.getElementById('note-security-block-view').style.display = 'block';
+            document.getElementById('main-explorer').style.display = 'none';
+            lucide.createIcons();
+            return;
+          } else {
+            startHeartbeat();
+          }
         }
         document.getElementById('note-security-block-view').style.display = 'none';
 
