@@ -12,6 +12,10 @@ let viewerMediaList = [];
 let viewerMediaIndex = -1;
 let viewerIsPublic = false;
 let viewerSlug = '';
+// Bumped every time the image/video viewer opens a (new or the same) file — lets an in-flight
+// rename request know the viewer has since moved on, so its response doesn't overwrite the
+// filename now being displayed for a different file.
+let viewerSessionToken = 0;
 let lastSelectedId = null; // Für Shift-Auswahl
 let viewMode = localStorage.getItem('viewMode') || 'grid';
 let gridSizeIndex = parseInt(localStorage.getItem('gridSizeIndex') || '2');
@@ -4145,7 +4149,7 @@ async function loadUserShares() {
 
       row.innerHTML = `
         <td style="text-align: center;"><input type="checkbox" class="checkbox-modern share-row-check" data-id="${share.id}"></td>
-        <td style="font-weight: 500;">${share.file_name}</td>
+        <td style="font-weight: 500;">${escapeHtml(share.file_name)}</td>
         <td>${typeText}</td>
         <td><a href="/s/${share.slug}" target="_blank" style="color: var(--color-accent); text-decoration: none;">/s/${share.slug}</a></td>
         <td><span style="font-size: 0.8rem; color: var(--color-text-muted);">${permissions.join(', ')}</span></td>
@@ -4819,7 +4823,7 @@ async function openOfficeEditor(fileId, fileName) {
     // Title update
     const titleEl = document.getElementById('office-editor-title');
     if (titleEl) {
-      titleEl.innerHTML = `<i data-lucide="file-text"></i> ${fileName}`;
+      titleEl.innerHTML = `<i data-lucide="file-text"></i> ${escapeHtml(fileName)}`;
       lucide.createIcons();
     }
 
@@ -6062,6 +6066,9 @@ function loadHeicLib() {
 }
 
 let currentImageObjectUrl = null;
+// Bumped on every openImageViewer() call so a slow HEIC conversion that finishes after the
+// user has already navigated to another image doesn't clobber the currently displayed one.
+let imageViewerLoadToken = 0;
 
 function formatDuration(seconds) {
   if (!seconds || !isFinite(seconds)) return null;
@@ -6091,13 +6098,18 @@ async function toggleViewerInfoPanel(panel, fileId, isPublic, slug, getExtra) {
   }
   panel.innerHTML = '<h4>Informationen</h4><div style="opacity:0.6;font-size:0.85rem;">Lade...</div>';
   panel.classList.add('active');
+  // Tag the panel with the file this load is for, so a slow response for a file the user has
+  // since navigated away from can't overwrite the panel showing the new file's info.
+  panel.dataset.loadingFor = fileId;
   try {
     const url = isPublic ? `/api/public/shares/${slug}/meta/${fileId}` : `/api/files/${fileId}`;
     const res = await fetch(url);
     const file = await res.json();
     if (!res.ok) throw new Error(file.error || 'Fehler beim Laden');
+    if (panel.dataset.loadingFor !== String(fileId)) return;
     panel.innerHTML = renderViewerInfoPanel(file, getExtra ? getExtra() : {});
   } catch (err) {
+    if (panel.dataset.loadingFor !== String(fileId)) return;
     panel.innerHTML = '<h4>Informationen</h4><div style="opacity:0.6;font-size:0.85rem;">Konnte nicht geladen werden.</div>';
   }
 }
@@ -6110,6 +6122,7 @@ function startViewerRename(prefix, fileId) {
   const input = document.getElementById(`${prefix}-viewer-filename-input`);
   if (!nameEl || !input || input.style.display !== 'none') return;
 
+  const sessionToken = viewerSessionToken;
   const originalName = nameEl.textContent;
   input.value = originalName;
   nameEl.style.display = 'none';
@@ -6137,23 +6150,26 @@ function startViewerRename(prefix, fileId) {
         body: JSON.stringify({ name: newName }),
       });
       const data = await r.json();
+      const stillCurrent = sessionToken === viewerSessionToken;
       if (r.ok) {
-        nameEl.textContent = data.name;
         const listEntry = viewerMediaList.find(f => f.id === fileId);
         if (listEntry) listEntry.name = data.name;
+        if (stillCurrent) nameEl.textContent = data.name;
         showToast('Umbenannt.');
         loadFiles(currentFolderId);
       } else {
-        nameEl.textContent = originalName;
+        if (stillCurrent) nameEl.textContent = originalName;
         showToast(data.error || 'Fehler beim Umbenennen.');
       }
     } catch {
-      nameEl.textContent = originalName;
+      if (sessionToken === viewerSessionToken) nameEl.textContent = originalName;
       showToast('Verbindungsfehler.');
     }
 
-    nameEl.style.display = '';
-    input.style.display = 'none';
+    if (sessionToken === viewerSessionToken) {
+      nameEl.style.display = '';
+      input.style.display = 'none';
+    }
   };
 
   input.onkeydown = (e) => {
@@ -6164,15 +6180,25 @@ function startViewerRename(prefix, fileId) {
 }
 
 async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
+  const loadToken = ++imageViewerLoadToken;
+  viewerSessionToken++;
   const overlay = document.getElementById('image-viewer-overlay');
   const img = document.getElementById('image-viewer-img');
   const loading = document.getElementById('image-viewer-loading');
   const title = document.getElementById('image-viewer-title');
   const filenameEl = document.getElementById('image-viewer-filename');
+  const filenameInput = document.getElementById('image-viewer-filename-input');
+  const titleIcon = title.querySelector('i');
+
+  // Defensively clear any rename-in-progress UI left over from a previous file (e.g. the
+  // viewer was closed while renaming, before the input's blur/commit handler reset it).
+  filenameEl.style.display = '';
+  if (filenameInput) filenameInput.style.display = 'none';
 
   filenameEl.textContent = fileName;
   filenameEl.ondblclick = isPublic ? null : () => startViewerRename('image', fileId);
   filenameEl.style.cursor = isPublic ? '' : 'text';
+  if (titleIcon) { titleIcon.setAttribute('data-lucide', 'image'); titleIcon.style.color = ''; }
   updateViewerNavButtons('image');
   lucide.createIcons();
 
@@ -6211,7 +6237,9 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
         toType: 'image/jpeg',
         quality: 0.8
       });
-      
+
+      if (loadToken !== imageViewerLoadToken) return; // user already navigated to another file
+
       currentImageObjectUrl = URL.createObjectURL(convertedBlob);
       img.src = currentImageObjectUrl;
     } else if (['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) {
@@ -6229,13 +6257,19 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
     };
     img.onerror = () => {
       loading.style.display = 'none';
-      title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
+      // Update the icon/filename in place rather than replacing title.innerHTML — that div also
+      // hosts the filename span and its rename <input>, and clobbering it here used to leave
+      // those elements permanently missing (breaking rename and every later open) after any
+      // single failed image load.
+      if (titleIcon) { titleIcon.setAttribute('data-lucide', 'alert-circle'); titleIcon.style.color = '#ff5555'; }
+      filenameEl.textContent = 'Fehler beim Laden des Bildes';
       lucide.createIcons();
     };
   } catch (err) {
     console.error('Image viewer error:', err);
     loading.style.display = 'none';
-    title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
+    if (titleIcon) { titleIcon.setAttribute('data-lucide', 'alert-circle'); titleIcon.style.color = '#ff5555'; }
+    filenameEl.textContent = 'Fehler beim Laden des Bildes';
     lucide.createIcons();
   }
 }
@@ -6251,10 +6285,17 @@ document.getElementById('close-image-viewer-btn').onclick = () => {
 };
 
 function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
+  viewerSessionToken++;
   const overlay = document.getElementById('video-viewer-overlay');
   const player = document.getElementById('video-viewer-player');
   const title = document.getElementById('video-viewer-title');
   const filenameEl = document.getElementById('video-viewer-filename');
+  const filenameInput = document.getElementById('video-viewer-filename-input');
+
+  // Defensively clear any rename-in-progress UI left over from a previous file (e.g. the
+  // viewer was closed while renaming, before the input's blur/commit handler reset it).
+  filenameEl.style.display = '';
+  if (filenameInput) filenameInput.style.display = 'none';
 
   filenameEl.textContent = fileName;
   filenameEl.ondblclick = isPublic ? null : () => startViewerRename('video', fileId);
@@ -6410,6 +6451,13 @@ function updateViewerNavButtons(prefix) {
 }
 
 function navigateViewer(direction) {
+  // Block prev/next (incl. via the clickable arrow buttons) while a filename rename is in
+  // progress — the rename's PUT request resolves asynchronously, and finishing it after we've
+  // already moved on to another file would overwrite that other file's displayed name with this
+  // one's, since both viewers share the same filename/input DOM elements.
+  const imgRenameInput = document.getElementById('image-viewer-filename-input');
+  const vidRenameInput = document.getElementById('video-viewer-filename-input');
+  if ((imgRenameInput && imgRenameInput.style.display !== 'none') || (vidRenameInput && vidRenameInput.style.display !== 'none')) return;
   if (viewerMediaList.length === 0 || viewerMediaIndex === -1) return;
   const newIndex = viewerMediaIndex + direction;
   if (newIndex < 0 || newIndex >= viewerMediaList.length) return;
@@ -6434,6 +6482,10 @@ document.addEventListener('keydown', (e) => {
   const imageActive = imageOverlay.classList.contains('active');
   const videoActive = videoOverlay.classList.contains('active');
   if (!imageActive && !videoActive) return;
+  // Don't hijack Arrow/Space navigation while the filename rename <input> is focused (e.g.
+  // moving the text cursor or typing a space) — that used to jump to the next/prev file mid-edit,
+  // leaving the rename input open and bound to the wrong (now stale) file.
+  if (e.target.id === 'image-viewer-filename-input' || e.target.id === 'video-viewer-filename-input') return;
 
   if (e.key === 'ArrowRight') { e.preventDefault(); navigateViewer(1); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); navigateViewer(-1); }
@@ -6914,7 +6966,7 @@ if (searchInput && searchDeepCheck) {
 
         const searchLabel = document.createElement('span');
         searchLabel.className = 'breadcrumb-current';
-        searchLabel.innerHTML = `Suchergebnisse für "${query}" ${isDeep ? '<b>(Tiefensuche)</b>' : ''}`;
+        searchLabel.innerHTML = `Suchergebnisse für "${escapeHtml(query)}" ${isDeep ? '<b>(Tiefensuche)</b>' : ''}`;
         breadcrumbsContainer.appendChild(searchLabel);
       }
     } catch (err) {
