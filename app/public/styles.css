@@ -2088,8 +2088,15 @@ tr:hover td {
     gap: 0.75rem;
   }
 
-  .toolbar > div {
-    justify-content: space-between;
+  /* Group each row's own controls tightly instead of spreading them across the
+     full row width — space-between on a row with only 2-3 sparse items just
+     leaves a large dead gap in the middle. */
+  .toolbar > div:first-child {
+    justify-content: flex-start;
+  }
+
+  .toolbar > div:last-child {
+    justify-content: flex-end;
   }
 
   .breadcrumbs {
@@ -2112,6 +2119,27 @@ tr:hover td {
 
   .file-name {
     font-size: 0.78rem;
+  }
+
+  /* Bigger touch targets — 25px/23px is below the ~40px minimum needed to
+     reliably hit a button with a finger instead of a mouse pointer. */
+  .file-actions .btn-action-more {
+    padding: 10px !important;
+  }
+  .file-actions .btn-action-more svg {
+    width: 20px !important;
+    height: 20px !important;
+  }
+
+  .video-ctrl-btn {
+    padding: 0.5rem;
+  }
+  .video-ctrl-btn svg {
+    width: 20px;
+    height: 20px;
+  }
+  .video-speed-btn {
+    width: 36px;
   }
 
   .card {
