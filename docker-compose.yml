@@ -25,6 +25,8 @@ services:
     volumes:
       - uploads_data:/usr/src/app/uploads
       - ./.env:/usr/src/app/.env
+      - ./.git:/usr/src/app/.git-host:ro
+      - ./docker-compose.yml:/usr/src/app/docker-compose.yml:ro
     depends_on:
       - db
     environment:
