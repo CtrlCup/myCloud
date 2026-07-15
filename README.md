@@ -10,13 +10,12 @@ Eine moderne, schlichte und sichere Cloud-Lösung, die über Docker Compose orch
   - SSO-Integration (wie Authentik)
 - **Ordner- und Dateifreigabe**: Granulare Berechtigungen für geteilte Links (Lesen, Schreiben/Upload, Download, ZIP-Download) und anpassbare URLs.
 - **Admin-Konsole**: Registrierung aktivieren/deaktivieren, SMTP-Konfiguration für E-Mail-Dienste, SSO-Konfiguration und Benutzerverwaltung.
-- **Versionserkennung**: Die Admin-Konsole zeigt die aktuell laufende Version (Git-Commit) an und warnt beim Start (Log + Banner), falls sich `.env` oder `docker-compose.yml` seit dem letzten Start geändert haben oder nicht mehr zur laufenden Software-Version passen.
+- **Versionserkennung**: Software, `.env` und `docker-compose.yml` haben je eine eigene Version (`package.json`, `ENV_VERSION` in `.env`, `COMPOSE_VERSION` in `docker-compose.yml`). Die Admin-Konsole zeigt alle drei an und warnt (Log beim Start + Anzeige in den Systemeinstellungen), sobald `.env` oder `docker-compose.yml` älter sind als die vom aktuellen Softwarestand erwartete Version.
 - **Dockerized**: Läuft vollständig containerisiert mit PostgreSQL als Datenbank.
 
 ## Voraussetzungen
 - Docker und Docker Compose
 - Node.js (für lokale Entwicklung außerhalb von Docker)
-- Für die Versionserkennung: das Repository per `git clone` ausgecheckt haben (nicht als ZIP heruntergeladen) — `docker-compose.yml` mountet das lokale `.git`-Verzeichnis read-only in den Container.
 
 ## Installation & Start
 1. Kopiere die Datei `.env.example` nach `.env` und passe die Werte an.

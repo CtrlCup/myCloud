@@ -3544,28 +3544,35 @@ if (changeEmailForm) {
   };
 }
 
+function renderVersionRow(label, version, expected, outdated) {
+  const valueColor = outdated ? '#ff9f0a' : 'var(--color-text)';
+  const valueText = version ? escapeHtml(version) : 'nicht gesetzt';
+  const warning = outdated
+    ? `<div style="font-size: 0.75rem; color: #ff9f0a; margin-top: 0.15rem;">veraltet — erwartet ${escapeHtml(expected)}</div>`
+    : '';
+  return `
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.6rem 0.85rem; border-radius: var(--radius-sm); background: rgba(255,255,255,0.03);">
+      <span style="color: var(--color-text-muted);">${escapeHtml(label)}</span>
+      <span style="text-align: right;">
+        <span style="font-weight: 600; color: ${valueColor};">${valueText}</span>
+        ${warning}
+      </span>
+    </div>
+  `;
+}
+
 async function loadVersionStatus() {
-  const infoEl = document.getElementById('admin-version-info');
-  const bannerEl = document.getElementById('admin-version-banner');
-  if (!infoEl || !bannerEl) return;
+  const listEl = document.getElementById('admin-version-list');
+  if (!listEl) return;
   try {
     const res = await fetch('/api/settings/admin/version-status');
     if (!res.ok) return;
     const data = await res.json();
 
-    infoEl.innerHTML = `Aktuelle Version: <strong style="color: var(--color-text);">${escapeHtml(data.currentVersion)}</strong>`;
-
-    const s = data.status;
-    if (s && (s.versionChanged || s.envChanged || s.composeChanged)) {
-      const parts = [];
-      if (s.versionChanged) parts.push(`Software wurde aktualisiert (${escapeHtml(s.previousVersion || '?')} → ${escapeHtml(s.currentVersion)})`);
-      if (s.envChanged) parts.push('.env wurde seit dem letzten Start verändert');
-      if (s.composeChanged) parts.push('docker-compose.yml wurde seit dem letzten Start verändert');
-      bannerEl.innerHTML = `<strong>Änderung beim letzten Start erkannt:</strong><br>${parts.join('<br>')}`;
-      bannerEl.style.display = 'block';
-    } else {
-      bannerEl.style.display = 'none';
-    }
+    listEl.innerHTML =
+      renderVersionRow('Software', data.software.version, null, false) +
+      renderVersionRow('.env', data.env.version, data.env.expected, data.env.outdated) +
+      renderVersionRow('docker-compose.yml', data.compose.version, data.compose.expected, data.compose.outdated);
   } catch (err) {
     console.error('Error loading version status:', err);
   }

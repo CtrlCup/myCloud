@@ -1,5 +1,11 @@
 version: '3.8'
 
+# COMPOSE_VERSION=1.0.0
+# Wird von myCloud beim Start mit der vom Code erwarteten Version verglichen (siehe
+# app/version.js) und in der Admin-Konsole angezeigt, falls diese Datei veraltet ist.
+# Beim manuellen Übernehmen von Struktur-Änderungen aus dem Repository entsprechend
+# mit hochzählen.
+
 services:
   db:
     image: postgres:15-alpine
@@ -25,7 +31,6 @@ services:
     volumes:
       - uploads_data:/usr/src/app/uploads
       - ./.env:/usr/src/app/.env
-      - ./.git:/usr/src/app/.git-host:ro
       - ./docker-compose.yml:/usr/src/app/docker-compose.yml:ro
     depends_on:
       - db

@@ -1,97 +1,72 @@
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
+const { version: SOFTWARE_VERSION } = require('./package.json');
 
 const ENV_PATH = path.join(__dirname, '.env');
 const COMPOSE_PATH = path.join(__dirname, 'docker-compose.yml');
-const GIT_DIR = path.join(__dirname, '.git-host');
 
-// Resolves the currently checked-out git commit without shelling out to `git` — the
-// container only has the host's .git directory bind-mounted read-only (docker-compose.yml),
-// not the git binary itself. Falls back to 'unknown' for non-git deployments.
-function getGitVersion() {
-  try {
-    const head = fs.readFileSync(path.join(GIT_DIR, 'HEAD'), 'utf8').trim();
-    let sha;
-    if (head.startsWith('ref:')) {
-      const ref = head.slice(4).trim();
-      const refPath = path.join(GIT_DIR, ref);
-      if (fs.existsSync(refPath)) {
-        sha = fs.readFileSync(refPath, 'utf8').trim();
-      } else {
-        // Ref has no loose file on disk — look it up in packed-refs instead (git gc'd repos).
-        const packed = fs.readFileSync(path.join(GIT_DIR, 'packed-refs'), 'utf8');
-        const line = packed.split('\n').find(l => l.endsWith(' ' + ref));
-        sha = line ? line.split(' ')[0] : null;
-      }
-    } else {
-      sha = head; // detached HEAD: the HEAD file already holds the commit SHA directly
-    }
-    return sha ? sha.slice(0, 12) : 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
+// Bump these whenever a change to .env.example / docker-compose.yml requires the user
+// to manually update their own copy (new required variable, new volume, etc.) — the
+// version markers in those files (ENV_VERSION=.. / # COMPOSE_VERSION=..) then fall
+// behind and get flagged as outdated below.
+const EXPECTED_ENV_VERSION = '1.0.0';
+const EXPECTED_COMPOSE_VERSION = '1.0.0';
 
-function computeFileHash(filePath) {
+// Reads a "KEY=1.2.3" marker line from a file — plain for .env, as a YAML comment
+// ("# KEY=1.2.3") for docker-compose.yml. Returns null if the file or marker is missing.
+function readVersionMarker(filePath, key) {
   try {
-    const content = fs.readFileSync(filePath);
-    return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+    const content = fs.readFileSync(filePath, 'utf8');
+    const match = content.match(new RegExp(`^#?\\s*${key}=([\\d.]+)`, 'm'));
+    return match ? match[1] : null;
   } catch {
     return null;
   }
 }
 
-// Runs once at boot: compares the running software version and the mounted .env /
-// docker-compose.yml against what was recorded at the previous boot, logs a clear
-// notice if anything drifted since then, and persists a summary the admin panel reads.
-async function checkVersionAndConfig({ getSetting, setSetting }) {
-  const currentVersion = getGitVersion();
-  const currentEnvHash = computeFileHash(ENV_PATH);
-  const currentComposeHash = computeFileHash(COMPOSE_PATH);
-
-  const [prevVersion, prevEnvHash, prevComposeHash] = await Promise.all([
-    getSetting('_version_app'),
-    getSetting('_version_env_hash'),
-    getSetting('_version_compose_hash'),
-  ]);
-
-  const isFirstBoot = prevVersion === null;
-  const versionChanged = !isFirstBoot && prevVersion !== currentVersion;
-  const envChanged = !isFirstBoot && prevEnvHash !== null && currentEnvHash !== null && prevEnvHash !== currentEnvHash;
-  const composeChanged = !isFirstBoot && prevComposeHash !== null && currentComposeHash !== null && prevComposeHash !== currentComposeHash;
-
-  if (versionChanged || envChanged || composeChanged) {
-    console.log('⚠️  Konfigurationsänderung seit dem letzten Start erkannt:');
-    if (versionChanged) console.log(`   - Software-Version: ${prevVersion} -> ${currentVersion}`);
-    if (envChanged) console.log('   - .env wurde seit dem letzten Start verändert');
-    if (composeChanged) console.log('   - docker-compose.yml wurde seit dem letzten Start verändert');
-  } else if (isFirstBoot) {
-    console.log(`Versionserfassung gestartet (Version ${currentVersion}).`);
-  } else {
-    console.log(`Version ${currentVersion} — keine Änderungen an .env oder docker-compose.yml seit dem letzten Start.`);
+// Numeric major.minor.patch comparison — returns -1/0/1. Missing/non-numeric parts
+// count as 0, so "1" and "1.0.0" compare equal.
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
   }
-
-  await Promise.all([
-    // Always overwritten (not just on change) so the admin-panel banner only ever
-    // reflects the most recent boot, instead of an old change lingering forever.
-    setSetting('_version_status', JSON.stringify({
-      versionChanged, envChanged, composeChanged,
-      previousVersion: prevVersion, currentVersion,
-      checkedAt: new Date().toISOString(),
-    })),
-    setSetting('_version_app', currentVersion),
-    currentEnvHash !== null ? setSetting('_version_env_hash', currentEnvHash) : Promise.resolve(),
-    currentComposeHash !== null ? setSetting('_version_compose_hash', currentComposeHash) : Promise.resolve(),
-  ]);
+  return 0;
 }
 
-// Called right after the app rewrites .env itself (SMTP/SSO settings save), so that
-// in-app config edits aren't mistaken for an external/version-mismatch .env change on
-// the next boot.
-function acknowledgeEnvSelfWrite(setSetting) {
-  const hash = computeFileHash(ENV_PATH);
-  if (hash !== null) setSetting('_version_env_hash', hash);
+function getVersionStatus() {
+  const envVersion = readVersionMarker(ENV_PATH, 'ENV_VERSION');
+  const composeVersion = readVersionMarker(COMPOSE_PATH, 'COMPOSE_VERSION');
+
+  return {
+    software: { version: SOFTWARE_VERSION },
+    env: {
+      version: envVersion,
+      expected: EXPECTED_ENV_VERSION,
+      outdated: envVersion === null || compareVersions(envVersion, EXPECTED_ENV_VERSION) < 0,
+    },
+    compose: {
+      version: composeVersion,
+      expected: EXPECTED_COMPOSE_VERSION,
+      outdated: composeVersion === null || compareVersions(composeVersion, EXPECTED_COMPOSE_VERSION) < 0,
+    },
+  };
 }
 
-module.exports = { getGitVersion, computeFileHash, checkVersionAndConfig, acknowledgeEnvSelfWrite, ENV_PATH, COMPOSE_PATH };
+// Called once at boot to print the three versions and flag anything outdated.
+function logVersionStatus() {
+  const s = getVersionStatus();
+  console.log(
+    `Version: Software ${s.software.version} | .env ${s.env.version || 'nicht gesetzt'} | docker-compose.yml ${s.compose.version || 'nicht gesetzt'}`
+  );
+  if (s.env.outdated) {
+    console.log(`⚠️  .env ist veraltet (Version ${s.env.version || 'nicht gesetzt'}, erwartet ${s.env.expected}) — bitte mit .env.example abgleichen.`);
+  }
+  if (s.compose.outdated) {
+    console.log(`⚠️  docker-compose.yml ist veraltet (Version ${s.compose.version || 'nicht gesetzt'}, erwartet ${s.compose.expected}) — bitte die aktuelle docker-compose.yml aus dem Repository übernehmen.`);
+  }
+}
+
+module.exports = { getVersionStatus, logVersionStatus };

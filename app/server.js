@@ -19,7 +19,7 @@ const {
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail } = require('./email');
 const { version: APP_VERSION } = require('./package.json');
-const { getGitVersion, checkVersionAndConfig, acknowledgeEnvSelfWrite } = require('./version');
+const { getVersionStatus, logVersionStatus } = require('./version');
 
 require('dotenv').config();
 
@@ -4207,9 +4207,6 @@ function updateEnvFile(configs) {
     }
 
     fs.writeFileSync(envPath, lines.join('\n'), 'utf8');
-    // Record this as our own write so the next boot's version check doesn't mistake
-    // a normal admin-panel config save for an external/version-mismatch .env change.
-    acknowledgeEnvSelfWrite(setSetting);
   } catch (err) {
     console.error('Error updating .env file:', err);
   }
@@ -4246,14 +4243,11 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin: current software version and whether .env/docker-compose.yml/the software
-// itself changed since the last boot (see version.js).
-app.get('/api/settings/admin/version-status', requireAdmin, async (req, res) => {
+// Admin: software/.env/docker-compose.yml versions, each compared against what the
+// running code expects (see version.js).
+app.get('/api/settings/admin/version-status', requireAdmin, (req, res) => {
   try {
-    const raw = await getSetting('_version_status');
-    let status = null;
-    try { status = raw ? JSON.parse(raw) : null; } catch { status = null; }
-    res.json({ currentVersion: getGitVersion(), status });
+    res.json(getVersionStatus());
   } catch (err) {
     console.error('Error fetching version status:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -4927,8 +4921,8 @@ function initWebSocket(server) {
 }
 
 initDb()
-  .then(async () => {
-    await checkVersionAndConfig({ getSetting, setSetting });
+  .then(() => {
+    logVersionStatus();
     const server = app.listen(PORT, () => {
       console.log(`myCloud app is running on ${EXPECTED_ORIGIN}`);
     });
