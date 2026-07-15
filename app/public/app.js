@@ -997,11 +997,22 @@ const FILE_TYPE_MAP = {
 
 /* ─── Drag Ghost ─── */
 let _dragGhost = null;
+let _dragGhostSize = 108;
+let _dragGhostX = 0;
+let _dragGhostY = 0;
+let _dragGhostFollowing = false;
 
-function createDragGhost(count, iconColor) {
+// Lifts the ghost off from the exact position/shape of the card that was grabbed and
+// grows it into the floating cursor-follow preview, so picking a file up reads as one
+// continuous motion instead of a placeholder just popping in under the mouse.
+function createDragGhost(count, contentHTML, originRect, cursorX, cursorY) {
   removeDragGhost();
   const ghost = document.createElement('div');
   ghost.id = 'drag-ghost';
+
+  const size = _dragGhostSize;
+  ghost.style.width = size + 'px';
+  ghost.style.height = size + 'px';
 
   for (let i = Math.min(count - 1, 2); i >= 1; i--) {
     const back = document.createElement('div');
@@ -1011,7 +1022,7 @@ function createDragGhost(count, iconColor) {
 
   const main = document.createElement('div');
   main.className = 'ghost-card ghost-main';
-  main.innerHTML = `<i data-lucide="files" style="width:28px;height:28px;color:${iconColor};"></i>`;
+  main.innerHTML = contentHTML;
   ghost.appendChild(main);
 
   if (count > 1) {
@@ -1022,16 +1033,51 @@ function createDragGhost(count, iconColor) {
   }
 
   document.body.appendChild(ghost);
-  _dragGhost = ghost;
   if (typeof lucide !== 'undefined') lucide.createIcons({ el: ghost });
+
+  const endX = cursorX + 14, endY = cursorY + 14;
+  const startScaleX = originRect.width / size;
+  const startScaleY = originRect.height / size;
+  _dragGhost = ghost;
+  _dragGhostX = endX;
+  _dragGhostY = endY;
+  _dragGhostFollowing = false;
+
+  const pickup = ghost.animate([
+    { transform: `translate3d(${originRect.left}px, ${originRect.top}px, 0) scale(${startScaleX}, ${startScaleY})`, opacity: 0.55 },
+    { transform: `translate3d(${endX - 6}px, ${endY - 6}px, 0) scale(1.12)`, opacity: 1, offset: 0.7 },
+    { transform: `translate3d(${endX}px, ${endY}px, 0) scale(1)`, opacity: 1 },
+  ], { duration: 320, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
+
+  pickup.finished.then(() => {
+    if (_dragGhost !== ghost) return; // drag already ended before pickup finished
+    ghost.style.transform = `translate3d(${_dragGhostX}px, ${_dragGhostY}px, 0)`;
+    ghost.style.transition = 'transform 0.1s ease-out';
+    _dragGhostFollowing = true;
+  }).catch(() => {});
+}
+
+function updateDragGhostPosition(cursorX, cursorY) {
+  if (!_dragGhost) return;
+  _dragGhostX = cursorX + 14;
+  _dragGhostY = cursorY + 14;
+  if (_dragGhostFollowing) {
+    _dragGhost.style.transform = `translate3d(${_dragGhostX}px, ${_dragGhostY}px, 0)`;
+  }
 }
 
 function removeDragGhost() {
   if (_dragGhost) {
-    _dragGhost.classList.add('ghost-leaving');
-    const el = _dragGhost;
+    const ghost = _dragGhost;
+    const x = _dragGhostX, y = _dragGhostY;
     _dragGhost = null;
-    setTimeout(() => el.remove(), 220);
+    _dragGhostFollowing = false;
+    ghost.style.transition = '';
+    const leave = ghost.animate([
+      { transform: `translate3d(${x}px, ${y}px, 0) scale(1)`, opacity: 1 },
+      { transform: `translate3d(${x}px, ${y}px, 0) scale(0.7)`, opacity: 0 },
+    ], { duration: 200, easing: 'ease' });
+    leave.finished.then(() => ghost.remove()).catch(() => ghost.remove());
   }
 }
 
@@ -1233,11 +1279,11 @@ function renderFiles(files) {
 
     const iconColor = getFileIconColor(file);
     const isThumb = isImg || isVid;
+    const thumbUrl = isThumb ? `/api/files/thumbnail/${file.id}` : '';
     // Kacheln mit echtem Vorschaubild bekommen mehr Platz fürs Bild (siehe .has-thumb CSS)
     if (isThumb) item.classList.add('has-thumb');
     let iconHTML = `<i data-lucide="${iconName}" style="color: ${iconColor};"></i>`;
     if (isThumb) {
-      const thumbUrl = `/api/files/thumbnail/${file.id}`;
       iconHTML = `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                   <i data-lucide="${iconName}" style="display: none; color: ${iconColor};"></i>`;
     }
@@ -1393,7 +1439,12 @@ function renderFiles(files) {
       const blank = new Image();
       blank.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAUEBAAAACwAAAAAAQABAAACAkQBADs=';
       e.dataTransfer.setDragImage(blank, 0, 0);
-      createDragGhost(ids.length, iconColor);
+
+      const contentHTML = (ids.length === 1 && isThumb)
+        ? `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+           <i data-lucide="${iconName}" style="display: none; width: 36px; height: 36px; color: ${iconColor};"></i>`
+        : `<i data-lucide="${ids.length > 1 ? 'files' : iconName}" style="width: 36px; height: 36px; color: ${iconColor};"></i>`;
+      createDragGhost(ids.length, contentHTML, item.getBoundingClientRect(), e.clientX, e.clientY);
       item.classList.add('dragging');
     });
 
@@ -2623,10 +2674,7 @@ dashboard.addEventListener('drop', async (e) => {
 });
 
 document.addEventListener('dragover', (e) => {
-  if (_dragGhost) {
-    _dragGhost.style.left = (e.clientX + 14) + 'px';
-    _dragGhost.style.top  = (e.clientY + 14) + 'px';
-  }
+  updateDragGhostPosition(e.clientX, e.clientY);
 });
 
 

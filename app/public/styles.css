@@ -2466,32 +2466,24 @@ tr:hover td {
   animation: barSlideUp 0.38s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 
-/* ─── Drag Ghost ─── */
-@keyframes ghostAppear {
-  from { opacity: 0; transform: scale(0.75); }
-  to   { opacity: 1; transform: scale(1); }
-}
-@keyframes ghostLeave {
-  to { opacity: 0; transform: scale(0.7); }
-}
-
+/* ─── Drag Ghost ───
+   Pickup (grow from the grabbed card's rect) and follow-the-cursor motion are both
+   driven from JS (Web Animations API / per-frame transform), not CSS keyframes, since
+   both need the actual card rect and live cursor position. */
 #drag-ghost {
   position: fixed;
+  left: 0;
+  top: 0;
   pointer-events: none;
   z-index: 99999;
-  width: 80px;
-  height: 80px;
-  animation: ghostAppear 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
   transform-origin: top left;
-}
-#drag-ghost.ghost-leaving {
-  animation: ghostLeave 0.2s ease forwards;
 }
 
 .ghost-card {
   position: absolute;
   inset: 0;
-  border-radius: 12px;
+  overflow: hidden;
+  border-radius: 16px;
   background: var(--glass-bg);
   background-image: var(--glass-highlight);
   border: 1px solid var(--glass-border);
@@ -2503,11 +2495,11 @@ tr:hover td {
   justify-content: center;
 }
 .ghost-back-1 {
-  transform: rotate(6deg) translate(5px, -5px);
+  transform: rotate(6deg) translate(7px, -7px);
   opacity: 0.7;
 }
 .ghost-back-2 {
-  transform: rotate(11deg) translate(10px, -10px);
+  transform: rotate(11deg) translate(14px, -14px);
   opacity: 0.45;
 }
 .ghost-main {
