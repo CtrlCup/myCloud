@@ -30,10 +30,10 @@
   --radius-md: 14px;
   --radius-lg: 24px;
   --radius-xl: 34px;
-  /* A thin, even outline plus a soft low-spread glow — reads as a light frame around
-     the whole box rather than a shadow pulling hard toward the bottom. */
-  --shadow: 0 0 0 1px rgba(31, 41, 71, 0.06), 0 2px 12px rgba(31, 41, 71, 0.08);
-  --shadow-lg: 0 0 0 1px rgba(31, 41, 71, 0.08), 0 4px 20px rgba(31, 41, 71, 0.12);
+  /* Soft, low-spread glow only — every element using this token already has its own
+     `border`, so an extra 0 0 0 1px ring here would double up into a hard edge. */
+  --shadow: 0 2px 12px rgba(31, 41, 71, 0.08);
+  --shadow-lg: 0 4px 20px rgba(31, 41, 71, 0.12);
   --transition: all 0.32s cubic-bezier(0.25, 0.8, 0.25, 1);
 
   --modal-bg: rgba(0, 0, 0, 0.3);
@@ -61,8 +61,8 @@
   --glass-border: rgba(255, 255, 255, 0.13);
   --glass-highlight: linear-gradient(135deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.02) 100%);
 
-  --shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 2px 14px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 0 0 1px rgba(0, 0, 0, 0.45), 0 4px 24px rgba(0, 0, 0, 0.38);
+  --shadow: 0 2px 14px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.38);
 
   --modal-bg: rgba(0, 0, 0, 0.45);
   --input-bg: rgba(255, 255, 255, 0.06);
@@ -90,8 +90,8 @@
     --glass-border: rgba(255, 255, 255, 0.13);
     --glass-highlight: linear-gradient(135deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.02) 100%);
 
-    --shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 2px 14px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 0 0 1px rgba(0, 0, 0, 0.45), 0 4px 24px rgba(0, 0, 0, 0.38);
+    --shadow: 0 2px 14px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 4px 24px rgba(0, 0, 0, 0.38);
 
     --modal-bg: rgba(0, 0, 0, 0.45);
     --input-bg: rgba(255, 255, 255, 0.06);
