@@ -4156,12 +4156,14 @@ let adminUsersCache = [];
 
 async function loadAdminUsers() {
   try {
+    // Roles and users don't depend on each other server-side — fetch both at once instead
+    // of waiting for roles to fully resolve (incl. its own rendering) before starting users.
+    const usersPromise = fetch('/api/settings/admin/users').then(res => res.json());
     await loadAdminRoles();
 
-    const res = await fetch('/api/settings/admin/users');
     // Already ordered by the server: users with an unresolved failed login attempt first,
     // then alphabetically by username.
-    adminUsersCache = await res.json();
+    adminUsersCache = await usersPromise;
 
     const container = document.getElementById('admin-user-list');
     container.innerHTML = '';
