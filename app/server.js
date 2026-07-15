@@ -19,7 +19,7 @@ const {
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail } = require('./email');
 const { version: APP_VERSION } = require('./package.json');
-const { getVersionStatus, logVersionStatus } = require('./version');
+const { getVersionStatus, logVersionStatus, checkForUpdate, GITHUB_REPO } = require('./version');
 
 require('dotenv').config();
 
@@ -4244,10 +4244,12 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
 });
 
 // Admin: software/.env/docker-compose.yml versions, each compared against what the
-// running code expects (see version.js).
-app.get('/api/settings/admin/version-status', requireAdmin, (req, res) => {
+// running code expects (see version.js), plus a GitHub check for a newer software
+// release (read-only — this never pulls code or updates anything by itself).
+app.get('/api/settings/admin/version-status', requireAdmin, async (req, res) => {
   try {
-    res.json(getVersionStatus());
+    const update = await checkForUpdate();
+    res.json({ ...getVersionStatus(), update: { ...update, repo: GITHUB_REPO } });
   } catch (err) {
     console.error('Error fetching version status:', err);
     res.status(500).json({ error: 'Internal server error' });

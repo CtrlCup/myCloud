@@ -3569,10 +3569,22 @@ async function loadVersionStatus() {
     if (!res.ok) return;
     const data = await res.json();
 
+    let updateNote = '';
+    if (data.update && data.update.updateAvailable) {
+      const repoUrl = `https://github.com/${data.update.repo}`;
+      updateNote = `
+        <div style="margin-top: 0.4rem; padding: 0.6rem 0.85rem; border-radius: var(--radius-sm); background: rgba(var(--color-accent-rgb), 0.12); border: 1px solid rgba(var(--color-accent-rgb), 0.3); color: var(--color-accent); font-size: 0.8rem;">
+          Update verfügbar: Version ${escapeHtml(data.update.latestVersion)} —
+          <a href="${repoUrl}" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: underline;">auf GitHub ansehen</a>
+        </div>
+      `;
+    }
+
     listEl.innerHTML =
       renderVersionRow('Software', data.software.version, null, false) +
       renderVersionRow('.env', data.env.version, data.env.expected, data.env.outdated) +
-      renderVersionRow('docker-compose.yml', data.compose.version, data.compose.expected, data.compose.outdated);
+      renderVersionRow('docker-compose.yml', data.compose.version, data.compose.expected, data.compose.outdated) +
+      updateNote;
   } catch (err) {
     console.error('Error loading version status:', err);
   }

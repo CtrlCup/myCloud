@@ -69,4 +69,39 @@ function logVersionStatus() {
   }
 }
 
-module.exports = { getVersionStatus, logVersionStatus };
+const GITHUB_REPO = 'CtrlCup/myCloud';
+const GITHUB_BRANCH = 'main';
+const UPDATE_CHECK_CACHE_MS = 60 * 60 * 1000; // 1h — avoid hitting GitHub on every admin panel load
+
+let updateCheckCache = null;
+
+// Checks GitHub for a newer package.json version than the one currently running. Never
+// throws — a failed/offline check just means no "update available" note is shown, it
+// doesn't affect anything else. This only ever reads a public file; it never pulls code
+// or triggers any kind of update itself.
+async function checkForUpdate() {
+  if (updateCheckCache && Date.now() - updateCheckCache.checkedAt < UPDATE_CHECK_CACHE_MS) {
+    return updateCheckCache;
+  }
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(
+      `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/app/package.json`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`GitHub responded with ${res.status}`);
+    const pkg = await res.json();
+    updateCheckCache = {
+      latestVersion: pkg.version || null,
+      updateAvailable: !!pkg.version && compareVersions(pkg.version, SOFTWARE_VERSION) > 0,
+      checkedAt: Date.now(),
+    };
+  } catch {
+    updateCheckCache = { latestVersion: null, updateAvailable: false, checkedAt: Date.now() };
+  }
+  return updateCheckCache;
+}
+
+module.exports = { getVersionStatus, logVersionStatus, checkForUpdate, GITHUB_REPO };
