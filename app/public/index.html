@@ -70,38 +70,49 @@
           <i data-lucide="cloud" style="width: 32px; height: 32px;"></i> my<span>Cloud</span>
         </h1>
         <p class="auth-subtitle" id="auth-subtitle">Willkommen! Bitte melde dich an.</p>
-        
+
+        <div id="sso-auto-redirect-notice" style="display: none; text-align: center;">
+          <p style="color: var(--color-text-muted); font-size: 0.9rem; margin-bottom: 1.25rem;">Du wirst zur Anmeldung weitergeleitet…</p>
+          <button type="button" class="btn" id="sso-auto-redirect-cancel-btn" style="width: 100%; justify-content: center;">
+            Stattdessen mit Passwort anmelden
+          </button>
+        </div>
+
         <form id="auth-form">
-          <div class="form-group">
+          <div class="form-group" id="username-group">
             <label for="username" id="username-label">Benutzername</label>
             <input type="text" id="username" class="form-control" placeholder="Alex" required autocomplete="username">
           </div>
-          
+
           <div class="form-group" id="password-group">
             <label for="password">Passwort</label>
             <input type="password" id="password" class="form-control" placeholder="••••••••" required autocomplete="current-password">
           </div>
-          
+
           <div class="form-actions">
             <button type="submit" class="btn btn-primary" style="justify-content: center;" id="auth-submit-btn">
               Anmelden
             </button>
-            
+
             <button type="button" class="btn" id="passkey-login-btn" style="justify-content: center;">
               <i data-lucide="key-round"></i> Mit Passkey anmelden
             </button>
-            
+
             <a href="/auth/sso" class="btn" id="sso-login-btn" style="display: none; justify-content: center;">
-              <i data-lucide="shield-check"></i> Über Authentik (SSO) anmelden
+              <i data-lucide="shield-check"></i> <span id="sso-login-btn-text">Über Authentik (SSO) anmelden</span>
             </a>
           </div>
         </form>
-        
+
         <div class="divider" id="auth-divider">oder</div>
 
         <button type="button" class="btn" id="toggle-auth-mode" style="width: 100%; justify-content: center;">
           Noch kein Konto? Registrieren
         </button>
+
+        <p id="sso-only-notice" style="display: none; text-align: center; font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.5rem;">
+          Die Anmeldung ist nur über SSO möglich.
+        </p>
 
         <div style="text-align: center; margin-top: 1rem; display: none;" id="forgot-password-container">
           <button type="button" class="btn" id="forgot-password-btn" style="border: none; background: transparent; padding: 0; font-size: 0.85rem; opacity: 0.8;">
@@ -577,6 +588,9 @@
           <div class="settings-nav-item" data-section="admin-system">
             <i data-lucide="sliders"></i> Systemeinstellungen
           </div>
+          <div class="settings-nav-item" data-section="admin-auth">
+            <i data-lucide="log-in"></i> Registrierung & SSO
+          </div>
           <div class="settings-nav-item" data-section="admin-smtp">
             <i data-lucide="mail"></i> E-Mail Service (SMTP)
           </div>
@@ -737,12 +751,34 @@
           <!-- Section 2: Systemeinstellungen -->
           <section id="admin-system" class="settings-section">
             <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
-              <h3>System-Version</h3>
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <h3 style="margin: 0;">System-Version</h3>
+                <button type="button" class="btn" id="admin-check-update-btn" style="padding: 0.45rem 0.85rem; font-size: 0.8rem;">
+                  <i data-lucide="refresh-cw" style="width: 14px; height: 14px;"></i> Jetzt prüfen
+                </button>
+              </div>
               <div id="admin-version-list" style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.6rem; font-size: 0.85rem;">
                 Wird geladen…
               </div>
             </div>
             <form id="admin-system-form">
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>Papierkorb</h3>
+                <div class="form-group" style="margin-top: 1.5rem;">
+                  <label for="admin-trash-retention-days">Aufbewahrungsdauer (Tage)</label>
+                  <input type="number" id="admin-trash-retention-days" class="form-control" min="1" max="365" placeholder="30">
+                  <span style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.35rem; display: block;">Gelöschte Dateien werden nach dieser Anzahl Tage im Papierkorb endgültig entfernt.</span>
+                </div>
+              </div>
+              <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
+                Systemkonfigurationen speichern
+              </button>
+            </form>
+          </section>
+
+          <!-- Section 2b: Registrierung & SSO -->
+          <section id="admin-auth" class="settings-section">
+            <form id="admin-auth-form">
               <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
                 <h3>Registrierung</h3>
                 <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem;">
@@ -758,15 +794,6 @@
               </div>
 
               <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
-                <h3>Papierkorb</h3>
-                <div class="form-group" style="margin-top: 1.5rem;">
-                  <label for="admin-trash-retention-days">Aufbewahrungsdauer (Tage)</label>
-                  <input type="number" id="admin-trash-retention-days" class="form-control" min="1" max="365" placeholder="30">
-                  <span style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.35rem; display: block;">Gelöschte Dateien werden nach dieser Anzahl Tage im Papierkorb endgültig entfernt.</span>
-                </div>
-              </div>
-
-              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
                 <h3>SSO / Authentik Integration</h3>
                 <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; margin-bottom: 1.5rem;">
                   <div>
@@ -777,6 +804,30 @@
                     <input type="checkbox" id="admin-sso-enabled">
                     <span class="slider"></span>
                   </label>
+                </div>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                  <div>
+                    <strong style="display: block;">Automatisch weiterleiten</strong>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Leitet auf der Login-Seite direkt zu SSO weiter, statt auf einen Klick auf den Button zu warten. Ein Link zum Passwort-Login bleibt kurz sichtbar.</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="admin-sso-auto-redirect">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                  <div>
+                    <strong style="display: block; color: #ff9f0a;">Nur SSO-Anmeldung erlauben</strong>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Deaktiviert Passwort- und Passkey-Login komplett — Anmeldung ist dann nur noch über SSO möglich. Erst aktivierbar, wenn SSO Login an ist; muss zum Deaktivieren von SSO Login zuerst wieder ausgeschaltet werden.</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="admin-sso-only">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="form-group">
+                  <label for="admin-sso-button-text">Button-Text</label>
+                  <input type="text" id="admin-sso-button-text" class="form-control" maxlength="60" placeholder="Über Authentik (SSO) anmelden">
                 </div>
                 <div class="form-group">
                   <label for="admin-sso-issuer">OIDC Issuer URL</label>
@@ -796,7 +847,7 @@
                 </div>
               </div>
               <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
-                Systemkonfigurationen speichern
+                Einstellungen speichern
               </button>
             </form>
           </section>

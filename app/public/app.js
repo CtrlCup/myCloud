@@ -191,8 +191,50 @@ async function checkAuthStatus() {
     const ssoBtn = document.getElementById('sso-login-btn');
     if (data.ssoEnabled) {
       ssoBtn.style.display = 'inline-flex';
+      document.getElementById('sso-login-btn-text').textContent = data.ssoButtonText || 'Über Authentik (SSO) anmelden';
     } else {
       ssoBtn.style.display = 'none';
+    }
+
+    // "Nur SSO-Anmeldung": Passwort-/Passkey-Login und Registrierung komplett ausblenden.
+    if (!data.loggedIn && data.ssoOnly) {
+      document.getElementById('username-group').style.display = 'none';
+      document.getElementById('password-group').style.display = 'none';
+      document.getElementById('auth-submit-btn').style.display = 'none';
+      document.getElementById('passkey-login-btn').style.display = 'none';
+      document.getElementById('auth-divider').style.display = 'none';
+      document.getElementById('toggle-auth-mode').style.display = 'none';
+      document.getElementById('sso-only-notice').style.display = 'block';
+    }
+
+    // Automatische SSO-Weiterleitung: kurz sichtbar mit Abbrechen-Möglichkeit, damit man
+    // bei einer Fehlkonfiguration nicht vom Passwort-Login ausgesperrt wird. Bei "Nur SSO"
+    // gibt es keinen Passwort-Login, zu dem man zurückkehren könnte — dort sofort weiterleiten.
+    if (!data.loggedIn && data.ssoEnabled && data.ssoAutoRedirect) {
+      if (data.ssoOnly) {
+        window.location.href = '/auth/sso';
+      } else {
+        const notice = document.getElementById('sso-auto-redirect-notice');
+        const form = document.getElementById('auth-form');
+        const divider = document.getElementById('auth-divider');
+        const toggleMode = document.getElementById('toggle-auth-mode');
+        notice.style.display = 'block';
+        form.style.display = 'none';
+        divider.style.display = 'none';
+        toggleMode.style.display = 'none';
+
+        let cancelled = false;
+        document.getElementById('sso-auto-redirect-cancel-btn').onclick = () => {
+          cancelled = true;
+          notice.style.display = 'none';
+          form.style.display = '';
+          divider.style.display = '';
+          toggleMode.style.display = '';
+        };
+        setTimeout(() => {
+          if (!cancelled) window.location.href = '/auth/sso';
+        }, 2000);
+      }
     }
 
     if (data.loggedIn) {
@@ -3703,11 +3745,11 @@ function renderVersionRow(label, version, expected, outdated) {
   `;
 }
 
-async function loadVersionStatus() {
+async function loadVersionStatus(force = false) {
   const listEl = document.getElementById('admin-version-list');
   if (!listEl) return;
   try {
-    const res = await fetch('/api/settings/admin/version-status');
+    const res = await fetch(`/api/settings/admin/version-status${force ? '?force=true' : ''}`);
     if (!res.ok) return;
     const data = await res.json();
 
@@ -3727,10 +3769,18 @@ async function loadVersionStatus() {
       renderVersionRow('.env', data.env.version, data.env.expected, data.env.outdated) +
       renderVersionRow('docker-compose.yml', data.compose.version, data.compose.expected, data.compose.outdated) +
       updateNote;
+
+    if (force) {
+      showToast(data.update && data.update.updateAvailable
+        ? `Update verfügbar: Version ${data.update.latestVersion}`
+        : 'Du verwendest bereits die neueste Version.');
+    }
   } catch (err) {
     console.error('Error loading version status:', err);
   }
 }
+
+document.getElementById('admin-check-update-btn')?.addEventListener('click', () => loadVersionStatus(true));
 
 async function loadAdminSettings() {
   try {
@@ -3781,14 +3831,19 @@ async function loadAdminSettings() {
       renderAdminFooterLinks(footerLinks);
 
       // Systemeinstellungen befüllen
-      document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
       document.getElementById('admin-trash-retention-days').value = conf.trash_retention_days || '30';
+
+      // Registrierung & SSO befüllen
+      document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
       document.getElementById('admin-sso-enabled').checked = conf.sso_enabled === 'true';
+      document.getElementById('admin-sso-auto-redirect').checked = conf.sso_auto_redirect === 'true';
+      document.getElementById('admin-sso-only').checked = conf.sso_only === 'true';
+      document.getElementById('admin-sso-button-text').value = conf.sso_button_text || '';
       document.getElementById('admin-sso-issuer').value = conf.sso_issuer_url || '';
       document.getElementById('admin-sso-client-id').value = conf.sso_client_id || '';
       document.getElementById('admin-sso-client-secret').value = conf.sso_client_secret_configured ? '__placeholder__' : '';
       document.getElementById('admin-sso-redirect').value = `${window.location.origin}/auth/sso/callback`;
-      
+
       // SMTP befüllen
       document.getElementById('admin-smtp-host').value = conf.email_smtp_host || '';
       document.getElementById('admin-smtp-port').value = conf.email_smtp_port || '';
@@ -3945,11 +4000,21 @@ wireBgControls('admin-login-bg-light-upload', 'admin-login-bg-light-remove', '/a
 
 document.getElementById('admin-system-form').onsubmit = async (e) => {
   e.preventDefault();
+  const payload = {
+    trash_retention_days: document.getElementById('admin-trash-retention-days').value.trim() || '30',
+  };
+  await saveAdminConfig(payload);
+};
+
+document.getElementById('admin-auth-form').onsubmit = async (e) => {
+  e.preventDefault();
   const secretInput = document.getElementById('admin-sso-client-secret').value;
   const payload = {
     registration_enabled: document.getElementById('admin-reg-enabled').checked ? 'true' : 'false',
-    trash_retention_days: document.getElementById('admin-trash-retention-days').value.trim() || '30',
     sso_enabled: document.getElementById('admin-sso-enabled').checked ? 'true' : 'false',
+    sso_auto_redirect: document.getElementById('admin-sso-auto-redirect').checked ? 'true' : 'false',
+    sso_only: document.getElementById('admin-sso-only').checked ? 'true' : 'false',
+    sso_button_text: document.getElementById('admin-sso-button-text').value.trim(),
     sso_issuer_url: document.getElementById('admin-sso-issuer').value.trim(),
     sso_client_id: document.getElementById('admin-sso-client-id').value.trim(),
     sso_client_secret: secretInput === '__placeholder__' ? '__placeholder__' : secretInput
@@ -5541,6 +5606,16 @@ if (adminSsoToggle) {
   adminSsoToggle.onchange = async () => {
     const payload = {
       sso_enabled: adminSsoToggle.checked ? 'true' : 'false'
+    };
+    await saveAdminConfig(payload);
+  };
+}
+
+const adminSsoAutoRedirectToggle = document.getElementById('admin-sso-auto-redirect');
+if (adminSsoAutoRedirectToggle) {
+  adminSsoAutoRedirectToggle.onchange = async () => {
+    const payload = {
+      sso_auto_redirect: adminSsoAutoRedirectToggle.checked ? 'true' : 'false'
     };
     await saveAdminConfig(payload);
   };

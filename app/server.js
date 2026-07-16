@@ -435,11 +435,17 @@ app.get('/api/auth/status', async (req, res) => {
     const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
     const userCount = parseInt(userCountRes.rows[0].count);
     const ssoEnabled = (await getSetting('sso_enabled')) === 'true';
+    const ssoAutoRedirect = (await getSetting('sso_auto_redirect')) === 'true';
+    const ssoOnly = (await getSetting('sso_only')) === 'true';
+    const ssoButtonText = await getSetting('sso_button_text');
 
     res.json({
       loggedIn: false,
       firstRun: userCount === 0,
       ssoEnabled,
+      ssoAutoRedirect,
+      ssoOnly,
+      ssoButtonText: ssoButtonText || 'Über Authentik (SSO) anmelden',
     });
   } catch (err) {
     console.error('Error fetching auth status:', err);
@@ -449,6 +455,10 @@ app.get('/api/auth/status', async (req, res) => {
 
 // Standard Register Route
 app.post('/api/auth/register', async (req, res) => {
+  if ((await getSetting('sso_only')) === 'true') {
+    return res.status(403).json({ error: 'Die Anmeldung ist nur über SSO möglich.' });
+  }
+
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ error: 'Email and password are required' });
@@ -597,6 +607,10 @@ function recordFailedLoginAttempt(key) {
 
 // Standard Login Route
 app.post('/api/auth/login', async (req, res) => {
+  if ((await getSetting('sso_only')) === 'true') {
+    return res.status(403).json({ error: 'Die Anmeldung ist nur über SSO möglich.' });
+  }
+
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Username/Email and password are required' });
@@ -882,6 +896,9 @@ app.post('/api/auth/passkey/register-verify', requireAuth, async (req, res) => {
 
 // 3. Login Options
 app.post('/api/auth/passkey/login-options', async (req, res) => {
+  if ((await getSetting('sso_only')) === 'true') {
+    return res.status(403).json({ error: 'Die Anmeldung ist nur über SSO möglich.' });
+  }
   try {
     const options = await generateAuthenticationOptions({
       rpID: getRpId(req),
@@ -4319,6 +4336,30 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
       configs.trash_retention_days = String(n);
     }
 
+    if ('sso_button_text' in configs && configs.sso_button_text.length > 60) {
+      return res.status(400).json({ error: 'Button-Text darf maximal 60 Zeichen lang sein.' });
+    }
+
+    // Guard against ever reaching a state where neither password/passkey login nor SSO
+    // works — that would lock every admin out of the web UI with no way back in short of
+    // editing the database directly.
+    if ('sso_only' in configs && configs.sso_only === 'true') {
+      const ssoEnabled = 'sso_enabled' in configs
+        ? configs.sso_enabled === 'true'
+        : (await getSetting('sso_enabled')) === 'true';
+      if (!ssoEnabled) {
+        return res.status(400).json({ error: 'SSO muss aktiviert sein, bevor die Passwort-/Passkey-Anmeldung deaktiviert werden kann.' });
+      }
+    }
+    if ('sso_enabled' in configs && configs.sso_enabled === 'false') {
+      const ssoOnly = 'sso_only' in configs
+        ? configs.sso_only === 'true'
+        : (await getSetting('sso_only')) === 'true';
+      if (ssoOnly) {
+        return res.status(400).json({ error: 'SSO kann nicht deaktiviert werden, solange "Nur SSO-Anmeldung" aktiv ist. Bitte diese Option zuerst deaktivieren.' });
+      }
+    }
+
     const keysChanged = Object.keys(configs);
     const smtpKeys = ['email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from'];
     if (keysChanged.some(k => smtpKeys.includes(k))) {
@@ -4351,7 +4392,7 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
 // release (read-only — this never pulls code or updates anything by itself).
 app.get('/api/settings/admin/version-status', requireAdmin, async (req, res) => {
   try {
-    const update = await checkForUpdate();
+    const update = await checkForUpdate(req.query.force === 'true');
     res.json({ ...getVersionStatus(), update: { ...update, repo: GITHUB_REPO } });
   } catch (err) {
     console.error('Error fetching version status:', err);

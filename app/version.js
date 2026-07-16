@@ -79,8 +79,8 @@ let updateCheckCache = null;
 // throws — a failed/offline check just means no "update available" note is shown, it
 // doesn't affect anything else. This only ever reads a public file; it never pulls code
 // or triggers any kind of update itself.
-async function checkForUpdate() {
-  if (updateCheckCache && Date.now() - updateCheckCache.checkedAt < UPDATE_CHECK_CACHE_MS) {
+async function checkForUpdate(force = false) {
+  if (!force && updateCheckCache && Date.now() - updateCheckCache.checkedAt < UPDATE_CHECK_CACHE_MS) {
     return updateCheckCache;
   }
   try {
