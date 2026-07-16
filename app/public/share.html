@@ -88,20 +88,16 @@
       </div>
 
       <!-- Geteilte Ordner Info -->
-      <div class="card" id="share-meta-card" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
-        <div>
-          <h2 id="shared-title" style="display: flex; align-items: center; gap: 0.5rem;">
-            <i data-lucide="folder"></i> Ordner laden...
-          </h2>
-          <div class="share-permissions-badges" id="share-permissions-badges" style="justify-content: flex-start;">
-            <!-- Badges werden dynamisch geladen -->
-          </div>
+      <div class="card" id="share-meta-card" style="margin-bottom: 1.5rem; padding: 1.25rem 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+        <h2 id="shared-title" style="display: flex; align-items: center; gap: 0.5rem; margin: 0;">
+          <i data-lucide="folder"></i> Ordner laden...
+        </h2>
+        <div class="share-permissions-badges" id="share-permissions-badges" style="display: none;">
+          <!-- Nur für den Abgabe-Ordner-Hinweis genutzt, siehe loadShareData() -->
         </div>
-        <div>
-          <button class="btn btn-primary" id="download-all-zip-btn" style="display: none;">
-            <i data-lucide="file-archive"></i> Als ZIP herunterladen
-          </button>
-        </div>
+        <button class="btn btn-icon btn-primary" id="download-all-zip-btn" title="Als ZIP herunterladen" style="display: none;">
+          <i data-lucide="file-archive"></i>
+        </button>
       </div>
 
       <!-- Nachricht des Freigebenden an den Besucher -->
@@ -113,7 +109,7 @@
       </div>
 
       <!-- Toolbar -->
-      <div class="toolbar" id="share-toolbar">
+      <div class="toolbar" id="share-toolbar" style="padding-bottom: 1.25rem; margin-bottom: 1.25rem; border-bottom: 1px solid var(--color-border);">
         <div class="breadcrumbs" id="share-breadcrumbs">
           <!-- Dynamisch -->
         </div>
@@ -845,17 +841,18 @@
           <i data-lucide="${isFolder ? 'folder' : 'file'}"></i> ${escapeHtml(data.baseFile.name)}
         `;
 
-        // Badges
-        const badges = [];
+        // Die Berechtigungs-Badges (Lesen/Schreiben/Download/ZIP) wurden bewusst entfernt —
+        // die Freigabe-Ansicht soll nicht vorab auflisten, was alles möglich ist. Der
+        // "Nur-Hochladen"-Hinweis bleibt, da er ein abweichendes UI-Verhalten erklärt statt
+        // nur eine Berechtigung zu wiederholen.
+        const badgesEl = document.getElementById('share-permissions-badges');
         if (isOnlyUpload) {
-          badges.push('<span class="badge" style="background: rgba(0, 210, 255, 0.15); border-color: var(--color-accent);">Nur-Hochladen (Abgabe-Ordner)</span>');
+          badgesEl.innerHTML = '<span class="badge" style="background: rgba(0, 210, 255, 0.15); border-color: var(--color-accent);">Nur-Hochladen (Abgabe-Ordner)</span>';
+          badgesEl.style.display = 'flex';
         } else {
-          if (shareConfig.can_read) badges.push('<span class="badge">Lesen</span>');
-          if (shareConfig.can_write) badges.push('<span class="badge">Schreiben/Hochladen</span>');
-          if (shareConfig.can_download) badges.push('<span class="badge">Download</span>');
-          if (shareConfig.can_zip) badges.push('<span class="badge">ZIP-Export</span>');
+          badgesEl.innerHTML = '';
+          badgesEl.style.display = 'none';
         }
-        document.getElementById('share-permissions-badges').innerHTML = badges.join('');
 
         // ZIP-Download Button anzeigen
         if (shareConfig.can_zip && isFolder && !isOnlyUpload) {
@@ -1124,8 +1121,15 @@
               openPdfViewer(file.id, file.name, true, slug);
             } else if (codeExts.includes(ext)) {
               openCodeEditor(file.id, file.name, true, slug);
-            } else if (officeExts.includes(ext) && shareConfig.can_collab) {
-              openOfficeEditorPublic(file.id, file.name, slug);
+            } else if (officeExts.includes(ext)) {
+              // Office files never fall through to a silent download — either they open
+              // (collaborative editing is the only mode the public editor supports, hence
+              // the can_collab gate) or the visitor is told why not.
+              if (shareConfig.can_collab) {
+                openOfficeEditorPublic(file.id, file.name, slug);
+              } else {
+                showToast('Zum Öffnen muss der Freigebende die Kollaboration für diese Freigabe aktivieren.');
+              }
             } else {
               if (shareConfig.can_download) {
                 guardedDownload(`/api/public/shares/${slug}/download/${file.id}`);

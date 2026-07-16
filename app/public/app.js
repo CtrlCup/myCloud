@@ -1607,9 +1607,9 @@ function renderFiles(files) {
           openCodeEditor(file.id, file.name);
         } else if (officeExts.includes(ext)) {
           openOfficeEditor(file.id, file.name);
-        } else {
-          window.location.href = `/api/files/download/${file.id}`;
         }
+        // No in-app viewer for this type (archives, executables, ...): double-click no longer
+        // triggers an implicit download — use the "..." menu's explicit "Herunterladen" action.
       }
     };
 
