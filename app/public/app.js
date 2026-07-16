@@ -3824,6 +3824,12 @@ async function loadAdminSettings() {
       setBgPreview('admin-login-bg-preview', 'admin-login-bg-remove', !!conf.login_bg_image, '/api/public/branding/login-bg?');
       setBgPreview('admin-login-bg-light-preview', 'admin-login-bg-light-remove', !!conf.login_bg_image_light, '/api/public/branding/login-bg?variant=light');
 
+      // SEO & Sichtbarkeit
+      document.getElementById('admin-site-indexable').checked = conf.site_indexable === 'true';
+      document.getElementById('admin-seo-title').value = conf.seo_title || '';
+      document.getElementById('admin-seo-description').value = conf.seo_description || '';
+      setBgPreview('admin-seo-image-preview', 'admin-seo-image-remove', !!conf.seo_image_path, '/api/public/branding/seo-image?');
+
       // Footer
       document.getElementById('admin-footer-enabled').checked = conf.footer_enabled === 'true';
       let footerLinks = [];
@@ -3925,11 +3931,16 @@ document.getElementById('admin-branding-form').onsubmit = async (e) => {
     custom_color_bg: document.getElementById('admin-color-bg').value,
     custom_color_accent: document.getElementById('admin-color-accent').value,
     footer_enabled: document.getElementById('admin-footer-enabled').checked ? 'true' : 'false',
-    footer_links: JSON.stringify(readAdminFooterLinks())
+    footer_links: JSON.stringify(readAdminFooterLinks()),
+    site_indexable: document.getElementById('admin-site-indexable').checked ? 'true' : 'false',
+    seo_title: document.getElementById('admin-seo-title').value.trim(),
+    seo_description: document.getElementById('admin-seo-description').value.trim(),
   };
   await saveAdminConfig(payload);
   loadBranding(); // Reload headers & document title instantly
 };
+
+wireBgControls('admin-seo-image-upload', 'admin-seo-image-remove', '/api/settings/admin/seo-image', null, 'SEO-Vorschaubild');
 
 // Color pickers value listeners
 const colorBgPicker = document.getElementById('admin-color-bg');

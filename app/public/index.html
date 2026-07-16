@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>myCloud - Sicherer Cloud-Speicher</title>
+  <!-- SEO_META: server-injected robots/description/Open-Graph tags, see renderAppShell() in server.js -->
   <!-- Google Fonts Outfit -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -644,6 +645,42 @@
                       <input type="file" id="admin-icon-upload-input" style="display: none;" accept="image/*">
                     </label>
                     <p style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.5rem;">Unterstützt PNG, JPG oder SVG. Max. 1 MB.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>SEO & Sichtbarkeit</h3>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; margin-bottom: 1.5rem;">
+                  <div>
+                    <strong style="display: block;">Von Suchmaschinen auffindbar</strong>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Erlaubt Google & Co., diese Instanz zu indexieren. Standardmäßig aus — die meisten selbstgehosteten Clouds sollen privat bleiben. Geteilte Links (/s/...) werden davon unabhängig nie indexiert.</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="admin-site-indexable">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="form-group">
+                  <label for="admin-seo-title">SEO-Titel</label>
+                  <input type="text" id="admin-seo-title" class="form-control" maxlength="70" placeholder="myCloud - Sicherer Cloud-Speicher">
+                </div>
+                <div class="form-group">
+                  <label for="admin-seo-description">SEO-Beschreibung</label>
+                  <textarea id="admin-seo-description" class="form-control" maxlength="200" rows="2" placeholder="Kurze Beschreibung, die Google in den Suchergebnissen anzeigt."></textarea>
+                </div>
+                <div class="form-group" style="margin-top: 1.5rem;">
+                  <label>Vorschaubild (Open Graph)</label>
+                  <span style="font-size: 0.8rem; color: var(--color-text-muted); display: block; margin-bottom: 0.75rem;">Wird angezeigt, wenn der Link in Social Media / Messengern geteilt wird. Fällt auf das Cloud-Icon zurück, falls keins gesetzt ist.</span>
+                  <div style="display: flex; align-items: flex-start; gap: 1rem;">
+                    <div id="admin-seo-image-preview" style="width: 120px; height: 70px; border-radius: 6px; background: rgba(0,0,0,0.2); border: 1px solid var(--color-border); background-size: cover; background-position: center; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; color: var(--color-text-muted);">Kein Bild</div>
+                    <div style="display: flex; gap: 0.5rem;">
+                      <label class="btn btn-primary" style="margin: 0; cursor: pointer; padding: 0.45rem 0.85rem; font-size: 0.8rem;">
+                        <i data-lucide="image"></i> Hochladen
+                        <input type="file" id="admin-seo-image-upload" style="display: none;" accept="image/*">
+                      </label>
+                      <button type="button" class="btn" id="admin-seo-image-remove" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 0.45rem 0.85rem; font-size: 0.8rem; display: none;">Entfernen</button>
+                    </div>
                   </div>
                 </div>
               </div>

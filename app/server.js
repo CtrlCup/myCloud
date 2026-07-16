@@ -43,6 +43,13 @@ function safeFileExtension(originalName) {
   return /^\.[A-Za-z0-9]{1,15}$/.test(ext) ? ext : '';
 }
 
+// Admin-controlled settings (SEO title/description) get reflected into HTML served to every
+// visitor, including unauthenticated ones — escape before injecting so a compromised admin
+// account (or a stray "<" in the description) can't inject markup/script into the page shell.
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 // Multer storage engine
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -261,7 +268,9 @@ async function isDescendantOf(fileId, ancestorId) {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+// index: false — index.html needs SEO tags injected per-request (see renderAppShell below),
+// so it must never be served as-is by the static middleware's automatic directory index.
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 // Self-hosted PDF.js viewer app (not just the bare library) — its prebuilt UI already has a
 // page-layout menu with single/two-page/two-page-with-cover-page modes, which is exactly the
@@ -2983,6 +2992,23 @@ app.get('/api/public/branding/icon', async (req, res) => {
   }
 });
 
+// Get SEO/Open-Graph preview image — falls back to the cloud icon if no dedicated one was
+// uploaded, so link previews still show something once branding is set up.
+app.get('/api/public/branding/seo-image', async (req, res) => {
+  try {
+    const imgPath = (await getSetting('seo_image_path')) || (await getSetting('cloud_icon_path'));
+    if (imgPath) {
+      const filePath = path.join(UPLOADS_DIR, imgPath);
+      if (fs.existsSync(filePath)) {
+        return res.sendFile(filePath);
+      }
+    }
+    res.status(404).send('Image not found');
+  } catch (err) {
+    res.status(500).send('Internal server error');
+  }
+});
+
 // Get Dashboard Background
 app.get('/api/public/branding/dashboard-bg', async (req, res) => {
   try {
@@ -3040,6 +3066,51 @@ app.post('/api/settings/admin/icon', requireAdmin, upload.single('icon'), async 
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Upload SEO/Open-Graph preview image (Admin only)
+app.post('/api/settings/admin/seo-image', requireAdmin, upload.single('image'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No image file provided.' });
+  }
+
+  try {
+    const oldImg = await getSetting('seo_image_path');
+    await setSetting('seo_image_path', req.file.filename);
+
+    if (oldImg) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldImg);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+
+    res.json({ success: true, imageUrl: `/api/public/branding/seo-image?t=${Date.now()}` });
+  } catch (err) {
+    console.error('Error saving SEO image:', err);
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Remove SEO/Open-Graph preview image (Admin only)
+app.delete('/api/settings/admin/seo-image', requireAdmin, async (req, res) => {
+  try {
+    const oldImg = await getSetting('seo_image_path');
+    if (oldImg) {
+      const oldFilePath = path.join(UPLOADS_DIR, oldImg);
+      if (fs.existsSync(oldFilePath)) {
+        fs.unlinkSync(oldFilePath);
+      }
+    }
+    await setSetting('seo_image_path', '');
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error removing SEO image:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -4340,6 +4411,13 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'Button-Text darf maximal 60 Zeichen lang sein.' });
     }
 
+    if ('seo_title' in configs && configs.seo_title.length > 70) {
+      return res.status(400).json({ error: 'SEO-Titel darf maximal 70 Zeichen lang sein.' });
+    }
+    if ('seo_description' in configs && configs.seo_description.length > 200) {
+      return res.status(400).json({ error: 'SEO-Beschreibung darf maximal 200 Zeichen lang sein.' });
+    }
+
     // Guard against ever reaching a state where neither password/passkey login nor SSO
     // works — that would lock every admin out of the web UI with no way back in short of
     // editing the database directly.
@@ -4688,13 +4766,64 @@ app.get('/s/:slug', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'share.html'));
 });
 
+app.get('/robots.txt', async (req, res) => {
+  const indexable = (await getSetting('site_indexable')) === 'true';
+  res.type('text/plain');
+  // Share links (/s/:slug) are always noindex via their own <meta> tag regardless of this
+  // setting — this only ever controls the login/app shell itself.
+  res.send(indexable ? 'User-agent: *\nAllow: /\n' : 'User-agent: *\nDisallow: /\n');
+});
+
+// Injects admin-configured SEO title/description/Open-Graph tags and the indexable/noindex
+// robots directive into the app shell HTML at request time — index.html itself only carries
+// a placeholder comment (see SEO_META marker) since these values live in the settings table
+// and can change without a deploy.
+async function renderAppShell(req, res) {
+  try {
+    const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+    const [seoTitle, seoDescription, cloudName, indexable] = await Promise.all([
+      getSetting('seo_title'),
+      getSetting('seo_description'),
+      getSetting('cloud_name'),
+      getSetting('site_indexable'),
+    ]);
+
+    const title = escapeHtml(seoTitle || cloudName || 'myCloud');
+    const description = seoDescription ? escapeHtml(seoDescription) : '';
+    const robotsContent = indexable === 'true' ? 'index, follow' : 'noindex, nofollow';
+    const pageUrl = escapeHtml(getExpectedOrigin(req));
+    const imageUrl = `${pageUrl}/api/public/branding/seo-image`;
+
+    const metaTags = [
+      `<meta name="robots" content="${robotsContent}">`,
+      description && `<meta name="description" content="${description}">`,
+      `<meta property="og:title" content="${title}">`,
+      description && `<meta property="og:description" content="${description}">`,
+      `<meta property="og:type" content="website">`,
+      `<meta property="og:url" content="${pageUrl}">`,
+      `<meta property="og:image" content="${imageUrl}">`,
+      `<meta name="twitter:card" content="summary_large_image">`,
+    ].filter(Boolean).join('\n  ');
+
+    const rendered = html
+      .replace(/<title>.*?<\/title>/, `<title>${title}</title>`)
+      .replace('<!-- SEO_META: server-injected robots/description/Open-Graph tags, see renderAppShell() in server.js -->', metaTags);
+
+    res.set('X-Robots-Tag', robotsContent);
+    res.send(rendered);
+  } catch (err) {
+    console.error('Error rendering app shell:', err);
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
+}
+
 // SPA Route Fallback (serve main index.html for unknown routes)
 app.get('*', (req, res) => {
   // If requesting file API routes or specific static files, don't fall back to HTML
   if (req.path.startsWith('/api') || req.path.startsWith('/auth') || req.path.includes('.')) {
     return res.status(404).send('Not Found');
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  renderAppShell(req, res);
 });
 
 // Multer errors (e.g. exceeding MAX_UPLOAD_SIZE_BYTES) otherwise fall through to Express's
