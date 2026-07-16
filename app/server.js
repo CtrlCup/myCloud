@@ -1216,23 +1216,23 @@ app.get('/api/files/search', requireAuth, async (req, res) => {
       WITH RECURSIVE folder_sizes AS (
         SELECT id, size, parent_id
         FROM files
-        WHERE is_folder = false AND owner_id = $1
-        
+        WHERE is_folder = false AND owner_id = $1 AND deleted_at IS NULL
+
         UNION ALL
-        
+
         SELECT f.id, fs.size, f.parent_id
         FROM files f
         JOIN folder_sizes fs ON f.id = fs.parent_id
         WHERE f.owner_id = $1
       )
-      SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id 
+      SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id
       FROM files f
       LEFT JOIN (
         SELECT id, SUM(size) as total_size
         FROM folder_sizes
         GROUP BY id
       ) sz ON f.id = sz.id
-      WHERE f.owner_id = $1 AND f.is_one_time_note = false AND (f.name ILIKE $2`;
+      WHERE f.owner_id = $1 AND f.is_one_time_note = false AND f.deleted_at IS NULL AND (f.name ILIKE $2`;
 
     const params = [userId, `%${query}%`];
 
@@ -1274,23 +1274,23 @@ app.get('/api/files/list', requireAuth, async (req, res) => {
       `WITH RECURSIVE folder_sizes AS (
          SELECT id, size, parent_id
          FROM files
-         WHERE is_folder = false AND owner_id = $1
-         
+         WHERE is_folder = false AND owner_id = $1 AND deleted_at IS NULL
+
          UNION ALL
-         
+
          SELECT f.id, fs.size, f.parent_id
          FROM files f
          JOIN folder_sizes fs ON f.id = fs.parent_id
          WHERE f.owner_id = $1
        )
-       SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id 
+       SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id
        FROM files f
        LEFT JOIN (
          SELECT id, SUM(size) as total_size
          FROM folder_sizes
          GROUP BY id
        ) sz ON f.id = sz.id
-       WHERE f.owner_id = $1 AND f.is_one_time_note = false AND (f.parent_id = $2 OR (f.parent_id IS NULL AND $2 IS NULL))
+       WHERE f.owner_id = $1 AND f.is_one_time_note = false AND f.deleted_at IS NULL AND (f.parent_id = $2 OR (f.parent_id IS NULL AND $2 IS NULL))
        ORDER BY f.is_folder DESC, f.name ASC`,
       [userId, parentId]
     );
@@ -1526,6 +1526,44 @@ async function deleteFolderRecursive(folderId, userId) {
   await pool.query('DELETE FROM files WHERE id = $1', [folderId]);
 }
 
+// Permanently removes a single trash item (file or folder) — physical file(s) plus DB
+// row(s). Used by the "delete forever" trash action, "empty trash", and the retention
+// purge interval below; never called for a plain (non-trashed) delete, which soft-deletes
+// via moveToTrashRecursive instead.
+async function hardDeleteTrashItem(file, userId) {
+  if (file.is_folder) {
+    await deleteFolderRecursive(file.id, userId);
+  } else {
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+    await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+  }
+}
+
+// Soft-delete: stamps the file/folder and its entire subtree with the same deleted_at,
+// so it disappears from normal listings/search but can still be restored. The subtree
+// walk mirrors deleteFolderRecursive's traversal, just marking instead of removing.
+async function moveToTrashRecursive(fileId, userId, deletedAt) {
+  await pool.query('UPDATE files SET deleted_at = $1 WHERE id = $2', [deletedAt, fileId]);
+  const childrenRes = await pool.query('SELECT id FROM files WHERE owner_id = $1 AND parent_id = $2', [userId, fileId]);
+  for (const child of childrenRes.rows) {
+    await moveToTrashRecursive(child.id, userId, deletedAt);
+  }
+}
+
+// Restore: clears deleted_at on the item and its whole subtree.
+async function restoreFromTrashRecursive(fileId, userId) {
+  await pool.query('UPDATE files SET deleted_at = NULL WHERE id = $1', [fileId]);
+  const childrenRes = await pool.query('SELECT id FROM files WHERE owner_id = $1 AND parent_id = $2', [userId, fileId]);
+  for (const child of childrenRes.rows) {
+    await restoreFromTrashRecursive(child.id, userId);
+  }
+}
+
 // Delete file/folder
 app.delete('/api/files/:id', requireAuth, requirePermission('delete'), async (req, res) => {
   const fileId = parseInt(req.params.id);
@@ -1542,17 +1580,7 @@ app.delete('/api/files/:id', requireAuth, requirePermission('delete'), async (re
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    if (file.is_folder) {
-      await deleteFolderRecursive(file.id, userId);
-    } else {
-      const filePath = path.join(UPLOADS_DIR, file.path);
-      try {
-        fs.unlinkSync(filePath);
-      } catch (e) {
-        if (e.code !== 'ENOENT') throw e;
-      }
-      await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-    }
+    await moveToTrashRecursive(file.id, userId, new Date());
 
     res.json({ success: true });
   } catch (err) {
@@ -1758,29 +1786,101 @@ app.post('/api/files/delete-multiple', requireAuth, requirePermission('delete'),
   }
 
   try {
+    const deletedAt = new Date();
     for (const id of ids) {
       const fileId = parseInt(id);
-      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+      const fileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1', [fileId]);
       if (fileRes.rows.length === 0) continue;
+      if (fileRes.rows[0].owner_id !== userId) continue;
 
-      const file = fileRes.rows[0];
-      if (file.owner_id !== userId) continue;
-
-      if (file.is_folder) {
-        await deleteFolderRecursive(file.id, userId);
-      } else {
-        const filePath = path.join(UPLOADS_DIR, file.path);
-        try {
-          fs.unlinkSync(filePath);
-        } catch (e) {
-          if (e.code !== 'ENOENT') throw e;
-        }
-        await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-      }
+      await moveToTrashRecursive(fileId, userId, deletedAt);
     }
     res.json({ success: true });
   } catch (err) {
     console.error('Error deleting multiple files:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// List trash "roots" only — a deleted item whose parent is either not deleted or no
+// longer around, i.e. the top of whatever subtree the user actually deleted. Deleted
+// descendants are restored/purged along with their root, not listed separately.
+app.get('/api/files/trash', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+  try {
+    const result = await pool.query(
+      `SELECT f.id, f.name, f.is_folder, f.size, f.deleted_at
+       FROM files f
+       WHERE f.owner_id = $1 AND f.deleted_at IS NOT NULL
+         AND (f.parent_id IS NULL OR f.parent_id NOT IN (
+           SELECT id FROM files WHERE owner_id = $1 AND deleted_at IS NOT NULL
+         ))
+       ORDER BY f.deleted_at DESC`,
+      [userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error listing trash:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Restore a trashed file/folder (and its subtree) back to where it was.
+app.post('/api/files/trash/:id/restore', requireAuth, requirePermission('delete'), async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+  try {
+    const fileRes = await pool.query('SELECT owner_id, deleted_at FROM files WHERE id = $1', [fileId]);
+    if (fileRes.rows.length === 0) return res.status(404).json({ error: 'File not found' });
+    if (fileRes.rows[0].owner_id !== userId) return res.status(403).json({ error: 'Access denied' });
+    if (fileRes.rows[0].deleted_at === null) return res.status(400).json({ error: 'File is not in trash' });
+
+    await restoreFromTrashRecursive(fileId, userId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error restoring file:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Permanently delete a single trashed item (and its subtree) — cannot be undone.
+app.delete('/api/files/trash/:id', requireAuth, requirePermission('delete'), async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+  try {
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    if (fileRes.rows.length === 0) return res.status(404).json({ error: 'File not found' });
+    const file = fileRes.rows[0];
+    if (file.owner_id !== userId) return res.status(403).json({ error: 'Access denied' });
+    if (file.deleted_at === null) return res.status(400).json({ error: 'File is not in trash' });
+
+    await hardDeleteTrashItem(file, userId);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error permanently deleting file:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Permanently delete everything currently in the user's trash.
+app.post('/api/files/trash/empty', requireAuth, requirePermission('delete'), async (req, res) => {
+  const userId = req.session.userId;
+  try {
+    const rootsRes = await pool.query(
+      `SELECT f.id, f.is_folder, f.path, f.owner_id
+       FROM files f
+       WHERE f.owner_id = $1 AND f.deleted_at IS NOT NULL
+         AND (f.parent_id IS NULL OR f.parent_id NOT IN (
+           SELECT id FROM files WHERE owner_id = $1 AND deleted_at IS NOT NULL
+         ))`,
+      [userId]
+    );
+    for (const file of rootsRes.rows) {
+      await hardDeleteTrashItem(file, userId);
+    }
+    res.json({ success: true, count: rootsRes.rows.length });
+  } catch (err) {
+    console.error('Error emptying trash:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -2039,7 +2139,7 @@ app.get('/api/files/notes', requireAuth, async (req, res) => {
        FROM files f
        LEFT JOIN files parent ON parent.id = f.parent_id
        LEFT JOIN shares s ON s.file_id = f.id
-       WHERE f.owner_id = $1 AND f.is_one_time_note = true
+       WHERE f.owner_id = $1 AND f.is_one_time_note = true AND f.deleted_at IS NULL
          AND (parent.id IS NULL OR parent.is_one_time_note IS NOT TRUE)
          AND s.id IS NOT NULL
          AND (s.expires_at IS NULL OR s.expires_at > NOW())
@@ -3106,22 +3206,22 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         `WITH RECURSIVE folder_sizes AS (
            SELECT id, size, parent_id
            FROM files
-           WHERE is_folder = false
-           
+           WHERE is_folder = false AND deleted_at IS NULL
+
            UNION ALL
-           
+
            SELECT f.id, fs.size, f.parent_id
            FROM files f
            JOIN folder_sizes fs ON f.id = fs.parent_id
          )
-         SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id 
+         SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id
          FROM files f
          LEFT JOIN (
            SELECT id, SUM(size) as total_size
            FROM folder_sizes
            GROUP BY id
          ) sz ON f.id = sz.id
-         WHERE f.parent_id = $1 
+         WHERE f.parent_id = $1 AND f.deleted_at IS NULL
          ORDER BY f.is_folder DESC, f.name ASC`,
         [currentFolderId]
       );
@@ -3650,15 +3750,10 @@ app.delete('/api/public/shares/:slug/files/:fileId', async (req, res) => {
 
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fid, baseFile.owner_id]);
     if (fileRes.rows.length === 0) return res.status(404).json({ error: 'Not found.' });
-    const file = fileRes.rows[0];
 
-    if (file.is_folder) {
-      await deleteFolderRecursive(file.id, baseFile.owner_id);
-    } else {
-      const filePath = path.join(UPLOADS_DIR, file.path);
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
-    }
+    // Soft-delete into the owner's trash, same as an owner-initiated delete — a
+    // collaborator deleting the wrong file via a writable share link is recoverable too.
+    await moveToTrashRecursive(fid, baseFile.owner_id, new Date());
     res.json({ success: true });
   } catch (err) {
     console.error('Public delete error:', err);
@@ -4216,6 +4311,14 @@ function updateEnvFile(configs) {
 app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
   const configs = req.body;
   try {
+    if ('trash_retention_days' in configs) {
+      const n = parseInt(configs.trash_retention_days);
+      if (!Number.isFinite(n) || n < 1 || n > 365) {
+        return res.status(400).json({ error: 'Papierkorb-Aufbewahrungsdauer muss zwischen 1 und 365 Tagen liegen.' });
+      }
+      configs.trash_retention_days = String(n);
+    }
+
     const keysChanged = Object.keys(configs);
     const smtpKeys = ['email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from'];
     if (keysChanged.some(k => smtpKeys.includes(k))) {
@@ -4596,6 +4699,33 @@ setInterval(async () => {
     console.error('Expired cleanup interval error:', err);
   }
 }, 5 * 60 * 1000); // Run every 5 minutes
+
+// Background cleanup task: permanently purge trash items past the configured retention
+// period (admin-configurable, see trash_retention_days setting). Only trash "roots" are
+// queried — hardDeleteTrashItem takes care of each one's whole subtree.
+setInterval(async () => {
+  try {
+    const retentionDays = parseInt(await getSetting('trash_retention_days')) || 30;
+    const rootsRes = await pool.query(
+      `SELECT f.id, f.is_folder, f.path, f.owner_id
+       FROM files f
+       WHERE f.deleted_at IS NOT NULL
+         AND f.deleted_at < NOW() - ($1 || ' days')::interval
+         AND (f.parent_id IS NULL OR f.parent_id NOT IN (
+           SELECT id FROM files WHERE deleted_at IS NOT NULL
+         ))`,
+      [retentionDays]
+    );
+    for (const file of rootsRes.rows) {
+      await hardDeleteTrashItem(file, file.owner_id);
+    }
+    if (rootsRes.rows.length > 0) {
+      console.log(`Papierkorb: ${rootsRes.rows.length} Element(e) nach Ablauf der Aufbewahrungsfrist (${retentionDays} Tage) endgültig gelöscht.`);
+    }
+  } catch (err) {
+    console.error('Trash purge interval error:', err);
+  }
+}, 60 * 60 * 1000); // Run hourly
 
 // Heartbeat endpoint for one-time links
 app.post('/api/public/shares/:slug/heartbeat', async (req, res) => {

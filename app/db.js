@@ -182,6 +182,12 @@ async function initDb() {
     await client.query('ALTER TABLE shares ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMP');
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS is_one_time_note BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS content TEXT');
+    // Trash: a non-null deleted_at soft-deletes a file/folder (and, via moveToTrashRecursive
+    // in server.js, its whole subtree with the same timestamp) instead of removing it
+    // immediately. A background interval hard-deletes anything past the configured
+    // trash_retention_days setting.
+    await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at) WHERE deleted_at IS NOT NULL');
 
     // Lean autosave version history for the code editor — a rolling checkpoint per file,
     // throttled server-side (see maybeSaveFileVersion in server.js) so continuous typing

@@ -145,6 +145,11 @@
             </div>
           </div>
 
+          <!-- Direct link to the trash -->
+          <a href="#trash" id="trash-nav-btn" class="btn-icon" title="Papierkorb" style="color: var(--color-text-muted); padding: 0.5rem; display: flex; align-items: center; justify-content: center;">
+            <i data-lucide="trash-2" style="width: 18px; height: 18px;"></i>
+          </a>
+
           <!-- Single Plus button -->
           <button class="btn btn-primary" id="plus-menu-btn" style="border-radius: 50%; width: 42px; height: 42px; padding: 0; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(0,210,255,0.25);" title="Hinzufügen">
             <i data-lucide="plus" style="width: 24px; height: 24px;"></i>
@@ -524,6 +529,33 @@
       </div>
     </div>
 
+    <!-- 3c. PAPIERKORB-ANSICHT -->
+    <div id="trash-view" class="modal-overlay" style="display: none; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);">
+      <div class="settings-modal-container">
+        <button class="btn-icon close-btn" id="trash-back-to-dashboard-btn" style="position: absolute; top: 1.5rem; right: 1.5rem; z-index: 10; padding: 0.25rem;" title="Zurück zum Dashboard">
+          <i data-lucide="x"></i>
+        </button>
+
+        <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 2rem; border-bottom: 1px solid var(--color-border); padding-bottom: 1rem;">
+          <h2 style="margin: 0; flex: 1;">Papierkorb</h2>
+          <button type="button" class="btn" id="trash-empty-btn" style="color: #ff453a; margin-right: 2.5rem;">
+            <i data-lucide="trash-2" style="width: 15px; height: 15px;"></i> Papierkorb leeren
+          </button>
+        </div>
+
+        <p style="font-size: 0.85rem; color: var(--color-text-muted); margin-bottom: 1.5rem;">
+          Gelöschte Dateien und Ordner landen zunächst hier und können wiederhergestellt werden. Nach Ablauf der in den Admin-Einstellungen festgelegten Aufbewahrungsdauer werden sie automatisch endgültig gelöscht.
+        </p>
+
+        <div id="trash-page-list" style="display: flex; flex-direction: column; gap: 0.6rem;">
+          <!-- Dynamisch generiert -->
+        </div>
+        <p id="trash-page-empty" style="display: none; font-size: 0.85rem; color: var(--color-text-muted); text-align: center; padding: 3rem 0;">
+          Der Papierkorb ist leer.
+        </p>
+      </div>
+    </div>
+
     <!-- 4. ADMIN-ANSICHT (Nur für Administratoren - ALS OVERLAY) -->
     <div id="admin-view" class="modal-overlay" style="display: none; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);">
       <div class="settings-modal-container">
@@ -722,6 +754,15 @@
                     <input type="checkbox" id="admin-reg-enabled">
                     <span class="slider"></span>
                   </label>
+                </div>
+              </div>
+
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>Papierkorb</h3>
+                <div class="form-group" style="margin-top: 1.5rem;">
+                  <label for="admin-trash-retention-days">Aufbewahrungsdauer (Tage)</label>
+                  <input type="number" id="admin-trash-retention-days" class="form-control" min="1" max="365" placeholder="30">
+                  <span style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.35rem; display: block;">Gelöschte Dateien werden nach dieser Anzahl Tage im Papierkorb endgültig entfernt.</span>
                 </div>
               </div>
 

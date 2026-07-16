@@ -217,6 +217,8 @@ async function checkAuthStatus() {
         showView('settings');
       } else if (hash === '#notes') {
         showView('notes');
+      } else if (hash === '#trash') {
+        showView('trash');
       } else if (hash === '#admin') {
         showView('admin');
       } else {
@@ -244,6 +246,7 @@ async function checkAuthStatus() {
 
 const adminView = document.getElementById('admin-view');
 const notesView = document.getElementById('notes-view');
+const trashView = document.getElementById('trash-view');
 
 // Restart the subtle fade-in animation on a view container
 function playViewEnter(el) {
@@ -272,6 +275,10 @@ function showView(viewName) {
     notesView.style.display = 'none';
     notesView.classList.remove('active');
   }
+  if (trashView) {
+    trashView.style.display = 'none';
+    trashView.classList.remove('active');
+  }
 
   document.documentElement.classList.toggle('hide-scrollbar', viewName === 'auth');
 
@@ -298,6 +305,14 @@ function showView(viewName) {
       notesView.classList.add('active');
     }
     loadNotesPage();
+  } else if (viewName === 'trash') {
+    authView.style.display = 'none';
+    dashboardView.style.display = 'flex';
+    if (trashView) {
+      trashView.style.display = 'flex';
+      trashView.classList.add('active');
+    }
+    loadTrashPage();
   } else if (viewName === 'admin') {
     if (currentUser && currentUser.role === 'admin') {
       authView.style.display = 'none';
@@ -332,6 +347,8 @@ window.addEventListener('hashchange', () => {
       showView('settings');
     } else if (hash === '#notes') {
       showView('notes');
+    } else if (hash === '#trash') {
+      showView('trash');
     } else if (hash === '#admin') {
       showView('admin');
     } else {
@@ -635,6 +652,14 @@ if (dropdownNotesBtn) {
   };
 }
 
+const trashNavBtn = document.getElementById('trash-nav-btn');
+if (trashNavBtn) {
+  trashNavBtn.onclick = (e) => {
+    e.preventDefault();
+    openHashView('#trash', 'trash');
+  };
+}
+
 const dropdownAdminBtn = document.getElementById('dropdown-admin-btn');
 if (dropdownAdminBtn) {
   dropdownAdminBtn.onclick = (e) => {
@@ -654,6 +679,10 @@ document.getElementById('back-to-dashboard-btn').onclick = () => {
 };
 
 document.getElementById('notes-back-to-dashboard-btn')?.addEventListener('click', () => {
+  closeSettingsOrAdmin();
+});
+
+document.getElementById('trash-back-to-dashboard-btn')?.addEventListener('click', () => {
   closeSettingsOrAdmin();
 });
 
@@ -791,6 +820,76 @@ async function loadNotesPage() {
     console.error('Error loading notes page:', err);
   }
 }
+
+function renderTrashRow(item) {
+  const deletedLabel = item.deleted_at
+    ? `gelöscht am ${new Date(item.deleted_at).toLocaleString('de-DE')}`
+    : '';
+  const sizeLabel = item.is_folder ? 'Ordner' : formatBytes(item.size);
+  const row = document.createElement('div');
+  row.className = 'note-row';
+  row.dataset.id = item.id;
+  row.innerHTML = `
+    <i data-lucide="${item.is_folder ? 'folder' : 'file'}" style="width: 18px; height: 18px; color: ${item.is_folder ? '#ffaa00' : 'var(--color-text-muted)'}; flex-shrink: 0;"></i>
+    <div style="flex: 1; min-width: 0;">
+      <div style="font-weight: 600; font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(item.name)}</div>
+      <div style="font-size: 0.75rem; color: var(--color-text-muted);">${sizeLabel} · ${deletedLabel}</div>
+    </div>
+    <button type="button" class="btn-icon trash-restore-btn" title="Wiederherstellen">
+      <i data-lucide="undo-2"></i>
+    </button>
+    <button type="button" class="btn-icon trash-delete-forever-btn" title="Endgültig löschen" style="color: #ff5555;">
+      <i data-lucide="trash-2"></i>
+    </button>
+  `;
+
+  row.querySelector('.trash-restore-btn').onclick = async () => {
+    try {
+      const r = await fetch(`/api/files/trash/${item.id}/restore`, { method: 'POST' });
+      if (r.ok) { showToast(`"${item.name}" wiederhergestellt.`); loadTrashPage(); }
+      else showToast('Fehler beim Wiederherstellen.');
+    } catch { showToast('Verbindungsfehler.'); }
+  };
+  row.querySelector('.trash-delete-forever-btn').onclick = async () => {
+    if (!await showConfirmDialog('Endgültig löschen', `"${item.name}" endgültig löschen? Das kann nicht rückgängig gemacht werden.`)) return;
+    try {
+      const r = await fetch(`/api/files/trash/${item.id}`, { method: 'DELETE' });
+      if (r.ok) { showToast('Endgültig gelöscht.'); loadTrashPage(); }
+      else showToast('Fehler beim Löschen.');
+    } catch { showToast('Verbindungsfehler.'); }
+  };
+
+  return row;
+}
+
+async function loadTrashPage() {
+  const list = document.getElementById('trash-page-list');
+  const empty = document.getElementById('trash-page-empty');
+  if (!list) return;
+  list.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/files/trash');
+    if (!res.ok) return;
+    const items = await res.json();
+
+    empty.style.display = items.length === 0 ? 'block' : 'none';
+    items.forEach(item => list.appendChild(renderTrashRow(item)));
+
+    lucide.createIcons();
+  } catch (err) {
+    console.error('Error loading trash page:', err);
+  }
+}
+
+document.getElementById('trash-empty-btn')?.addEventListener('click', async () => {
+  if (!await showConfirmDialog('Papierkorb leeren', 'Alle Elemente im Papierkorb endgültig löschen? Das kann nicht rückgängig gemacht werden.')) return;
+  try {
+    const r = await fetch('/api/files/trash/empty', { method: 'POST' });
+    if (r.ok) { showToast('Papierkorb geleert.'); loadTrashPage(); }
+    else showToast('Fehler beim Leeren des Papierkorbs.');
+  } catch { showToast('Verbindungsfehler.'); }
+});
 
 function renderBreadcrumbs() {
   const container = document.getElementById('breadcrumbs');
@@ -2493,10 +2592,10 @@ if (closeUploadPanelBtn) {
 
 // Action: Delete Single File
 async function deleteFile(file) {
-  const confirmMsg = file.is_folder 
-    ? `Möchtest du den Ordner "${file.name}" und alle darin enthaltenen Dateien wirklich löschen?`
-    : `Möchtest du die Datei "${file.name}" wirklich löschen?`;
-    
+  const confirmMsg = file.is_folder
+    ? `Den Ordner "${file.name}" und alle darin enthaltenen Dateien in den Papierkorb verschieben?`
+    : `Die Datei "${file.name}" in den Papierkorb verschieben?`;
+
   if (!await showConfirmDialog('Element löschen', confirmMsg)) return;
 
   try {
@@ -2505,7 +2604,7 @@ async function deleteFile(file) {
     });
 
     if (res.ok) {
-      showToast('Element gelöscht.');
+      showToast('In den Papierkorb verschoben.');
       loadFiles(currentFolderId);
     } else {
       const err = await res.json();
@@ -2519,7 +2618,7 @@ async function deleteFile(file) {
 // Action: Delete Multiple Selected Files
 async function deleteSelectedFiles() {
   if (selectedFileIds.length === 0) return;
-  if (!await showConfirmDialog('Elemente löschen', `Möchtest du die ${selectedFileIds.length} ausgewählten Elemente wirklich löschen?`)) return;
+  if (!await showConfirmDialog('Elemente löschen', `Die ${selectedFileIds.length} ausgewählten Elemente in den Papierkorb verschieben?`)) return;
 
   try {
     const res = await fetch('/api/files/delete-multiple', {
@@ -2529,7 +2628,7 @@ async function deleteSelectedFiles() {
     });
 
     if (res.ok) {
-      showToast('Ausgewählte Elemente gelöscht.');
+      showToast('In den Papierkorb verschoben.');
       clearSelection();
       loadFiles(currentFolderId);
     } else {
@@ -3683,6 +3782,7 @@ async function loadAdminSettings() {
 
       // Systemeinstellungen befüllen
       document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
+      document.getElementById('admin-trash-retention-days').value = conf.trash_retention_days || '30';
       document.getElementById('admin-sso-enabled').checked = conf.sso_enabled === 'true';
       document.getElementById('admin-sso-issuer').value = conf.sso_issuer_url || '';
       document.getElementById('admin-sso-client-id').value = conf.sso_client_id || '';
@@ -3848,6 +3948,7 @@ document.getElementById('admin-system-form').onsubmit = async (e) => {
   const secretInput = document.getElementById('admin-sso-client-secret').value;
   const payload = {
     registration_enabled: document.getElementById('admin-reg-enabled').checked ? 'true' : 'false',
+    trash_retention_days: document.getElementById('admin-trash-retention-days').value.trim() || '30',
     sso_enabled: document.getElementById('admin-sso-enabled').checked ? 'true' : 'false',
     sso_issuer_url: document.getElementById('admin-sso-issuer').value.trim(),
     sso_client_id: document.getElementById('admin-sso-client-id').value.trim(),
@@ -5382,7 +5483,7 @@ window.addEventListener('keydown', (e) => {
     pushIf(document.getElementById('pdf-viewer-overlay'), () => document.getElementById('close-pdf-viewer-btn').click());
 
     // Generic glass modals (share, create-file, totp, confirm, input, …)
-    const handledIds = new Set(['settings-view', 'admin-view', 'notes-view', 'office-editor-overlay', 'code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay']);
+    const handledIds = new Set(['settings-view', 'admin-view', 'notes-view', 'trash-view', 'office-editor-overlay', 'code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay']);
     document.querySelectorAll('.modal-overlay.active').forEach(o => {
       if (handledIds.has(o.id)) return;
       pushIf(o, () => {
@@ -5410,7 +5511,7 @@ window.addEventListener('keydown', (e) => {
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) {
-      if (overlay.id === 'settings-view' || overlay.id === 'admin-view' || overlay.id === 'notes-view') {
+      if (overlay.id === 'settings-view' || overlay.id === 'admin-view' || overlay.id === 'notes-view' || overlay.id === 'trash-view') {
         closeSettingsOrAdmin();
       } else if (overlay.id === 'office-editor-overlay') {
         // Do not close office editor on backdrop click
