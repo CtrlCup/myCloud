@@ -996,6 +996,13 @@ const FILE_TYPE_MAP = {
 };
 
 /* ─── Drag Ghost ─── */
+// Created once at load, not per-dragstart: setDragImage() needs the image already
+// decoded by the time it's called, or the browser silently falls back to its own
+// native drag rendering (a second, unstyled, janky ghost on top of ours) — a fresh
+// `new Image()` right before setDragImage() isn't reliably loaded in time yet.
+const BLANK_DRAG_IMAGE = new Image();
+BLANK_DRAG_IMAGE.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAUEBAAAACwAAAAAAQABAAACAkQBADs=';
+
 let _dragGhost = null;
 let _dragGhostSize = 108;
 let _dragGhostX = 0;
@@ -1079,6 +1086,43 @@ function removeDragGhost() {
     ], { duration: 200, easing: 'ease' });
     leave.finished.then(() => ghost.remove()).catch(() => ghost.remove());
   }
+}
+
+// After a successful move, animate each moved card flying/shrinking into the target
+// folder instead of reloading the whole grid — freezes each card in its current
+// screen position (taking it out of the grid's layout flow so the remaining cards
+// reflow immediately), then animates it toward the folder's center.
+function flyItemsIntoFolder(ids, targetEl) {
+  const targetRect = targetEl.getBoundingClientRect();
+  const targetX = targetRect.left + targetRect.width / 2;
+  const targetY = targetRect.top + targetRect.height / 2;
+
+  ids.forEach(id => {
+    const el = document.querySelector(`.file-item[data-id="${id}"]`);
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    el.style.position = 'fixed';
+    el.style.left = rect.left + 'px';
+    el.style.top = rect.top + 'px';
+    el.style.width = rect.width + 'px';
+    el.style.height = rect.height + 'px';
+    el.style.margin = '0';
+    el.style.zIndex = '9999';
+    el.style.pointerEvents = 'none';
+    el.style.transition = 'none';
+    void el.offsetWidth; // force layout so the frozen start position registers before animating
+
+    requestAnimationFrame(() => {
+      el.style.transition = 'left 0.4s cubic-bezier(0.4, 0, 1, 1), top 0.4s cubic-bezier(0.4, 0, 1, 1), width 0.4s cubic-bezier(0.4, 0, 1, 1), height 0.4s cubic-bezier(0.4, 0, 1, 1), opacity 0.4s ease-in';
+      el.style.left = (targetX - rect.width * 0.1) + 'px';
+      el.style.top = (targetY - rect.height * 0.1) + 'px';
+      el.style.width = (rect.width * 0.2) + 'px';
+      el.style.height = (rect.height * 0.2) + 'px';
+      el.style.opacity = '0';
+    });
+
+    setTimeout(() => el.remove(), 420);
+  });
 }
 
 function getFileTypeLabel(file) {
@@ -1436,9 +1480,7 @@ function renderFiles(files) {
       e.dataTransfer.setData('text/x-mycloud-ids', JSON.stringify(ids));
       e.dataTransfer.effectAllowed = 'move';
       // Suppress native ghost image
-      const blank = new Image();
-      blank.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAUEBAAAACwAAAAAAQABAAACAkQBADs=';
-      e.dataTransfer.setDragImage(blank, 0, 0);
+      e.dataTransfer.setDragImage(BLANK_DRAG_IMAGE, 0, 0);
 
       const contentHTML = (ids.length === 1 && isThumb)
         ? `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
@@ -1487,7 +1529,8 @@ function renderFiles(files) {
           if (res.ok) {
             showToast(`${ids.length} Element(e) verschoben!`);
             clearSelection();
-            loadFiles(currentFolderId);
+            flyItemsIntoFolder(ids, item);
+            renderedFilesList = renderedFilesList.filter(f => !ids.includes(f.id));
           } else {
             const err = await res.json();
             showToast(err.error || 'Fehler beim Verschieben.');
