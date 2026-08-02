@@ -89,7 +89,7 @@
 
       <!-- Geteilte Ordner Info -->
       <div class="card" id="share-meta-card" style="margin-bottom: 1.5rem; padding: 1.25rem 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
-        <h2 id="shared-title" style="display: flex; align-items: center; gap: 0.5rem; margin: 0;">
+        <h2 id="shared-title" style="display: flex; align-items: center; gap: 0.5rem; margin: 0; cursor: pointer;" title="Zum Hauptordner der Freigabe">
           <i data-lucide="folder"></i> Ordner laden...
         </h2>
         <div class="share-permissions-badges" id="share-permissions-badges" style="display: none;">
@@ -339,6 +339,10 @@
     let shareBranding = null;
 
     document.getElementById('share-logo-home').onclick = () => {
+      breadcrumbsHistory = [];
+      loadShareData(null);
+    };
+    document.getElementById('shared-title').onclick = () => {
       breadcrumbsHistory = [];
       loadShareData(null);
     };
