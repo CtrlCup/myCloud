@@ -938,7 +938,7 @@ header {
 .file-grid:not(.list-view) .file-item {
   aspect-ratio: 1 / 1.32;
   justify-content: flex-start;
-  padding: 0.6rem 0.55rem 0.55rem;
+  padding: 1.1rem 0.55rem 0.55rem;
   gap: 0;
 }
 
@@ -959,7 +959,7 @@ header {
   height: auto;
   min-height: 0;
   font-size: 2.2rem;
-  margin: 0 0 0.55rem 0;
+  margin: 0 0 0.95rem 0;
   max-height: none;
   border-radius: var(--radius-sm);
 }
@@ -1965,7 +1965,6 @@ tr:hover td {
 
 .user-menu-trigger:hover {
   background: var(--glass-bg);
-  border-color: var(--glass-border);
 }
 
 .user-avatar {
@@ -3226,7 +3225,6 @@ tbody tr {
   padding: 1.5rem 1.25rem 6rem;
   gap: 0.3rem;
   background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
   overflow-x: hidden;
   overflow-y: auto;
   transition: width 0.2s ease;
@@ -3361,7 +3359,6 @@ tbody tr {
   padding: 1rem 1.25rem;
   margin: 0;
   border: none;
-  border-top: 1px solid var(--color-border);
   background: var(--color-surface);
   transition: width 0.2s ease;
   z-index: 1211;
@@ -3429,6 +3426,20 @@ tbody tr {
   font-weight: 700;
   color: var(--color-text);
   margin: 0;
+}
+
+/* ─── Nova layout: pull the toolbar's search/trash/plus icon group up next to the
+   welcome header instead of leaving it in normal flow below — the header text only
+   fills the left side, so the row's right side sits empty above the icons otherwise. ─── */
+@media (min-width: 769px) {
+  [data-visual-theme="nova"] .explorer { position: relative; }
+  [data-visual-theme="nova"] .toolbar > div:last-child {
+    /* Overrides the element's inline `position: relative` (kept there so the
+       #plus-dropdown-menu popover has an anchor in every theme). */
+    position: absolute !important;
+    top: 0;
+    right: 0;
+  }
 }
 
 /* ─── Nova layout: tinted tile behind bare file/folder icons (grid view) ─── */
