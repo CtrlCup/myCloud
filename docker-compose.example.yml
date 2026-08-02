@@ -1,6 +1,4 @@
-version: '3.8'
-
-# COMPOSE_VERSION=1.1.0
+# COMPOSE_VERSION=1.2.0
 # Wird von myCloud beim Start mit der vom Code erwarteten Version verglichen (siehe
 # app/version.js) und in der Admin-Konsole angezeigt, falls diese Datei veraltet ist.
 # Beim manuellen Übernehmen von Struktur-Änderungen aus dem Repository entsprechend
