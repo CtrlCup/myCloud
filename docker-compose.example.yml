@@ -52,11 +52,22 @@ services:
       SSO_CLIENT_SECRET: ${SSO_CLIENT_SECRET}
       SSO_ISSUER_URL: ${SSO_ISSUER_URL}
       SSO_REDIRECT_URI: ${SSO_REDIRECT_URI}
+      # "Primäre" Domain (siehe Issue #2) — wird nur noch für Dinge verwendet, die zwingend
+      # eine einzelne feste Domain brauchen (Absenderlink in Verifizierungs-/Passwort-Reset-
+      # Mails, secure-Cookie-Flag). Freigabe-/Einmalnachrichten-Links funktionieren unter jeder
+      # Domain, über die die App tatsächlich aufgerufen wird (siehe getExpectedOrigin in
+      # server.js) — dafür ist keine weitere Konfiguration nötig, auch nicht bei mehreren
+      # Domains/Reverse-Proxy-Hosts.
       APP_URL: ${APP_URL:-http://localhost:3030}
       EURO_OFFICE_URL: ${EURO_OFFICE_URL:-http://eurooffice:80}
       EURO_OFFICE_PUBLIC_URL: ${EURO_OFFICE_PUBLIC_URL:-http://localhost:8080}
     networks:
       - mycloud_network
+      # Läuft bereits ein Reverse-Proxy (z. B. Caddy, siehe Caddyfile.example) in einem eigenen
+      # Docker-Netzwerk und soll den app-Container direkt ansprechen, statt über den auf den
+      # Host gemappten Port zu gehen: das Netzwerk unten aktivieren (muss vorher extern existieren,
+      # z. B. `docker network create proxy`) und im Proxy-Stack denselben Netzwerknamen verwenden.
+      # - proxy
 
   eurooffice:
     image: ghcr.io/euro-office/documentserver:latest
@@ -85,3 +96,6 @@ volumes:
 networks:
   mycloud_network:
     driver: bridge
+  # Nur nötig, wenn oben bei app.networks "- proxy" aktiviert wurde (siehe Kommentar dort).
+  # proxy:
+  #   external: true

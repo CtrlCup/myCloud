@@ -1,0 +1,22 @@
+# Beispiel-Caddyfile für den Betrieb von myCloud hinter mehreren Domains (siehe GitHub-Issue #2).
+# Alle serverseitig generierten Links (Freigaben, Einmalnachrichten) werden dynamisch aus dem
+# Host-Header des jeweiligen Requests gebaut (getExpectedOrigin() in server.js) und funktionieren
+# deshalb automatisch unter jeder hier gelisteten Domain — es ist keine App-Konfiguration pro
+# Domain nötig. Nur APP_URL (.env) sollte auf die "primäre" Domain zeigen, da sie für Dinge
+# verwendet wird, die zwingend eine einzelne feste Domain brauchen (Absenderlink in
+# Verifizierungs-/Passwort-Reset-Mails, secure-Cookie-Flag).
+#
+# Läuft Caddy als eigener Container im selben Docker-Host: entweder über das externe
+# "proxy"-Docker-Netzwerk direkt an den app-Container durchreichen (siehe die
+# auskommentierte "proxy"-Netzwerk-Sektion in docker-compose.yml) und unten "app:3000" nutzen,
+# oder — falls Caddy außerhalb von Docker bzw. in einem eigenen Compose-Stack läuft — den vom
+# Host gemappten Port ansprechen (dann unten "localhost:3030" bzw. die tatsächliche Host-IP/Port
+# aus PORT in .env verwenden).
+
+share.alex-cloud.eu {
+	reverse_proxy app:3000
+}
+
+segeln.alex-cloud.eu {
+	reverse_proxy app:3000
+}
