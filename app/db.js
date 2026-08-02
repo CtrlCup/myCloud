@@ -58,6 +58,8 @@ async function initDb() {
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS display_real_name BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_quota BIGINT DEFAULT NULL');
+    // NULL = user follows the cloud-wide default_theme setting instead of a personal override
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS theme_preference VARCHAR(20) DEFAULT NULL');
     // Login activity tracking for the admin user list: last_failed_login_at is cleared to NULL
     // on every successful login, so "last_failed_login_at is set" alone means "has not
     // successfully logged in since that failure" without needing to compare two timestamps.
@@ -237,7 +239,8 @@ async function initDb() {
       { key: 'custom_color_bg', value: '#0b0f19' },
       { key: 'custom_color_accent', value: '#00d2ff' },
       { key: 'dashboard_bg_image', value: '' },
-      { key: 'login_bg_image', value: '' }
+      { key: 'login_bg_image', value: '' },
+      { key: 'default_theme', value: 'nova' }
     ];
 
     // If SMTP host is configured via env, set email_smtp_tested to true automatically

@@ -33,7 +33,7 @@
   <!-- Haupt-Container -->
   <div class="container">
     
-    <!-- HEADER -->
+    <!-- HEADER (LiquidGlass top bar; under the Nova theme this becomes the sidebar's bottom profile card — see styles.css) -->
     <header id="app-header" style="display: none;">
       <a href="/#dashboard" class="logo" id="logo-btn">
         <i data-lucide="cloud"></i> my<span>Cloud</span>
@@ -42,7 +42,10 @@
         <div class="user-menu-container" id="user-menu-container">
           <div class="user-menu-trigger" id="user-menu-trigger">
             <img id="nav-avatar" class="user-avatar" src="" alt="A">
-            <span id="nav-username" style="font-weight: 500;"></span>
+            <div class="user-nav-names">
+              <span id="nav-username" style="font-weight: 500;"></span>
+              <span id="nav-role-label"></span>
+            </div>
             <i data-lucide="chevron-down" style="width: 16px; height: 16px;"></i>
           </div>
           <div class="user-dropdown-menu" id="user-dropdown-menu">
@@ -63,6 +66,57 @@
         </div>
       </div>
     </header>
+
+    <!-- NOVA SIDEBAR (only laid out/shown under [data-visual-theme="nova"], see styles.css) -->
+    <aside id="nova-sidebar">
+      <div class="nova-sidebar-top">
+        <a href="/#dashboard" class="nova-logo" id="nova-logo-btn">
+          <i data-lucide="cloud"></i> <span class="nova-logo-text">my<span>Cloud</span></span>
+        </a>
+        <button type="button" class="nova-sidebar-toggle" id="nova-sidebar-toggle" title="Menü minimieren">
+          <i data-lucide="chevrons-left"></i>
+        </button>
+      </div>
+
+      <nav class="nova-nav">
+        <a href="#dashboard" class="nova-nav-item" id="nova-nav-files" data-view="dashboard" title="Dateien">
+          <i data-lucide="folder"></i> <span class="nova-nav-label">Dateien</span>
+        </a>
+        <a href="#settings" class="nova-nav-item" id="nova-nav-shares" data-view="shares" title="Geteilte Links">
+          <i data-lucide="link"></i> <span class="nova-nav-label">Geteilte Links</span>
+        </a>
+        <a href="#recent" class="nova-nav-item" id="nova-nav-recent" data-view="recent" title="Zuletzt hinzugefügt">
+          <i data-lucide="clock"></i> <span class="nova-nav-label">Zuletzt hinzugefügt</span>
+        </a>
+        <a href="#trash" class="nova-nav-item" id="nova-nav-trash" data-view="trash" title="Papierkorb">
+          <i data-lucide="trash-2"></i> <span class="nova-nav-label">Papierkorb</span>
+        </a>
+        <a href="#notes" class="nova-nav-item" id="nova-nav-notes" data-view="notes" title="Einmalnotizen" style="display: none;">
+          <i data-lucide="shield-alert"></i> <span class="nova-nav-label">Einmalnotizen</span>
+        </a>
+        <a href="#admin" class="nova-nav-item" id="nova-nav-admin" data-view="admin" title="Admin" style="display: none;">
+          <i data-lucide="sliders"></i> <span class="nova-nav-label">Admin</span>
+        </a>
+        <a href="#settings" class="nova-nav-item" id="nova-nav-settings" data-view="settings" title="Einstellungen">
+          <i data-lucide="settings"></i> <span class="nova-nav-label">Einstellungen</span>
+        </a>
+        <button type="button" class="nova-nav-item nova-nav-logout" id="nova-nav-logout" title="Abmelden">
+          <i data-lucide="log-out"></i> <span class="nova-nav-label">Abmelden</span>
+        </button>
+      </nav>
+
+      <div class="nova-sidebar-spacer"></div>
+
+      <div class="nova-storage-meter">
+        <div class="nova-storage-label">
+          <span>Speicher</span>
+          <span id="nova-storage-text"></span>
+        </div>
+        <div class="nova-storage-track">
+          <div class="nova-storage-bar" id="nova-storage-bar"></div>
+        </div>
+      </div>
+    </aside>
 
     <!-- 1. AUTHENTIFIZIERUNGS-ANSICHT -->
     <main id="auth-view" class="auth-container" style="position: relative;">
@@ -125,6 +179,12 @@
 
     <!-- 2. DASHBOARD / FILE-EXPLORER -->
     <main id="dashboard-view" class="explorer" style="display: none;">
+      <!-- Only shown under the Nova theme (see styles.css); text filled in by updateNovaPageHeader() -->
+      <div id="nova-page-header">
+        <h1>Willkommen zurück, <span id="nova-welcome-name"></span>!</h1>
+        <h2 id="nova-page-subtitle"></h2>
+      </div>
+
       <div class="toolbar">
         <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
           <div class="view-toggle">
@@ -279,6 +339,9 @@
             <div class="settings-nav-item active" data-section="account-settings">
               <i data-lucide="user"></i> Account
             </div>
+            <div class="settings-nav-item" data-section="appearance-settings">
+              <i data-lucide="palette"></i> Darstellung
+            </div>
             <div class="settings-nav-item" data-section="security-settings">
               <i data-lucide="shield-check"></i> Sicherheit
             </div>
@@ -362,6 +425,24 @@
                   </div>
                   <button type="submit" class="btn btn-primary">Passwort speichern</button>
                 </form>
+              </div>
+            </section>
+
+            <!-- Section: Darstellung (persönliche Theme-Wahl) -->
+            <section id="appearance-settings" class="settings-section">
+              <div class="card" style="background: rgba(0,0,0,0.15);">
+                <h3>Theme</h3>
+                <p style="font-size: 0.85rem; color: var(--color-text-muted); margin-top: 0.25rem;">
+                  Wähle dein persönliches Erscheinungsbild. Ohne Auswahl gilt das von der Cloud-Administration festgelegte Standard-Theme.
+                </p>
+                <div class="form-group" style="margin-top: 1.5rem; max-width: 320px;">
+                  <label for="user-theme-select">Theme</label>
+                  <select id="user-theme-select" class="form-control" style="background: var(--color-bg); color: var(--color-text); border: 1px solid var(--color-border); cursor: pointer;">
+                    <option value="">Cloud-Standard verwenden</option>
+                    <option value="nova">Nova</option>
+                    <option value="liquidglass">LiquidGlass</option>
+                  </select>
+                </div>
               </div>
             </section>
 
@@ -633,8 +714,16 @@
                     </div>
                   </div>
                 </div>
+
+                <div class="form-group" style="margin-top: 1.5rem; max-width: 320px;">
+                  <label for="admin-default-theme">Standard-Theme (neue &amp; nicht angemeldete Besucher)</label>
+                  <select id="admin-default-theme" class="form-control" style="background: var(--color-bg); color: var(--color-text); border: 1px solid var(--color-border); cursor: pointer;">
+                    <option value="nova">Nova</option>
+                    <option value="liquidglass">LiquidGlass</option>
+                  </select>
+                </div>
               </div>
-              
+
               <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
                 <h3>Cloud-Icon / Logo ändern</h3>
                 <div style="display: flex; align-items: center; gap: 1.5rem; margin-top: 1.5rem; flex-wrap: wrap;">

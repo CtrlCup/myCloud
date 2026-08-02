@@ -1325,6 +1325,11 @@
 
         // Apply custom colors
         shareBranding = data;
+
+        // Public share pages follow the cloud-wide default theme (no per-user override here —
+        // this is viewed by anonymous recipients, not a logged-in account).
+        document.documentElement.setAttribute('data-visual-theme', data.defaultTheme || 'nova');
+
         // Custom background colour only applies to the dark theme; light mode keeps its gradient
         if (data.customColorAccent) {
           document.documentElement.style.setProperty('--color-accent', data.customColorAccent);

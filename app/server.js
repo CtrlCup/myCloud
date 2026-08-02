@@ -427,7 +427,7 @@ const getExpectedOrigin = (req) => {
 app.get('/api/auth/status', async (req, res) => {
   if (req.session.userId) {
     try {
-      const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name FROM users WHERE id = $1', [req.session.userId]);
+      const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, theme_preference FROM users WHERE id = $1', [req.session.userId]);
       if (userRes.rows.length > 0) {
         return res.json({
           loggedIn: true,
@@ -1280,6 +1280,26 @@ app.get('/api/files/search', requireAuth, async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('Error searching files:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Most recently created files/folders across all of the user's folders (not scoped to the
+// current directory) — powers the "Zuletzt hinzugefügt" sidebar entry in the Nova theme.
+app.get('/api/files/recent', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+  try {
+    const result = await pool.query(
+      `SELECT id, name, size, is_folder, mime_type, created_at, parent_id
+       FROM files
+       WHERE owner_id = $1 AND is_one_time_note = false AND deleted_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 40`,
+      [userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching recent files:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -2970,7 +2990,9 @@ app.get('/api/public/branding', async (req, res) => {
     let footerLinks = [];
     try { footerLinks = JSON.parse((await getSetting('footer_links')) || '[]'); } catch { footerLinks = []; }
 
-    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, hasDashboardBgLight, hasLoginBgLight, appUrl, emailConfigured, registrationEnabled, hasUsers, footerEnabled, footerLinks, appVersion: APP_VERSION });
+    const defaultTheme = (await getSetting('default_theme')) || 'nova';
+
+    res.json({ name, tabName, hasIcon, customColorBg, customColorAccent, hasDashboardBg, hasLoginBg, hasDashboardBgLight, hasLoginBgLight, appUrl, emailConfigured, registrationEnabled, hasUsers, footerEnabled, footerLinks, appVersion: APP_VERSION, defaultTheme });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -4020,7 +4042,7 @@ app.get('/api/users/:id/avatar', async (req, res) => {
 app.get('/api/settings', requireAuth, async (req, res) => {
   const userId = req.session.userId;
   try {
-    const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, two_factor_email, two_factor_totp FROM users WHERE id = $1', [userId]);
+    const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, two_factor_email, two_factor_totp, theme_preference FROM users WHERE id = $1', [userId]);
     const passkeysRes = await pool.query('SELECT id, name, created_at FROM passkeys WHERE user_id = $1', [userId]);
     
     const smtpHost = await getSetting('email_smtp_host');
@@ -4174,6 +4196,22 @@ app.post('/api/settings/profile', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Error updating profile settings:', err);
     res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Set the current user's personal theme override (null = follow the cloud-wide default)
+const AVAILABLE_THEMES = ['liquidglass', 'nova'];
+app.post('/api/settings/theme', requireAuth, async (req, res) => {
+  const { theme } = req.body;
+  if (theme !== null && !AVAILABLE_THEMES.includes(theme)) {
+    return res.status(400).json({ error: 'Unbekanntes Theme.' });
+  }
+  try {
+    await pool.query('UPDATE users SET theme_preference = $1 WHERE id = $2', [theme, req.session.userId]);
+    res.json({ success: true, theme });
+  } catch (err) {
+    console.error('Error updating theme preference:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -4409,6 +4447,10 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
 
     if ('sso_button_text' in configs && configs.sso_button_text.length > 60) {
       return res.status(400).json({ error: 'Button-Text darf maximal 60 Zeichen lang sein.' });
+    }
+
+    if ('default_theme' in configs && !AVAILABLE_THEMES.includes(configs.default_theme)) {
+      return res.status(400).json({ error: 'Unbekanntes Standard-Theme.' });
     }
 
     if ('seo_title' in configs && configs.seo_title.length > 70) {

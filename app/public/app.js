@@ -1,6 +1,7 @@
 // State Management
 let currentUser = null;
 let currentFolderId = null;
+let viewingRecents = false; // true while showing the Nova "Zuletzt hinzugefügt" pseudo-folder
 let breadcrumbsHistory = [];
 let isRegisterMode = false;
 let allShares = []; // Alle Shares des Users
@@ -18,6 +19,7 @@ let viewerSlug = '';
 let viewerSessionToken = 0;
 let lastSelectedId = null; // Für Shift-Auswahl
 let viewMode = localStorage.getItem('viewMode') || 'grid';
+let novaSidebarCollapsed = localStorage.getItem('novaSidebarCollapsed') === 'true';
 let gridSizeIndex = parseInt(localStorage.getItem('gridSizeIndex') || '2');
 let listSizeIndex = parseInt(localStorage.getItem('listSizeIndex') || '2');
 let isEmailConfigured = false;
@@ -240,7 +242,8 @@ async function checkAuthStatus() {
     if (data.loggedIn) {
       currentUser = data.user;
       updateDisplayNameUI();
-      
+      resolveAndApplyVisualTheme();
+
       // Set nav avatar
       document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${Date.now()}`;
       
@@ -249,9 +252,15 @@ async function checkAuthStatus() {
       if (adminBtn) {
         adminBtn.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
       }
+      const novaAdminBtn = document.getElementById('nova-nav-admin');
+      if (novaAdminBtn) {
+        novaAdminBtn.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
+      }
       checkNotesExist();
+      loadStorageSettings();
 
       appHeader.style.display = 'flex';
+      document.documentElement.classList.add('app-authed');
 
       // Weiche Navigation
       const hash = window.location.hash;
@@ -263,14 +272,19 @@ async function checkAuthStatus() {
         showView('trash');
       } else if (hash === '#admin') {
         showView('admin');
+      } else if (hash === '#recent') {
+        viewingRecents = true;
+        showView('dashboard');
       } else {
         window.location.hash = '#dashboard';
         showView('dashboard');
       }
     } else {
       currentUser = null;
+      resolveAndApplyVisualTheme();
       appHeader.style.display = 'none';
-      
+      document.documentElement.classList.remove('app-authed');
+
       // First-run Modus (erster Benutzer registriert sich als Admin)
       if (data.firstRun) {
         isRegisterMode = true;
@@ -332,7 +346,11 @@ function showView(viewName) {
     authView.style.display = 'none';
     playViewEnter(dashboardView);
     dashboardView.style.display = 'flex';
-    loadFiles(currentFolderId);
+    if (viewingRecents) {
+      loadRecentFiles();
+    } else {
+      loadFiles(currentFolderId);
+    }
   } else if (viewName === 'settings') {
     authView.style.display = 'none';
     dashboardView.style.display = 'flex';
@@ -376,7 +394,41 @@ function showView(viewName) {
       showView('dashboard');
     }
   }
+  updateNovaSidebarActive(viewName);
+  updateNovaPageHeader(viewName);
   lucide.createIcons();
+}
+
+// Highlights the matching Nova sidebar entry. "dashboard" resolves to either "Dateien" or
+// "Zuletzt hinzugefügt" depending on viewingRecents; "settings" resolves to either "Einstellungen"
+// or "Geteilte Links" depending on which settings tab is currently active.
+function updateNovaSidebarActive(viewName) {
+  document.querySelectorAll('.nova-nav-item').forEach(i => i.classList.remove('active'));
+  let key = viewName;
+  if (viewName === 'dashboard') {
+    key = viewingRecents ? 'recent' : 'dashboard';
+  } else if (viewName === 'settings') {
+    const activeTab = document.querySelector('#settings-nav .settings-nav-item.active');
+    key = (activeTab && activeTab.getAttribute('data-section') === 'shares-settings') ? 'shares' : 'settings';
+  }
+  const el = document.querySelector(`.nova-nav-item[data-view="${key}"]`);
+  if (el) el.classList.add('active');
+}
+
+// Fills in the Nova theme's dashboard welcome header (hidden entirely under LiquidGlass).
+function updateNovaPageHeader(viewName) {
+  const nameEl = document.getElementById('nova-welcome-name');
+  const subEl = document.getElementById('nova-page-subtitle');
+  if (!nameEl || !subEl) return;
+  nameEl.textContent = document.getElementById('nav-username')?.textContent || '';
+  const subtitles = {
+    dashboard: viewingRecents ? 'Zuletzt hinzugefügt' : 'Dateien & Dokumente',
+    settings: 'Einstellungen',
+    notes: 'Einmalnotizen',
+    trash: 'Papierkorb',
+    admin: 'Admin-Einstellungen'
+  };
+  subEl.textContent = subtitles[viewName] || '';
 }
 
 window.addEventListener('hashchange', () => {
@@ -393,6 +445,9 @@ window.addEventListener('hashchange', () => {
       showView('trash');
     } else if (hash === '#admin') {
       showView('admin');
+    } else if (hash === '#recent') {
+      viewingRecents = true;
+      showView('dashboard');
     } else {
       showView('dashboard');
     }
@@ -626,6 +681,22 @@ const userDropdownMenu = document.getElementById('user-dropdown-menu');
 if (userMenuTrigger && userDropdownMenu) {
   userMenuTrigger.onclick = (e) => {
     e.stopPropagation();
+    // Under Nova the profile card is a direct shortcut into Einstellungen — Admin/Notizen/
+    // Logout all already have their own dedicated sidebar rows, so the dropdown (and its
+    // now-redundant "Einstellungen" entry) is LiquidGlass-only.
+    if (document.documentElement.getAttribute('data-visual-theme') === 'nova') {
+      openHashView('#settings', 'settings');
+      document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
+      document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
+      const accountTab = document.querySelector('[data-section="account-settings"]');
+      const accountSection = document.getElementById('account-settings');
+      if (accountTab && accountSection) {
+        accountTab.classList.add('active');
+        accountSection.classList.add('active');
+      }
+      updateNovaSidebarActive('settings');
+      return;
+    }
     userDropdownMenu.classList.toggle('show');
   };
 
@@ -635,6 +706,22 @@ if (userMenuTrigger && userDropdownMenu) {
       userDropdownMenu.classList.remove('show');
     }
   });
+}
+
+const novaNavLogout = document.getElementById('nova-nav-logout');
+if (novaNavLogout) {
+  novaNavLogout.onclick = async () => {
+    try {
+      const res = await fetch('/api/auth/logout', { method: 'POST' });
+      if (res.ok) {
+        currentUser = null;
+        window.location.hash = '#login';
+        checkAuthStatus();
+      }
+    } catch (err) {
+      showToast('Fehler beim Abmelden.');
+    }
+  };
 }
 
 // Standard Logout Button in Dropdown
@@ -712,6 +799,7 @@ if (dropdownAdminBtn) {
 }
 
 function closeSettingsOrAdmin() {
+  viewingRecents = false;
   window.history.replaceState(null, '', '#dashboard');
   showView('dashboard');
 }
@@ -728,14 +816,80 @@ document.getElementById('trash-back-to-dashboard-btn')?.addEventListener('click'
   closeSettingsOrAdmin();
 });
 
-document.getElementById('logo-btn').onclick = (e) => {
-  e.preventDefault();
+function goToDashboardRoot(e) {
+  if (e) e.preventDefault();
+  viewingRecents = false;
   currentFolderId = null;
   breadcrumbsHistory = [];
   clearSelection();
   window.location.hash = '#dashboard';
   showView('dashboard');
+}
+
+document.getElementById('logo-btn').onclick = goToDashboardRoot;
+document.getElementById('nova-logo-btn').onclick = goToDashboardRoot;
+document.getElementById('nova-nav-files').onclick = goToDashboardRoot;
+
+document.getElementById('nova-nav-recent').onclick = (e) => {
+  e.preventDefault();
+  showRecents();
 };
+
+document.getElementById('nova-nav-trash').onclick = (e) => {
+  e.preventDefault();
+  openHashView('#trash', 'trash');
+};
+
+document.getElementById('nova-nav-admin').onclick = (e) => {
+  e.preventDefault();
+  openHashView('#admin', 'admin');
+};
+
+document.getElementById('nova-nav-settings').onclick = (e) => {
+  e.preventDefault();
+  openHashView('#settings', 'settings');
+  document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
+  document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
+  const accountTab = document.querySelector('[data-section="account-settings"]');
+  const accountSection = document.getElementById('account-settings');
+  if (accountTab && accountSection) {
+    accountTab.classList.add('active');
+    accountSection.classList.add('active');
+  }
+  updateNovaSidebarActive('settings');
+};
+
+document.getElementById('nova-nav-shares').onclick = (e) => {
+  e.preventDefault();
+  openHashView('#settings', 'settings');
+  document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
+  document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
+  const sharesTab = document.querySelector('[data-section="shares-settings"]');
+  const sharesSection = document.getElementById('shares-settings');
+  if (sharesTab && sharesSection) {
+    sharesTab.classList.add('active');
+    sharesSection.classList.add('active');
+  }
+  updateNovaSidebarActive('settings');
+};
+
+// Nova sidebar minimize/expand toggle — icon-only rail with just the avatar (no name) at the
+// bottom, persisted per-browser so it survives reloads.
+function applyNovaSidebarCollapsed(collapsed) {
+  document.documentElement.classList.toggle('nova-sidebar-collapsed', collapsed);
+  const toggleBtn = document.getElementById('nova-sidebar-toggle');
+  if (toggleBtn) toggleBtn.title = collapsed ? 'Menü erweitern' : 'Menü minimieren';
+}
+applyNovaSidebarCollapsed(novaSidebarCollapsed);
+
+const novaSidebarToggle = document.getElementById('nova-sidebar-toggle');
+if (novaSidebarToggle) {
+  novaSidebarToggle.onclick = () => {
+    novaSidebarCollapsed = !novaSidebarCollapsed;
+    localStorage.setItem('novaSidebarCollapsed', String(novaSidebarCollapsed));
+    applyNovaSidebarCollapsed(novaSidebarCollapsed);
+  };
+}
 
 /* ==========================================================================
    DASHBOARD / FILES EXPLORER LOGIC
@@ -743,6 +897,7 @@ document.getElementById('logo-btn').onclick = (e) => {
 async function loadFiles(folderId = null) {
   try {
     currentFolderId = folderId;
+    viewingRecents = false; // any real folder navigation leaves the Nova "Recents" pseudo-folder
 
     // Fade out current content
     const grid = document.getElementById('file-grid');
@@ -774,17 +929,59 @@ async function loadFiles(folderId = null) {
   }
 }
 
+// Nova theme's "Zuletzt hinzugefügt": the user's own files/folders across all directories,
+// newest first — unlike loadFiles(), not scoped to a single parent folder.
+async function loadRecentFiles() {
+  try {
+    const grid = document.getElementById('file-grid');
+    if (grid && grid.children.length > 0) {
+      grid.classList.add('grid-exit');
+    }
+
+    const res = await fetch('/api/files/recent');
+    if (!res.ok) {
+      if (res.status === 401) {
+        checkAuthStatus();
+        return;
+      }
+      throw new Error('Zuletzt hinzugefügte Dateien konnten nicht geladen werden.');
+    }
+
+    const files = await res.json();
+    if (grid) grid.classList.remove('grid-exit');
+    renderFiles(files);
+
+    // Not a real folder path — show a plain label instead of a (misleading) breadcrumb trail
+    const container = document.getElementById('breadcrumbs');
+    if (container) {
+      container.innerHTML = '<span class="breadcrumb-current">Zuletzt hinzugefügt</span>';
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('Fehler beim Laden der zuletzt hinzugefügten Dateien.');
+  }
+}
+
+function showRecents() {
+  viewingRecents = true;
+  window.history.replaceState(null, '', '#recent');
+  showView('dashboard');
+}
+
 // One-time notes never appear in the regular file grid — they get their own dedicated page
 // (reached via the user dropdown), which itself only shows up in that menu while at least one
 // note exists.
 async function checkNotesExist() {
   const dropdownBtn = document.getElementById('dropdown-notes-btn');
-  if (!dropdownBtn) return;
+  const novaNavNotes = document.getElementById('nova-nav-notes');
+  if (!dropdownBtn && !novaNavNotes) return;
   try {
     const res = await fetch('/api/files/notes');
     if (!res.ok) return;
     const notes = await res.json();
-    dropdownBtn.style.display = notes.length > 0 ? '' : 'none';
+    const display = notes.length > 0 ? '' : 'none';
+    if (dropdownBtn) dropdownBtn.style.display = display;
+    if (novaNavNotes) novaNavNotes.style.display = notes.length > 0 ? 'flex' : 'none';
   } catch (err) {
     console.error('Error checking notes existence:', err);
   }
@@ -3377,6 +3574,7 @@ document.querySelectorAll('#settings-nav .settings-nav-item').forEach(item => {
     if (targetSection === 'api-settings') {
       loadApiKeys();
     }
+    updateNovaSidebarActive('settings');
   };
 });
 
@@ -3512,6 +3710,12 @@ async function loadSettings() {
 
       const realnameToggle = document.getElementById('settings-display-realname-toggle');
       if (realnameToggle) realnameToggle.checked = data.user.display_real_name || false;
+
+      const themeSelect = document.getElementById('user-theme-select');
+      if (themeSelect) {
+        themeSelect.value = data.user.theme_preference || '';
+        themeSelect._syncCustomLabel?.();
+      }
     }
 
     // Show/hide 2FA email container based on SMTP config status
@@ -3556,8 +3760,11 @@ async function loadStorageSettings() {
   const limitText = document.getElementById('storage-limit-text');
   const progressBar = document.getElementById('storage-progress-bar');
   const detailText = document.getElementById('storage-detail-text');
+  // Nova sidebar mini storage meter — present on every dashboard page, not just Settings
+  const novaBar = document.getElementById('nova-storage-bar');
+  const novaText = document.getElementById('nova-storage-text');
 
-  if (!usedText || !limitText || !progressBar || !detailText) return;
+  if (!usedText && !novaBar) return;
 
   try {
     const res = await fetch('/api/users/storage');
@@ -3567,36 +3774,46 @@ async function loadStorageSettings() {
     const used = data.usedBytes;
     const quota = data.quotaBytes;
     const freeDisk = data.freeDiskBytes;
+    let percentage = 0;
 
-    usedText.textContent = `${formatBytes(used)} verwendet`;
+    if (usedText) usedText.textContent = `${formatBytes(used)} verwendet`;
 
     if (quota !== null && quota > 0) {
-      limitText.textContent = `von ${formatBytes(quota)}`;
-      const percentage = Math.min(100, (used / quota) * 100);
-      progressBar.style.width = `${percentage}%`;
-      
-      const free = Math.max(0, quota - used);
-      detailText.innerHTML = `
-        Du hast <strong>${formatBytes(free)}</strong> freien Speicherplatz von deinem zugeteilten Speicher-Limit.
-      `;
-      if (percentage > 90) {
-        progressBar.style.background = '#ff5555';
-      } else if (percentage > 70) {
-        progressBar.style.background = '#ffaa00';
-      } else {
-        progressBar.style.background = 'linear-gradient(90deg, var(--color-accent) 0%, #bd93f9 100%)';
+      percentage = Math.min(100, (used / quota) * 100);
+      if (limitText) limitText.textContent = `von ${formatBytes(quota)}`;
+      if (progressBar) {
+        progressBar.style.width = `${percentage}%`;
+        if (percentage > 90) {
+          progressBar.style.background = '#ff5555';
+        } else if (percentage > 70) {
+          progressBar.style.background = '#ffaa00';
+        } else {
+          progressBar.style.background = 'linear-gradient(90deg, var(--color-accent) 0%, #bd93f9 100%)';
+        }
       }
+      if (detailText) {
+        const free = Math.max(0, quota - used);
+        detailText.innerHTML = `
+          Du hast <strong>${formatBytes(free)}</strong> freien Speicherplatz von deinem zugeteilten Speicher-Limit.
+        `;
+      }
+      if (novaText) novaText.textContent = `${formatBytes(used)} / ${formatBytes(quota)}`;
     } else {
-      limitText.textContent = 'unbegrenzt';
-      progressBar.style.width = '0%';
-      detailText.innerHTML = `
-        Dein Speicherplatz-Limit ist unbegrenzt.<br>
-        Freie Kapazität des Server-Laufwerks: <strong>${formatBytes(freeDisk)}</strong> frei.
-      `;
+      if (limitText) limitText.textContent = 'unbegrenzt';
+      if (progressBar) progressBar.style.width = '0%';
+      if (detailText) {
+        detailText.innerHTML = `
+          Dein Speicherplatz-Limit ist unbegrenzt.<br>
+          Freie Kapazität des Server-Laufwerks: <strong>${formatBytes(freeDisk)}</strong> frei.
+        `;
+      }
+      if (novaText) novaText.textContent = `${formatBytes(used)} verwendet`;
     }
+
+    if (novaBar) novaBar.style.width = `${percentage}%`;
   } catch (err) {
     console.error('Error loading storage settings:', err);
-    detailText.textContent = 'Fehler beim Laden der Speicherplatz-Informationen.';
+    if (detailText) detailText.textContent = 'Fehler beim Laden der Speicherplatz-Informationen.';
   }
 }
 
@@ -3803,6 +4020,9 @@ async function loadAdminSettings() {
       document.getElementById('admin-color-bg-val').textContent = colorBgVal.toUpperCase();
       document.getElementById('admin-color-accent').value = colorAccentVal;
       document.getElementById('admin-color-accent-val').textContent = colorAccentVal.toUpperCase();
+      const adminThemeSelectEl = document.getElementById('admin-default-theme');
+      adminThemeSelectEl.value = conf.default_theme || 'nova';
+      adminThemeSelectEl._syncCustomLabel?.();
 
       // Background previews (dark + light variants for dashboard & login)
       const setBgPreview = (previewId, removeId, hasImage, url) => {
@@ -3930,6 +4150,7 @@ document.getElementById('admin-branding-form').onsubmit = async (e) => {
     cloud_tab_name: document.getElementById('admin-cloud-tab-name').value.trim(),
     custom_color_bg: document.getElementById('admin-color-bg').value,
     custom_color_accent: document.getElementById('admin-color-accent').value,
+    default_theme: document.getElementById('admin-default-theme').value,
     footer_enabled: document.getElementById('admin-footer-enabled').checked ? 'true' : 'false',
     footer_links: JSON.stringify(readAdminFooterLinks()),
     site_indexable: document.getElementById('admin-site-indexable').checked ? 'true' : 'false',
@@ -4869,6 +5090,41 @@ document.getElementById('share-edit-form').onsubmit = async (e) => {
 let brandingCache = null;
 let currentViewName = 'auth';
 
+// Nova vs. LiquidGlass layout/skin — independent of the light/dark data-theme handled below.
+// Resolution order: the logged-in user's personal override, otherwise the cloud-wide admin default.
+function resolveAndApplyVisualTheme() {
+  const theme = (currentUser && currentUser.theme_preference)
+    || (brandingCache && brandingCache.defaultTheme)
+    || 'nova';
+  document.documentElement.setAttribute('data-visual-theme', theme);
+}
+
+// Persist the user's personal theme choice (theme === null/'' means "follow the cloud default")
+async function setUserThemePreference(theme) {
+  currentUser.theme_preference = theme || null;
+  resolveAndApplyVisualTheme();
+  try {
+    await fetch('/api/settings/theme', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ theme: theme || null })
+    });
+  } catch (err) {
+    console.error('Error saving theme preference:', err);
+  }
+}
+
+const userThemeSelect = document.getElementById('user-theme-select');
+if (userThemeSelect) {
+  userThemeSelect.onchange = (e) => setUserThemePreference(e.target.value || null);
+  styleSelectAsDropdown(userThemeSelect);
+}
+
+const adminDefaultThemeSelect = document.getElementById('admin-default-theme');
+if (adminDefaultThemeSelect) {
+  styleSelectAsDropdown(adminDefaultThemeSelect);
+}
+
 // Determine the theme that is currently active (explicit override or system preference)
 function getActiveTheme() {
   const explicit = document.documentElement.getAttribute('data-theme');
@@ -4941,6 +5197,7 @@ async function loadBranding() {
     
     brandingCache = data;
     appBrandingUrl = data.appUrl || '';
+    resolveAndApplyVisualTheme();
 
     // Custom background color only applies to the dark theme; light mode keeps its
     // designed gradient (handled in applyBackgrounds()).
@@ -7136,6 +7393,10 @@ function updateDisplayNameUI() {
     const navUsername = document.getElementById('nav-username');
     if (navUsername) {
       navUsername.textContent = displayName;
+    }
+    const navRoleLabel = document.getElementById('nav-role-label');
+    if (navRoleLabel) {
+      navRoleLabel.textContent = currentUser.role === 'admin' ? 'Administrator' : 'Benutzer';
     }
   }
 }

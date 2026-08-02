@@ -3087,3 +3087,432 @@ tbody tr {
   border-color: rgba(var(--color-accent-rgb), 0.4);
 }
 .editor-history-restore-btn svg { width: 15px; height: 15px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   NOVA THEME — second, opt-in full-app visual theme (data-visual-theme="nova")
+   Sidebar-navigation dashboard. Reuses every existing component rule by feeding
+   new values into the same --color, --glass and --radius tokens the LiquidGlass
+   theme already uses everywhere — only layout (sidebar, page header, nav) needs
+   dedicated rules below.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ─── Nova tokens: light (default) ─── */
+[data-visual-theme="nova"] {
+  --color-bg: linear-gradient(160deg, #f6f9fc 0%, #eef3f9 100%);
+  --color-accent: #0891b2;
+  --color-accent-rgb: 8, 145, 178;
+
+  --color-text: #111827;
+  --color-text-muted: rgba(71, 85, 105, 0.75);
+  --color-surface: #ffffff;
+  --color-surface-hover: rgba(15, 23, 42, 0.045);
+  --color-border: rgba(15, 23, 42, 0.10);
+  --color-border-active: #0891b2;
+
+  /* Nova is a flat, opaque design — feeding "no blur / no highlight" into the glass tokens
+     makes every existing .card/.btn/.file-item/.modal rule render flat for free. */
+  --glass-blur: blur(0px);
+  --glass-bg: var(--color-surface);
+  --glass-border: var(--color-border);
+  --glass-highlight: none;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --shadow: 0 2px 14px rgba(15, 23, 42, 0.07);
+  --shadow-lg: 0 8px 28px rgba(15, 23, 42, 0.10);
+  --transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
+
+  --modal-bg: rgba(15, 23, 42, 0.35);
+  --input-bg: #ffffff;
+  --dropdown-bg: #ffffff;
+  --meter-track: rgba(15, 23, 42, 0.08);
+  --meter-hole: #ffffff;
+}
+
+/* ─── Nova tokens: explicit dark override ─── */
+[data-visual-theme="nova"][data-theme="dark"] {
+  --color-bg: linear-gradient(160deg, #0a0e1a 0%, #0d1526 100%);
+  --color-accent: #00d2ff;
+  --color-accent-rgb: 0, 210, 255;
+
+  --color-text: #eef2f7;
+  --color-text-muted: rgba(203, 213, 225, 0.65);
+  --color-surface: #111a2e;
+  --color-surface-hover: rgba(255, 255, 255, 0.05);
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-active: #00d2ff;
+
+  --glass-blur: blur(0px);
+  --glass-bg: var(--color-surface);
+  --glass-border: var(--color-border);
+  --glass-highlight: none;
+
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.45);
+
+  --modal-bg: rgba(0, 0, 0, 0.55);
+  --input-bg: #0d1526;
+  --dropdown-bg: #101a30;
+  --meter-track: rgba(255, 255, 255, 0.08);
+  --meter-hole: #0a0e1a;
+}
+
+/* ─── Nova tokens: automatic dark via OS preference ─── */
+@media (prefers-color-scheme: dark) {
+  [data-visual-theme="nova"]:not([data-theme="light"]) {
+    --color-bg: linear-gradient(160deg, #0a0e1a 0%, #0d1526 100%);
+    --color-accent: #00d2ff;
+    --color-accent-rgb: 0, 210, 255;
+
+    --color-text: #eef2f7;
+    --color-text-muted: rgba(203, 213, 225, 0.65);
+    --color-surface: #111a2e;
+    --color-surface-hover: rgba(255, 255, 255, 0.05);
+    --color-border: rgba(255, 255, 255, 0.08);
+    --color-border-active: #00d2ff;
+
+    --glass-blur: blur(0px);
+    --glass-bg: var(--color-surface);
+    --glass-border: var(--color-border);
+    --glass-highlight: none;
+
+    --shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.45);
+
+    --modal-bg: rgba(0, 0, 0, 0.55);
+    --input-bg: #0d1526;
+    --dropdown-bg: #101a30;
+    --meter-track: rgba(255, 255, 255, 0.08);
+    --meter-hole: #0a0e1a;
+  }
+}
+
+/* ─── Nova layout: hide LiquidGlass-only decoration ─── */
+/* !important: applyBackgrounds() in app.js sets this element's inline display:block
+   whenever no custom background image is configured, which would otherwise outrank
+   this rule regardless of selector specificity. */
+[data-visual-theme="nova"] #glowing-orbs-container { display: none !important; }
+
+/* ─── Nova layout: sidebar + relocated profile card (hidden until logged in) ─── */
+#nova-sidebar { display: none; }
+#nova-page-header { display: none; }
+
+[data-visual-theme="nova"].app-authed #nova-sidebar {
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 260px;
+  padding: 1.5rem 1.25rem 6rem;
+  gap: 0.3rem;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  overflow-x: hidden;
+  overflow-y: auto;
+  transition: width 0.2s ease;
+  /* Above .modal-overlay (1200) so the sidebar stays clickable while Settings/Trash/Admin/
+     Notes — all implemented as full-viewport modal overlays — are open. */
+  z-index: 1210;
+}
+
+[data-visual-theme="nova"] .nova-sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  margin-bottom: 2rem;
+}
+
+[data-visual-theme="nova"] .nova-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--color-text);
+  text-decoration: none;
+  letter-spacing: -0.02em;
+  padding: 0 0.5rem;
+  min-width: 0;
+  flex-shrink: 0;
+}
+[data-visual-theme="nova"] .nova-logo span { color: var(--color-accent); }
+[data-visual-theme="nova"] .nova-logo svg { width: 22px; height: 22px; color: var(--color-accent); flex-shrink: 0; }
+
+[data-visual-theme="nova"] .nova-sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+[data-visual-theme="nova"] .nova-sidebar-toggle:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+[data-visual-theme="nova"] .nova-sidebar-toggle svg { width: 17px; height: 17px; }
+
+[data-visual-theme="nova"] .nova-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+[data-visual-theme="nova"] .nova-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: var(--transition);
+}
+[data-visual-theme="nova"] .nova-nav-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+[data-visual-theme="nova"] .nova-nav-item:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+[data-visual-theme="nova"] .nova-nav-item.active {
+  background: rgba(var(--color-accent-rgb), 0.14);
+  color: var(--color-accent);
+}
+
+[data-visual-theme="nova"] .nova-nav-item.nova-nav-logout {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+[data-visual-theme="nova"] .nova-nav-item.nova-nav-logout:hover {
+  background: rgba(255, 69, 58, 0.12);
+  color: #ff453a;
+}
+
+[data-visual-theme="nova"] .nova-sidebar-spacer { flex: 1; }
+
+[data-visual-theme="nova"] .nova-storage-meter {
+  padding: 0.9rem;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-hover);
+  border: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+[data-visual-theme="nova"] .nova-storage-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  margin-bottom: 0.5rem;
+}
+[data-visual-theme="nova"] .nova-storage-label span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+[data-visual-theme="nova"] .nova-storage-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--meter-track);
+  overflow: hidden;
+}
+[data-visual-theme="nova"] .nova-storage-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--color-accent);
+  transition: width 0.4s ease;
+}
+
+/* Relocate the LiquidGlass top header (logo + user menu) into the sidebar's bottom
+   profile card under Nova — same elements, same handlers, purely repositioned. */
+.user-nav-names { display: contents; }
+#nav-role-label { display: none; }
+
+[data-visual-theme="nova"].app-authed header#app-header {
+  display: flex;
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 260px;
+  padding: 1rem 1.25rem;
+  margin: 0;
+  border: none;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+  transition: width 0.2s ease;
+  z-index: 1211;
+}
+
+/* Keep centered modal panels (Settings/Admin/Trash/Notes/confirm dialogs, ...) from rendering
+   underneath the now-always-on-top sidebar — center them in the remaining viewport instead. */
+[data-visual-theme="nova"].app-authed .modal-overlay {
+  padding-left: 260px;
+}
+[data-visual-theme="nova"] header#app-header .logo { display: none; }
+[data-visual-theme="nova"] header#app-header .user-nav { width: 100%; }
+[data-visual-theme="nova"] .user-menu-container { width: 100%; }
+[data-visual-theme="nova"] .user-menu-trigger {
+  width: 100%;
+  padding: 0.4rem;
+}
+/* The trigger is a direct shortcut into Einstellungen under Nova, not a dropdown opener —
+   the chevron (the only svg directly inside it, besides the img avatar) would be misleading. */
+[data-visual-theme="nova"] .user-menu-trigger svg {
+  display: none;
+}
+[data-visual-theme="nova"] .user-nav-names {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+[data-visual-theme="nova"] #nav-username {
+  font-size: 0.87rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+[data-visual-theme="nova"] #nav-role-label {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+[data-visual-theme="nova"] .user-dropdown-menu {
+  top: auto;
+  bottom: calc(100% + 0.5rem);
+  left: 0;
+  right: 0;
+  width: 100%;
+}
+
+/* ─── Nova layout: content area shifts right of the fixed sidebar ─── */
+[data-visual-theme="nova"].app-authed .container {
+  margin-left: 260px;
+  width: calc(100% - 260px);
+  max-width: none;
+  padding: 2rem 2.5rem;
+  transition: margin-left 0.2s ease, width 0.2s ease;
+}
+
+[data-visual-theme="nova"] #nova-page-header {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+[data-visual-theme="nova"] #nova-page-header h1 {
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.75rem;
+}
+[data-visual-theme="nova"] #nova-page-header h2 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+}
+
+/* ─── Nova layout: tinted tile behind bare file/folder icons (grid view) ─── */
+[data-visual-theme="nova"] .file-grid:not(.list-view) .file-icon-placeholder {
+  background: var(--color-surface-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* ─── Nova layout: manually minimized sidebar (icons only), toggled via #nova-sidebar-toggle
+   and persisted in localStorage — independent of the narrow-viewport auto-collapse below. ─── */
+[data-visual-theme="nova"].app-authed.nova-sidebar-collapsed #nova-sidebar,
+[data-visual-theme="nova"].app-authed.nova-sidebar-collapsed header#app-header {
+  width: 76px;
+}
+[data-visual-theme="nova"].app-authed.nova-sidebar-collapsed .container {
+  margin-left: 76px;
+  width: calc(100% - 76px);
+}
+[data-visual-theme="nova"].app-authed.nova-sidebar-collapsed .modal-overlay {
+  padding-left: 76px;
+}
+[data-visual-theme="nova"].nova-sidebar-collapsed .nova-logo-text,
+[data-visual-theme="nova"].nova-sidebar-collapsed .nova-nav-label,
+[data-visual-theme="nova"].nova-sidebar-collapsed .nova-storage-meter,
+[data-visual-theme="nova"].nova-sidebar-collapsed .user-nav-names {
+  display: none;
+}
+[data-visual-theme="nova"].nova-sidebar-collapsed .nova-sidebar-top {
+  justify-content: center;
+}
+[data-visual-theme="nova"].nova-sidebar-collapsed .nova-logo {
+  padding: 0;
+}
+[data-visual-theme="nova"].nova-sidebar-collapsed .nova-nav-item {
+  justify-content: center;
+  gap: 0;
+}
+[data-visual-theme="nova"].nova-sidebar-collapsed .nova-sidebar-toggle svg {
+  transform: rotate(180deg);
+}
+
+/* ─── Nova layout: narrow viewports — collapse sidebar/profile card ─── */
+@media (max-width: 880px) {
+  [data-visual-theme="nova"].app-authed #nova-sidebar,
+  [data-visual-theme="nova"].app-authed header#app-header {
+    width: 210px;
+  }
+  [data-visual-theme="nova"].app-authed .container {
+    margin-left: 210px;
+    width: calc(100% - 210px);
+    padding: 1.5rem;
+  }
+}
+@media (max-width: 620px) {
+  [data-visual-theme="nova"].app-authed #nova-sidebar,
+  [data-visual-theme="nova"].app-authed header#app-header {
+    width: 76px;
+    padding-left: 0.6rem;
+    padding-right: 0.6rem;
+  }
+  [data-visual-theme="nova"].app-authed .container {
+    margin-left: 76px;
+    width: calc(100% - 76px);
+    padding: 1.25rem;
+  }
+  [data-visual-theme="nova"] .nova-logo-text,
+  [data-visual-theme="nova"] .nova-nav-label,
+  [data-visual-theme="nova"] .nova-storage-meter,
+  [data-visual-theme="nova"] .user-nav-names {
+    display: none;
+  }
+  [data-visual-theme="nova"] .nova-sidebar-top {
+    justify-content: center;
+  }
+  [data-visual-theme="nova"] .nova-logo {
+    padding: 0;
+  }
+  [data-visual-theme="nova"] .nova-nav-item {
+    justify-content: center;
+    gap: 0;
+  }
+  [data-visual-theme="nova"] .nova-sidebar-toggle {
+    display: none;
+  }
+}
