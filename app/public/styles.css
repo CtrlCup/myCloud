@@ -1565,6 +1565,21 @@ tr:hover td {
   opacity: 1;
 }
 
+.toast-action-btn {
+  margin-left: 0.85rem;
+  background: none;
+  border: none;
+  color: var(--color-accent, #0af);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.toast-action-btn:hover {
+  text-decoration: underline;
+}
+
 /* ─── Drag & Drop Overlay ─── */
 .drag-overlay-fs {
   position: fixed;
@@ -1916,6 +1931,16 @@ tr:hover td {
   outline: 2px solid var(--color-accent);
   background: rgba(var(--color-accent-rgb), 0.1) !important;
   transform: scale(1.03);
+}
+
+#trash-nav-btn {
+  transition: color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+#trash-nav-btn.trash-drop-target {
+  color: #ff453a !important;
+  background: rgba(255, 69, 58, 0.15);
+  border-radius: var(--radius-sm);
+  transform: scale(1.15);
 }
 
 /* ─── Multi-Selection Action Bar ─── */

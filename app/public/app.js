@@ -64,16 +64,34 @@ const appHeader = document.getElementById('app-header');
 
 const toast = document.getElementById('toast');
 const toastMessage = document.getElementById('toast-message');
+const toastActionBtn = document.getElementById('toast-action-btn');
+let toastHideTimeout = null;
 
 /* ==========================================================================
    TOAST HELPER
    ========================================================================== */
-function showToast(message) {
+// opts.actionLabel/opts.onAction show a clickable action (e.g. "Rückgängig") next to the
+// message; opts.duration overrides the default auto-hide delay (useful to give an undo
+// action more time than a plain confirmation message needs).
+function showToast(message, opts = {}) {
   toastMessage.textContent = message;
+  if (opts.actionLabel && opts.onAction) {
+    toastActionBtn.textContent = opts.actionLabel;
+    toastActionBtn.style.display = 'inline';
+    toastActionBtn.onclick = () => {
+      toast.classList.remove('show');
+      clearTimeout(toastHideTimeout);
+      opts.onAction();
+    };
+  } else {
+    toastActionBtn.style.display = 'none';
+    toastActionBtn.onclick = null;
+  }
   toast.classList.add('show');
-  setTimeout(() => {
+  clearTimeout(toastHideTimeout);
+  toastHideTimeout = setTimeout(() => {
     toast.classList.remove('show');
-  }, 3500);
+  }, opts.duration || 3500);
 }
 
 // Global variable for Domain URL configuration
@@ -2834,6 +2852,60 @@ async function deleteSelectedFiles() {
   }
 }
 
+// Drag & Drop onto the trash icon (header) — deletes (soft, restorable) whatever set of
+// item ids was dragged, same as the folder-drop handler above but targeting the trash icon
+// instead of a folder item. Undo restores each dragged id individually (there is no
+// restore-multiple endpoint, only the single-item one already used by the trash view).
+trashNavBtn.addEventListener('dragover', (e) => {
+  if (e.dataTransfer.types.includes('text/x-mycloud-ids')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    trashNavBtn.classList.add('trash-drop-target');
+  }
+});
+
+trashNavBtn.addEventListener('dragleave', (e) => {
+  if (!trashNavBtn.contains(e.relatedTarget)) {
+    trashNavBtn.classList.remove('trash-drop-target');
+  }
+});
+
+trashNavBtn.addEventListener('drop', async (e) => {
+  if (!e.dataTransfer.types.includes('text/x-mycloud-ids')) return;
+  e.preventDefault();
+  trashNavBtn.classList.remove('trash-drop-target');
+  const raw = e.dataTransfer.getData('text/x-mycloud-ids');
+  if (!raw) return;
+  const ids = JSON.parse(raw);
+
+  try {
+    const res = await fetch('/api/files/delete-multiple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (res.ok) {
+      clearSelection();
+      renderedFilesList = renderedFilesList.filter(f => !ids.includes(f.id));
+      loadFiles(currentFolderId);
+      showToast(`${ids.length} Element(e) in den Papierkorb verschoben.`, {
+        actionLabel: 'Rückgängig',
+        duration: 6000,
+        onAction: async () => {
+          await Promise.all(ids.map(id => fetch(`/api/files/trash/${id}/restore`, { method: 'POST' })));
+          showToast('Wiederhergestellt.');
+          loadFiles(currentFolderId);
+        },
+      });
+    } else {
+      const err = await res.json();
+      showToast(err.error || 'Fehler beim Löschen.');
+    }
+  } catch {
+    showToast('Verbindungsfehler beim Löschen.');
+  }
+});
+
 // Multi Select Bar Event Listeners
 document.getElementById('multi-cancel-btn').onclick = () => clearSelection();
 document.getElementById('multi-delete-btn').onclick = () => deleteSelectedFiles();
@@ -3326,6 +3398,13 @@ function openNumberPicker(input, opts = {}) {
   const wheel = menu.querySelector('.number-picker-wheel');
   const options = Array.from(menu.querySelectorAll('.number-picker-option'));
 
+  // Only the wheel itself should be able to overwrite a value on close — otherwise a value
+  // the user typed directly into the input would get clobbered by the wheel's idle scroll
+  // position as soon as they click away to close the picker.
+  let wheelInteracted = false;
+  wheel.addEventListener('wheel', () => { wheelInteracted = true; });
+  wheel.addEventListener('pointerdown', () => { wheelInteracted = true; });
+
   const updateSelected = () => {
     const centerIndex = Math.min(options.length - 1, Math.max(0, Math.round(wheel.scrollTop / NUMBER_PICKER_OPTION_HEIGHT)));
     options.forEach((opt, i) => opt.classList.toggle('selected', i === centerIndex));
@@ -3333,7 +3412,10 @@ function openNumberPicker(input, opts = {}) {
   wheel.addEventListener('scroll', updateSelected);
 
   options.forEach((opt, i) => {
-    opt.onclick = () => wheel.scrollTo({ top: i * NUMBER_PICKER_OPTION_HEIGHT, behavior: 'smooth' });
+    opt.onclick = () => {
+      wheelInteracted = true;
+      wheel.scrollTo({ top: i * NUMBER_PICKER_OPTION_HEIGHT, behavior: 'smooth' });
+    };
   });
 
   const initialIndex = currentVal ? values.indexOf(currentVal) : -1;
@@ -3353,7 +3435,7 @@ function openNumberPicker(input, opts = {}) {
   const closeHandler = (e) => {
     if (!menu.contains(e.target) && e.target !== input) {
       const centerIndex = Math.round(wheel.scrollTop / NUMBER_PICKER_OPTION_HEIGHT);
-      if (options[centerIndex]) input.value = options[centerIndex].dataset.value;
+      if (wheelInteracted && options[centerIndex]) input.value = options[centerIndex].dataset.value;
       menu.remove();
       document.removeEventListener('click', closeHandler);
     }
