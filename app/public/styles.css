@@ -1001,8 +1001,8 @@ header {
   word-break: break-word;
   text-align: center;
   line-height: 1.25;
-  font-size: 1.25rem;
-  font-weight: 700;
+  font-size: 1.05rem;
+  font-weight: 600;
 }
 
 /* Grid: type label below the name */

@@ -4,7 +4,7 @@
 
 **Eine moderne, schlichte und sichere Cloud-Lösung — vollständig selbstgehostet, vollständig unter deiner Kontrolle.**
 
-[![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fcdn.jsdelivr.net%2Fgh%2FCtrlCup%2FmyCloud%40main%2Fapp%2Fpackage.json&query=%24.version&label=version&color=00d2ff&prefix=v)](app/package.json)
+[![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FCtrlCup%2FmyCloud%2Fmain%2Fapp%2Fpackage.json&query=%24.version&label=version&color=00d2ff&prefix=v)](app/package.json)
 [![Docker](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 [![Node.js](https://img.shields.io/badge/node.js-20-339933?logo=node.js&logoColor=white)](app/package.json)
 [![PostgreSQL](https://img.shields.io/badge/postgres-15-4169E1?logo=postgresql&logoColor=white)](docker-compose.yml)
