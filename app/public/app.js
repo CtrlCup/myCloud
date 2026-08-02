@@ -1621,7 +1621,7 @@ function renderFiles(files) {
     if (isThumb) item.classList.add('has-thumb');
     let iconHTML = `<i data-lucide="${iconName}" style="color: ${iconColor};"></i>`;
     if (isThumb) {
-      iconHTML = `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+      iconHTML = `<img src="${thumbUrl}" style="width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: var(--radius-md);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                   <i data-lucide="${iconName}" style="display: none; color: ${iconColor};"></i>`;
     }
 
