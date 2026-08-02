@@ -329,6 +329,26 @@
     </div>
   </div>
 
+  <!-- INPUT MODAL (ersetzt window.prompt() beim Anlegen von Ordnern/Dateien über einen geteilten Link) -->
+  <div class="modal-overlay" id="input-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="input-modal-title">
+    <div class="card modal" style="max-width: 400px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="input-modal-title">Eingabe erforderlich</h3>
+        <button class="close-btn" id="close-input-modal-btn" aria-label="Schließen">&times;</button>
+      </div>
+      <form id="input-modal-form">
+        <div class="form-group" style="margin-top: 1rem;">
+          <label for="input-modal-field" id="input-modal-label">Name eingeben</label>
+          <input type="text" id="input-modal-field" class="form-control" placeholder="..." required autofocus autocomplete="off">
+        </div>
+        <div class="form-actions" style="margin-top: 1.5rem; display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button type="button" class="btn" id="cancel-input-modal-btn" style="justify-content: center;">Abbrechen</button>
+          <button type="submit" class="btn btn-primary" style="justify-content: center;">Bestätigen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Client-side Logic Script for public share page -->
   <script>
     // Config und State
@@ -482,8 +502,53 @@
       setTimeout(() => document.addEventListener('click', closeShareContextMenu, { once: true }), 50);
     }
 
+    // Custom input dialog — replaces window.prompt() so folder/file creation over a shared
+    // link matches the app's own look instead of breaking out into a native browser prompt.
+    function showInputPrompt(title, label, placeholder = '') {
+      return new Promise((resolve) => {
+        const overlay = document.getElementById('input-modal-overlay');
+        const form = document.getElementById('input-modal-form');
+        const input = document.getElementById('input-modal-field');
+        const titleEl = document.getElementById('input-modal-title');
+        const labelEl = document.getElementById('input-modal-label');
+        const cancelBtn = document.getElementById('cancel-input-modal-btn');
+        const closeBtn = document.getElementById('close-input-modal-btn');
+
+        titleEl.textContent = title;
+        labelEl.textContent = label;
+        input.value = '';
+        input.placeholder = placeholder;
+
+        overlay.classList.add('active');
+        input.focus();
+
+        const cleanup = () => {
+          overlay.classList.remove('active');
+          form.onsubmit = null;
+          cancelBtn.onclick = null;
+          closeBtn.onclick = null;
+          overlay.onclick = null;
+          document.removeEventListener('keydown', onKeydown);
+        };
+        const onKeydown = (e) => {
+          if (e.key === 'Escape') { cleanup(); resolve(null); }
+        };
+
+        form.onsubmit = (e) => {
+          e.preventDefault();
+          const val = input.value.trim();
+          cleanup();
+          resolve(val || null);
+        };
+        cancelBtn.onclick = () => { cleanup(); resolve(null); };
+        closeBtn.onclick = () => { cleanup(); resolve(null); };
+        overlay.onclick = (e) => { if (e.target === overlay) { cleanup(); resolve(null); } };
+        document.addEventListener('keydown', onKeydown);
+      });
+    }
+
     async function createFolderInShare() {
-      const name = prompt('Name des neuen Ordners:');
+      const name = await showInputPrompt('Neuer Ordner', 'Name des neuen Ordners', 'mein-ordner');
       if (!name) return;
       try {
         const r = await fetch(`/api/public/shares/${slug}/folder`, {
@@ -497,7 +562,7 @@
     }
 
     async function createFileInShare() {
-      const name = prompt('Name der neuen Datei:');
+      const name = await showInputPrompt('Neue Datei', 'Name der neuen Datei', 'notiz.txt');
       if (!name) return;
       try {
         const r = await fetch(`/api/public/shares/${slug}/file`, {
