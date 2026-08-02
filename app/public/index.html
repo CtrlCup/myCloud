@@ -264,6 +264,9 @@
         <button class="btn btn-icon multi-action-btn" id="multi-zip-btn" title="Als ZIP laden" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
           <i data-lucide="archive" style="width: 17px; height: 17px;"></i>
         </button>
+        <button class="btn btn-icon multi-action-btn" id="multi-move-btn" title="Verschieben nach…" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
+          <i data-lucide="folder-input" style="width: 17px; height: 17px;"></i>
+        </button>
         <button class="btn btn-icon multi-action-btn" id="multi-share-btn" title="Teilen" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
           <i data-lucide="share-2" style="width: 17px; height: 17px;"></i>
         </button>
@@ -1378,6 +1381,22 @@
           <button type="submit" class="btn btn-primary" style="justify-content: center;">Bestätigen</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- VERSCHIEBEN-NACH MODAL (Ordner-Browser als Touch-/Mobil-Alternative zu Drag & Drop) -->
+  <div class="modal-overlay" id="move-to-modal-overlay">
+    <div class="card modal" style="max-width: 420px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Verschieben nach…</h3>
+        <button class="close-btn" id="close-move-to-modal-btn" type="button">&times;</button>
+      </div>
+      <div class="breadcrumbs" id="move-to-breadcrumbs" style="margin: 1rem 0 0.75rem; flex-wrap: wrap;"></div>
+      <div id="move-to-folder-list" style="min-height: 120px; max-height: 320px; overflow-y: auto; border: 1px solid var(--glass-border); border-radius: var(--radius-md); padding: 0.4rem;"></div>
+      <div class="form-actions" style="margin-top: 1.25rem; display: flex; gap: 0.5rem; justify-content: flex-end;">
+        <button type="button" class="btn" id="cancel-move-to-modal-btn" style="justify-content: center;">Abbrechen</button>
+        <button type="button" class="btn btn-primary" id="confirm-move-to-btn" style="justify-content: center;">Hierher verschieben</button>
+      </div>
     </div>
   </div>
 

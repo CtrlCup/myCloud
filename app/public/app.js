@@ -2907,6 +2907,120 @@ document.getElementById('multi-share-btn').onclick = async () => {
   }
 };
 
+// "Verschieben nach…" — touch-friendly folder-picker alternative to drag & drop (drag & drop
+// itself doesn't work on mobile). Reuses /api/files/move-multiple, the same endpoint drag & drop
+// already calls.
+let moveToPickerFolderId = null;
+let moveToPickerBreadcrumbs = [];
+
+async function loadMoveToFolderList(folderId) {
+  moveToPickerFolderId = folderId;
+  const list = document.getElementById('move-to-folder-list');
+  list.innerHTML = '<div style="padding: 1rem; text-align: center; color: var(--color-text-muted); font-size: 0.85rem;">Lädt…</div>';
+  try {
+    const res = await fetch(`/api/files/list?parentId=${folderId === null ? 'null' : folderId}`);
+    const files = await res.json();
+    const folders = files.filter(f => f.is_folder && !selectedFileIds.includes(f.id));
+
+    if (folders.length === 0) {
+      list.innerHTML = '<div style="padding: 1rem; text-align: center; color: var(--color-text-muted); font-size: 0.85rem;">Keine Unterordner.</div>';
+    } else {
+      list.innerHTML = '';
+      folders.forEach(folder => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'dropdown-item';
+        row.style.cssText = 'display: flex; align-items: center; gap: 0.6rem; width: 100%; padding: 0.6rem 0.75rem; background: transparent; border: none; color: var(--color-text); text-align: left; cursor: pointer; font-size: 0.88rem; border-radius: var(--radius-sm);';
+        row.innerHTML = `<i data-lucide="folder" style="width: 16px; height: 16px; color: #ffaa00; flex-shrink: 0;"></i> <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(folder.name)}</span>`;
+        row.onclick = () => {
+          moveToPickerBreadcrumbs.push({ id: folder.id, name: folder.name });
+          renderMoveToBreadcrumbs();
+          loadMoveToFolderList(folder.id);
+        };
+        list.appendChild(row);
+      });
+      lucide.createIcons();
+    }
+  } catch {
+    list.innerHTML = '<div style="padding: 1rem; text-align: center; color: var(--color-text-muted); font-size: 0.85rem;">Verbindungsfehler.</div>';
+  }
+  renderMoveToBreadcrumbs();
+}
+
+function renderMoveToBreadcrumbs() {
+  const container = document.getElementById('move-to-breadcrumbs');
+  container.innerHTML = '';
+
+  const homeLink = document.createElement('a');
+  homeLink.href = '#';
+  homeLink.className = 'breadcrumb-item';
+  homeLink.textContent = 'Home';
+  homeLink.onclick = (e) => {
+    e.preventDefault();
+    moveToPickerBreadcrumbs = [];
+    loadMoveToFolderList(null);
+  };
+  container.appendChild(homeLink);
+
+  moveToPickerBreadcrumbs.forEach((crumb, index) => {
+    const sep = document.createElement('span');
+    sep.className = 'breadcrumb-separator';
+    sep.textContent = '/';
+    container.appendChild(sep);
+
+    if (index === moveToPickerBreadcrumbs.length - 1) {
+      const activeSpan = document.createElement('span');
+      activeSpan.className = 'breadcrumb-current';
+      activeSpan.textContent = crumb.name;
+      container.appendChild(activeSpan);
+    } else {
+      const link = document.createElement('a');
+      link.href = '#';
+      link.className = 'breadcrumb-item';
+      link.textContent = crumb.name;
+      link.onclick = (e) => {
+        e.preventDefault();
+        moveToPickerBreadcrumbs = moveToPickerBreadcrumbs.slice(0, index + 1);
+        loadMoveToFolderList(crumb.id);
+      };
+      container.appendChild(link);
+    }
+  });
+}
+
+document.getElementById('multi-move-btn').onclick = () => {
+  if (selectedFileIds.length === 0) return;
+  moveToPickerBreadcrumbs = [];
+  document.getElementById('move-to-modal-overlay').classList.add('active');
+  loadMoveToFolderList(null);
+};
+
+const closeMoveToModal = () => document.getElementById('move-to-modal-overlay').classList.remove('active');
+document.getElementById('close-move-to-modal-btn').onclick = closeMoveToModal;
+document.getElementById('cancel-move-to-modal-btn').onclick = closeMoveToModal;
+
+document.getElementById('confirm-move-to-btn').onclick = async () => {
+  if (selectedFileIds.length === 0) return;
+  try {
+    const res = await fetch('/api/files/move-multiple', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileIds: selectedFileIds, targetFolderId: moveToPickerFolderId })
+    });
+    if (res.ok) {
+      showToast(`${selectedFileIds.length} Element(e) verschoben!`);
+      closeMoveToModal();
+      clearSelection();
+      await loadFiles(currentFolderId);
+    } else {
+      const err = await res.json();
+      showToast(err.error || 'Fehler beim Verschieben.');
+    }
+  } catch {
+    showToast('Verbindungsfehler beim Verschieben.');
+  }
+};
+
 // Helper to recursively traverse DirectoryEntry/FileEntry objects and collect all files with relative paths
 async function getAllFilesFromEntries(entries) {
   const fileList = [];
