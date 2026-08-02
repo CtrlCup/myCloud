@@ -3265,7 +3265,7 @@ if (shareExpiryType) {
 
 async function openShareModal(file) {
   document.getElementById('share-file-id').value = file.id;
-  const prefix = appBrandingUrl || window.location.origin;
+  const prefix = window.location.origin || appBrandingUrl;
   document.getElementById('share-url-prefix').textContent = prefix.endsWith('/') ? `${prefix}s/` : `${prefix}/s/`;
   
   // Set defaults
@@ -3386,7 +3386,7 @@ async function openShareModal(file) {
 }
 
 function displayGeneratedLink(slug) {
-  const prefix = appBrandingUrl || window.location.origin;
+  const prefix = window.location.origin || appBrandingUrl;
   const base = prefix.endsWith('/') ? prefix : `${prefix}/`;
   const fullUrl = `${base}s/${slug}`;
   shareResultInput.value = fullUrl;
@@ -4905,7 +4905,7 @@ function openShareEditModal(ids) {
   applyPerms.onchange = syncGroups;
 
   // Slug
-  const prefix = appBrandingUrl || window.location.origin;
+  const prefix = window.location.origin || appBrandingUrl;
   document.getElementById('share-edit-url-prefix').textContent = prefix.endsWith('/') ? `${prefix}s/` : `${prefix}/s/`;
   document.getElementById('share-edit-slug').value = single ? single.slug : '';
 

@@ -2179,7 +2179,10 @@ app.post('/api/files/create-note', requireAuth, upload.array('attachments', 10),
       [slug, containerFileId, attachments.length > 0, expiresAt, parseInt(maxViews) || 1]
     );
 
-    const shareLink = `${EXPECTED_ORIGIN}/s/${slug}`;
+    // Derived from the request's own Host header (like getExpectedOrigin() does for WebAuthn)
+    // instead of the fixed EXPECTED_ORIGIN, so the link works under whichever of the app's
+    // configured domains the visitor actually used — relevant behind a multi-domain reverse proxy.
+    const shareLink = `${getExpectedOrigin(req)}/s/${slug}`;
     res.json({ success: true, shareLink });
   } catch (err) {
     console.error('Error creating one-time note:', err);
