@@ -18,7 +18,7 @@ const {
 const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
-const { sendMail } = require('./email');
+const { sendMail, renderEmailTemplate, getEmailBranding, applyConditionalBlock } = require('./email');
 const { version: APP_VERSION } = require('./package.json');
 const { getVersionStatus, logVersionStatus, checkForUpdate, GITHUB_REPO } = require('./version');
 
@@ -550,14 +550,22 @@ app.post('/api/auth/register', async (req, res) => {
 
     if (!isVerified) {
       // Send verification email
-      const appUrl = await getSetting('app_url') || process.env.APP_URL || 'http://localhost:3030';
-      const verifyLink = `${appUrl}/api/auth/verify-email?token=${verificationToken}`;
+      const branding = await getEmailBranding();
+      const verifyLink = `${branding.appUrl}/api/auth/verify-email?token=${verificationToken}`;
 
       await sendMail({
         to: email,
-        subject: 'myCloud - Registrierung bestätigen',
+        subject: `${branding.cloudName} - Registrierung bestätigen`,
         text: `Hallo,\n\nBitte bestätige deine Registrierung über den folgenden Link:\n${verifyLink}\n\nErst danach kannst du dich anmelden.`,
-        html: `<p>Hallo,</p><p>Bitte bestätige deine Registrierung über den folgenden Link:</p><p><a href="${verifyLink}">${verifyLink}</a></p><p>Erst danach kannst du dich anmelden.</p>`
+        html: renderEmailTemplate('verify-account', {
+          CLOUD_NAME: branding.cloudName,
+          LOGO_MARK: { raw: branding.logoMark },
+          APP_URL: branding.appUrl,
+          USER_NAME: normalizedEmail.split('@')[0],
+          USER_EMAIL: normalizedEmail,
+          VERIFY_URL: { raw: verifyLink },
+        }),
+        templated: true,
       });
 
       return res.status(201).json({ success: true, requiresVerification: true, message: 'Registrierung erfolgreich. Bitte bestätige deine E-Mail-Adresse.' });
@@ -1170,20 +1178,28 @@ app.post('/api/auth/reset-password-request', async (req, res) => {
 
     await setSetting(`reset_${resetToken}`, JSON.stringify({ userId: user.id, expires }));
 
-    const appUrl = await getSetting('app_url') || process.env.APP_URL || 'http://localhost:3030';
-    const resetLink = `${appUrl}/#reset-password?token=${resetToken}`;
+    const branding = await getEmailBranding();
+    const resetLink = `${branding.appUrl}/#reset-password?token=${resetToken}`;
 
     const mailSent = await sendMail({
       to: recipient,
-      subject: 'myCloud - Passwort zurücksetzen',
+      subject: `${branding.cloudName} - Passwort zurücksetzen`,
       text: `Hallo,\n\nBitte setze dein Passwort über den folgenden Link zurück:\n${resetLink}\n\nDieser Link ist für 1 Stunde gültig.`,
-      html: `<p>Hallo,</p><p>Bitte setze dein Passwort über den folgenden Link zurück:</p><p><a href="${resetLink}">${resetLink}</a></p><p>Dieser Link ist für 1 Stunde gültig.</p>`
+      html: renderEmailTemplate('password-reset', {
+        CLOUD_NAME: branding.cloudName,
+        LOGO_MARK: { raw: branding.logoMark },
+        APP_URL: branding.appUrl,
+        USER_NAME: getUserDisplayName(user),
+        USER_EMAIL: recipient,
+        RESET_URL: { raw: resetLink },
+      }),
+      templated: true,
     });
 
     if (mailSent) {
       res.json({ success: true, message: 'Passwort-Reset-Link an die hinterlegte E-Mail-Adresse gesendet.' });
     } else {
-      if (appUrl.includes('localhost')) {
+      if (branding.appUrl.includes('localhost')) {
         return res.json({ success: true, devLink: resetLink, message: '[DEV ONLY] E-Mail-Versand fehlgeschlagen, hier ist dein Link.' });
       }
       res.status(500).json({ error: 'Fehler beim Senden der Reset-E-Mail. Bitte wende dich an den Administrator.' });
@@ -1230,6 +1246,15 @@ app.post('/api/auth/reset-password-execute', async (req, res) => {
 /* ==========================================================================
    FILE & EXPLORER ROUTES
    ========================================================================== */
+
+// Mirrors the frontend's updateDisplayNameUI() logic so emails greet a user the same way the
+// app's own UI does — the real name when the user opted into showing it, otherwise the username.
+function getUserDisplayName(user) {
+  if (user.display_real_name && (user.first_name || user.last_name)) {
+    return `${user.first_name || ''} ${user.last_name || ''}`.trim();
+  }
+  return user.username;
+}
 
 // Helper to check recursively if a file/folder belongs to an owner
 async function verifyFileOwner(fileId, userId) {
@@ -2528,8 +2553,19 @@ app.get('/api/files/:id', requireAuth, async (req, res) => {
    ========================================================================== */
 
 // Create a share link
+// Builds a short, German permission summary for the share-notification email — mirrors the
+// flag combinations the share modal itself can produce (see updateSharePermissionsUI() in
+// app.js), just phrased as prose instead of individual checkboxes.
+function buildSharePermissionLabel({ canRead, canWrite, canDownload, onlyUpload }) {
+  if (onlyUpload) return 'Nur Hochladen';
+  if (!canRead) return 'Nur Herunterladen';
+  if (canWrite) return 'Ansehen & Bearbeiten';
+  if (canDownload) return 'Ansehen & Herunterladen';
+  return 'Nur Ansehen';
+}
+
 app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res) => {
-  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, canCollab, message } = req.body;
+  const { fileId, customSlug, canRead, canWrite, canDownload, canZip, expiresDays, password, maxDownloads, onlyUpload, canCollab, message, notifyEmail } = req.body;
   const userId = req.session.userId;
 
   try {
@@ -2566,8 +2602,47 @@ app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
       [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal, canCollab === true, messageVal]
     );
+    const share = result.rows[0];
 
-    res.status(201).json(result.rows[0]);
+    let notified = false;
+    const recipientEmail = notifyEmail ? String(notifyEmail).trim() : '';
+    if (recipientEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+      try {
+        const fileRes = await pool.query('SELECT name, is_folder FROM files WHERE id = $1', [fileId]);
+        const file = fileRes.rows[0];
+        const sharerRes = await pool.query('SELECT username, first_name, last_name, display_real_name FROM users WHERE id = $1', [userId]);
+        const branding = await getEmailBranding();
+        const shareUrl = `${branding.appUrl}/s/${share.slug}`;
+
+        let html = renderEmailTemplate('share-notification', {
+          CLOUD_NAME: branding.cloudName,
+          LOGO_MARK: { raw: branding.logoMark },
+          APP_URL: branding.appUrl,
+          SHARER_NAME: getUserDisplayName(sharerRes.rows[0]),
+          USER_NAME: recipientEmail.split('@')[0],
+          ITEM_NAME: file.name,
+          ITEM_TYPE: file.is_folder ? 'Ordner' : 'Datei',
+          ITEM_ICON: { raw: file.is_folder ? '&#128193;' : '&#128196;' },
+          ITEM_PERMISSION: buildSharePermissionLabel({ canRead: share.can_read, canWrite: share.can_write, canDownload: share.can_download, onlyUpload: share.only_upload }),
+          SHARE_URL: { raw: shareUrl },
+          EXPIRES_AT: share.expires_at ? new Date(share.expires_at).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' }) : '',
+        });
+        html = applyConditionalBlock(html, 'EXPIRY', !!share.expires_at);
+        html = applyConditionalBlock(html, 'PWDPROTECTED', !!share.password_hash);
+
+        notified = await sendMail({
+          to: recipientEmail,
+          subject: `${getUserDisplayName(sharerRes.rows[0])} hat etwas mit dir geteilt`,
+          text: `${getUserDisplayName(sharerRes.rows[0])} hat dir über ${branding.cloudName} "${file.name}" freigegeben:\n${shareUrl}`,
+          html,
+          templated: true,
+        });
+      } catch (mailErr) {
+        console.error('Error sending share notification email:', mailErr);
+      }
+    }
+
+    res.status(201).json({ ...share, notified });
   } catch (err) {
     console.error('Error creating share:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -4500,7 +4575,7 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
     }
 
     const keysChanged = Object.keys(configs);
-    const smtpKeys = ['email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from'];
+    const smtpKeys = ['email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from', 'email_from_name'];
     if (keysChanged.some(k => smtpKeys.includes(k))) {
       await setSetting('email_smtp_tested', 'false');
     }
@@ -4546,11 +4621,23 @@ app.post('/api/settings/admin/test-smtp', requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Test email address is required.' });
   }
 
+  const branding = await getEmailBranding();
+  const smtpHost = await getSetting('email_smtp_host') || process.env.EMAIL_SMTP_HOST || '';
+  const sentAt = new Date().toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' });
+
   const sent = await sendMail({
     to,
-    subject: 'myCloud - SMTP Connection Test',
-    text: 'If you receive this email, your myCloud SMTP mail configurations are working correctly!',
-    html: '<h3>myCloud - SMTP Test</h3><p>If you receive this email, your myCloud SMTP mail configurations are working correctly!</p>'
+    subject: `${branding.cloudName} - SMTP Connection Test`,
+    text: `Hallo ${req.session.username},\n\ndiese Test-E-Mail bestätigt, dass dein ${branding.cloudName}-Server E-Mails erfolgreich über deine hinterlegten SMTP-Einstellungen versenden kann.`,
+    html: renderEmailTemplate('test', {
+      CLOUD_NAME: branding.cloudName,
+      LOGO_MARK: { raw: branding.logoMark },
+      APP_URL: branding.appUrl,
+      USER_NAME: req.session.username,
+      SMTP_HOST: smtpHost,
+      SENT_AT: sentAt,
+    }),
+    templated: true,
   });
 
   if (sent) {

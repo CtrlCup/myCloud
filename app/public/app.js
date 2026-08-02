@@ -3032,6 +3032,13 @@ shareAddMessageCheck.onchange = () => {
   if (!shareAddMessageCheck.checked) shareMessageInput.value = '';
 };
 
+const shareNotifyEmailCheck = document.getElementById('share-notify-email');
+const shareNotifyEmailInput = document.getElementById('share-notify-email-input');
+shareNotifyEmailCheck.onchange = () => {
+  shareNotifyEmailInput.style.display = shareNotifyEmailCheck.checked ? 'block' : 'none';
+  if (!shareNotifyEmailCheck.checked) shareNotifyEmailInput.value = '';
+};
+
 // Which permission rows apply to the file currently open in the share modal — set by
 // openShareModal(), read by updateSharePermissionsUI() so it knows what to restore when
 // "Inhalte anzeigen" gets re-checked after being off.
@@ -3288,6 +3295,9 @@ async function openShareModal(file) {
   shareAddMessageCheck.checked = false;
   shareMessageInput.value = '';
   shareMessageInput.style.display = 'none';
+  shareNotifyEmailCheck.checked = false;
+  shareNotifyEmailInput.value = '';
+  shareNotifyEmailInput.style.display = 'none';
   document.getElementById('share-password-remove-container').style.display = 'none';
   document.getElementById('share-password-remove').checked = false;
   deleteShareBtn.style.display = 'none';
@@ -3439,7 +3449,8 @@ shareForm.onsubmit = async (e) => {
     onlyUpload: document.getElementById('share-only-upload').checked,
     removePassword: document.getElementById('share-password-remove').checked,
     canCollab: shareCanCollabCheck.checked,
-    message: shareAddMessageCheck.checked ? shareMessageInput.value.trim() : null
+    message: shareAddMessageCheck.checked ? shareMessageInput.value.trim() : null,
+    notifyEmail: shareNotifyEmailCheck.checked ? shareNotifyEmailInput.value.trim() : null
   };
 
   const url = existingId ? `/api/shares/${existingId}` : '/api/shares';
@@ -3468,14 +3479,19 @@ shareForm.onsubmit = async (e) => {
 
       displayGeneratedLink(data.slug);
 
+      let successMessage = existingId ? 'Freigabe aktualisiert & Link kopiert!' : 'Freigabe-Link erstellt & kopiert!';
+      if (!existingId && payload.notifyEmail) {
+        successMessage += data.notified ? ' Empfänger wurde per E-Mail benachrichtigt.' : ' E-Mail-Benachrichtigung konnte nicht gesendet werden (SMTP prüfen).';
+      }
+
       // Automatically copy generated link to clipboard
       try {
         await navigator.clipboard.writeText(shareResultInput.value);
-        showToast(existingId ? 'Freigabe aktualisiert & Link kopiert!' : 'Freigabe-Link erstellt & kopiert!');
+        showToast(successMessage);
       } catch (clipErr) {
         shareResultInput.select();
         document.execCommand('copy');
-        showToast(existingId ? 'Freigabe aktualisiert & Link kopiert!' : 'Freigabe-Link erstellt & kopiert!');
+        showToast(successMessage);
       }
     } else {
       showToast(data.error);
@@ -4031,6 +4047,7 @@ async function loadAdminSettings() {
       document.getElementById('admin-smtp-user').value = conf.email_smtp_user || '';
       document.getElementById('admin-smtp-pass').value = conf.email_smtp_pass_configured ? '__placeholder__' : '';
       document.getElementById('admin-smtp-from').value = conf.email_from || 'noreply@mycloud.local';
+      document.getElementById('admin-smtp-from-name').value = conf.email_from_name || '';
 
       // Load Users List
       loadAdminUsers();
@@ -4218,6 +4235,7 @@ document.getElementById('admin-smtp-form').onsubmit = async (e) => {
     email_smtp_user: document.getElementById('admin-smtp-user').value.trim(),
     email_smtp_pass: smtpPassInput === '__placeholder__' ? '__placeholder__' : smtpPassInput,
     email_from: document.getElementById('admin-smtp-from').value.trim(),
+    email_from_name: document.getElementById('admin-smtp-from-name').value.trim(),
   };
   await saveAdminConfig(payload);
 };

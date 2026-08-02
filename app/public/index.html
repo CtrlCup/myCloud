@@ -996,6 +996,11 @@
                   <label for="admin-smtp-from">Absender-Adresse (From)</label>
                   <input type="email" id="admin-smtp-from" class="form-control" placeholder="noreply@mycloud.local">
                 </div>
+                <div class="form-group">
+                  <label for="admin-smtp-from-name">Absendername</label>
+                  <input type="text" id="admin-smtp-from-name" class="form-control" placeholder="myCloud">
+                  <p style="font-size: 0.8rem; color: var(--color-text-muted); margin: 0.25rem 0 0 0;">Wird statt der E-Mail-Adresse als Absender angezeigt, z. B. der Cloud-Name. Ein echtes Profilbild in der Inbox-Liste (wie bei Gmail-Kontakten) kann ein selbst gehosteter SMTP-Versand technisch nicht setzen — das Cloud-Icon aus den Branding-Einstellungen wird stattdessen als Logo im E-Mail-Header eingebettet.</p>
+                </div>
                 
                 <div style="display: flex; gap: 1rem; align-items: flex-end; border-top: 1px solid var(--color-border); padding-top: 1.5rem; margin-top: 1.5rem;">
                   <div style="flex-grow: 1;">
@@ -1189,6 +1194,14 @@
             <span>Nachricht für Empfänger hinzufügen</span>
           </label>
           <textarea id="share-message-input" class="form-control" placeholder="Diese Nachricht wird dem Besucher der Freigabe oben angezeigt…" maxlength="2000" style="display: none; width: 100%; height: 70px; resize: vertical; margin-top: 0.5rem; padding: 0.6rem 0.75rem; font-size: 0.85rem; box-sizing: border-box;"></textarea>
+        </div>
+
+        <div>
+          <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
+            <input type="checkbox" id="share-notify-email">
+            <span>Empfänger per E-Mail benachrichtigen</span>
+          </label>
+          <input type="email" id="share-notify-email-input" class="form-control" placeholder="empfaenger@beispiel.de" style="display: none; margin-top: 0.5rem; padding: 0.4rem 0.75rem; font-size: 0.85rem;">
         </div>
 
         <div class="form-actions" style="margin-top: 0.25rem; display: flex; gap: 0.5rem;">
