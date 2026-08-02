@@ -12,6 +12,10 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# Lokal angepasste Docker-Compose-Datei — docker-compose.example.yml ist die versionierte
+# Vorlage, damit ein `git pull` nie die eigene, ggf. angepasste Datei überschreibt
+docker-compose.yml
+
 # Private Notizen für den Entwicklungs-Agenten
 private_notes.md
 *.private.md

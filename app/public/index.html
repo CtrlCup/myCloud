@@ -91,18 +91,6 @@
         <a href="#trash" class="nova-nav-item" id="nova-nav-trash" data-view="trash" title="Papierkorb">
           <i data-lucide="trash-2"></i> <span class="nova-nav-label">Papierkorb</span>
         </a>
-        <a href="#notes" class="nova-nav-item" id="nova-nav-notes" data-view="notes" title="Einmalnotizen" style="display: none;">
-          <i data-lucide="shield-alert"></i> <span class="nova-nav-label">Einmalnotizen</span>
-        </a>
-        <a href="#admin" class="nova-nav-item" id="nova-nav-admin" data-view="admin" title="Admin" style="display: none;">
-          <i data-lucide="sliders"></i> <span class="nova-nav-label">Admin</span>
-        </a>
-        <a href="#settings" class="nova-nav-item" id="nova-nav-settings" data-view="settings" title="Einstellungen">
-          <i data-lucide="settings"></i> <span class="nova-nav-label">Einstellungen</span>
-        </a>
-        <button type="button" class="nova-nav-item nova-nav-logout" id="nova-nav-logout" title="Abmelden">
-          <i data-lucide="log-out"></i> <span class="nova-nav-label">Abmelden</span>
-        </button>
       </nav>
 
       <div class="nova-sidebar-spacer"></div>
@@ -141,7 +129,12 @@
 
           <div class="form-group" id="password-group">
             <label for="password">Passwort</label>
-            <input type="password" id="password" class="form-control" placeholder="••••••••" required autocomplete="current-password">
+            <div style="position: relative;">
+              <input type="password" id="password" class="form-control" style="padding-right: 2.75rem;" placeholder="••••••••" required autocomplete="current-password">
+              <button type="button" id="password-toggle-btn" class="btn-icon" title="Passwort anzeigen" style="position: absolute; top: 0; bottom: 0; right: 0.4rem; margin: auto 0; height: 32px; width: 32px; padding: 0; display: flex; align-items: center; justify-content: center; color: var(--color-text-muted); background: transparent; border: none; outline: none; box-shadow: none;">
+                <i data-lucide="eye" style="width: 18px; height: 18px;"></i>
+              </button>
+            </div>
           </div>
 
           <div class="form-actions">

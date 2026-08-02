@@ -252,10 +252,6 @@ async function checkAuthStatus() {
       if (adminBtn) {
         adminBtn.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
       }
-      const novaAdminBtn = document.getElementById('nova-nav-admin');
-      if (novaAdminBtn) {
-        novaAdminBtn.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
-      }
       checkNotesExist();
       loadStorageSettings();
 
@@ -461,6 +457,19 @@ const authForm = document.getElementById('auth-form');
 const authSubmitBtn = document.getElementById('auth-submit-btn');
 const toggleAuthModeBtn = document.getElementById('toggle-auth-mode');
 const forgotPasswordBtn = document.getElementById('forgot-password-btn');
+
+// Show/hide the login password in plaintext
+const passwordToggleBtn = document.getElementById('password-toggle-btn');
+if (passwordToggleBtn) {
+  passwordToggleBtn.onclick = () => {
+    const passwordInput = document.getElementById('password');
+    const showing = passwordInput.type === 'text';
+    passwordInput.type = showing ? 'password' : 'text';
+    passwordToggleBtn.title = showing ? 'Passwort anzeigen' : 'Passwort verbergen';
+    passwordToggleBtn.innerHTML = `<i data-lucide="${showing ? 'eye' : 'eye-off'}" style="width: 18px; height: 18px;"></i>`;
+    lucide.createIcons();
+  };
+}
 
 function updateAuthUI(isRegister) {
   isRegisterMode = isRegister;
@@ -681,22 +690,6 @@ const userDropdownMenu = document.getElementById('user-dropdown-menu');
 if (userMenuTrigger && userDropdownMenu) {
   userMenuTrigger.onclick = (e) => {
     e.stopPropagation();
-    // Under Nova the profile card is a direct shortcut into Einstellungen — Admin/Notizen/
-    // Logout all already have their own dedicated sidebar rows, so the dropdown (and its
-    // now-redundant "Einstellungen" entry) is LiquidGlass-only.
-    if (document.documentElement.getAttribute('data-visual-theme') === 'nova') {
-      openHashView('#settings', 'settings');
-      document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
-      document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
-      const accountTab = document.querySelector('[data-section="account-settings"]');
-      const accountSection = document.getElementById('account-settings');
-      if (accountTab && accountSection) {
-        accountTab.classList.add('active');
-        accountSection.classList.add('active');
-      }
-      updateNovaSidebarActive('settings');
-      return;
-    }
     userDropdownMenu.classList.toggle('show');
   };
 
@@ -706,22 +699,6 @@ if (userMenuTrigger && userDropdownMenu) {
       userDropdownMenu.classList.remove('show');
     }
   });
-}
-
-const novaNavLogout = document.getElementById('nova-nav-logout');
-if (novaNavLogout) {
-  novaNavLogout.onclick = async () => {
-    try {
-      const res = await fetch('/api/auth/logout', { method: 'POST' });
-      if (res.ok) {
-        currentUser = null;
-        window.location.hash = '#login';
-        checkAuthStatus();
-      }
-    } catch (err) {
-      showToast('Fehler beim Abmelden.');
-    }
-  };
 }
 
 // Standard Logout Button in Dropdown
@@ -840,25 +817,6 @@ document.getElementById('nova-nav-trash').onclick = (e) => {
   openHashView('#trash', 'trash');
 };
 
-document.getElementById('nova-nav-admin').onclick = (e) => {
-  e.preventDefault();
-  openHashView('#admin', 'admin');
-};
-
-document.getElementById('nova-nav-settings').onclick = (e) => {
-  e.preventDefault();
-  openHashView('#settings', 'settings');
-  document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
-  document.querySelectorAll('.settings-section').forEach(s => s.classList.remove('active'));
-  const accountTab = document.querySelector('[data-section="account-settings"]');
-  const accountSection = document.getElementById('account-settings');
-  if (accountTab && accountSection) {
-    accountTab.classList.add('active');
-    accountSection.classList.add('active');
-  }
-  updateNovaSidebarActive('settings');
-};
-
 document.getElementById('nova-nav-shares').onclick = (e) => {
   e.preventDefault();
   openHashView('#settings', 'settings');
@@ -973,15 +931,12 @@ function showRecents() {
 // note exists.
 async function checkNotesExist() {
   const dropdownBtn = document.getElementById('dropdown-notes-btn');
-  const novaNavNotes = document.getElementById('nova-nav-notes');
-  if (!dropdownBtn && !novaNavNotes) return;
+  if (!dropdownBtn) return;
   try {
     const res = await fetch('/api/files/notes');
     if (!res.ok) return;
     const notes = await res.json();
-    const display = notes.length > 0 ? '' : 'none';
-    if (dropdownBtn) dropdownBtn.style.display = display;
-    if (novaNavNotes) novaNavNotes.style.display = notes.length > 0 ? 'flex' : 'none';
+    dropdownBtn.style.display = notes.length > 0 ? '' : 'none';
   } catch (err) {
     console.error('Error checking notes existence:', err);
   }

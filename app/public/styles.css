@@ -586,6 +586,19 @@ header {
   -webkit-backdrop-filter: blur(8px);
 }
 
+/* Chrome/Safari paint autofilled fields with their own light-blue background, ignoring the
+   page's CSS entirely, unless neutralized with this inset-box-shadow trick — otherwise every
+   autofilled username/password field shows a jarring light box regardless of theme. */
+.form-control:-webkit-autofill,
+.form-control:-webkit-autofill:hover,
+.form-control:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--input-bg) inset;
+  box-shadow: 0 0 0 1000px var(--input-bg) inset;
+  -webkit-text-fill-color: var(--color-text);
+  caret-color: var(--color-text);
+  transition: background-color 5000s ease-in-out 0s;
+}
+
 .form-control:focus {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px rgba(var(--color-accent-rgb), 0.15);
@@ -3129,6 +3142,7 @@ tbody tr {
   --dropdown-bg: #ffffff;
   --meter-track: rgba(15, 23, 42, 0.08);
   --meter-hole: #ffffff;
+  --switch-track-off: rgba(15, 23, 42, 0.18);
 }
 
 /* ─── Nova tokens: explicit dark override ─── */
@@ -3157,6 +3171,7 @@ tbody tr {
   --dropdown-bg: #101a30;
   --meter-track: rgba(255, 255, 255, 0.08);
   --meter-hole: #0a0e1a;
+  --switch-track-off: rgba(255, 255, 255, 0.16);
 }
 
 /* ─── Nova tokens: automatic dark via OS preference ─── */
@@ -3186,6 +3201,7 @@ tbody tr {
     --dropdown-bg: #101a30;
     --meter-track: rgba(255, 255, 255, 0.08);
     --meter-hole: #0a0e1a;
+    --switch-track-off: rgba(255, 255, 255, 0.16);
   }
 }
 
@@ -3295,18 +3311,6 @@ tbody tr {
   color: var(--color-accent);
 }
 
-[data-visual-theme="nova"] .nova-nav-item.nova-nav-logout {
-  width: 100%;
-  border: none;
-  background: transparent;
-  font: inherit;
-  cursor: pointer;
-}
-[data-visual-theme="nova"] .nova-nav-item.nova-nav-logout:hover {
-  background: rgba(255, 69, 58, 0.12);
-  color: #ff453a;
-}
-
 [data-visual-theme="nova"] .nova-sidebar-spacer { flex: 1; }
 
 [data-visual-theme="nova"] .nova-storage-meter {
@@ -3375,11 +3379,6 @@ tbody tr {
   width: 100%;
   padding: 0.4rem;
 }
-/* The trigger is a direct shortcut into Einstellungen under Nova, not a dropdown opener —
-   the chevron (the only svg directly inside it, besides the img avatar) would be misleading. */
-[data-visual-theme="nova"] .user-menu-trigger svg {
-  display: none;
-}
 [data-visual-theme="nova"] .user-nav-names {
   display: flex;
   flex-direction: column;
@@ -3402,8 +3401,8 @@ tbody tr {
   top: auto;
   bottom: calc(100% + 0.5rem);
   left: 0;
-  right: 0;
-  width: 100%;
+  width: max-content;
+  min-width: 220px;
 }
 
 /* ─── Nova layout: content area shifts right of the fixed sidebar ─── */
@@ -3439,6 +3438,16 @@ tbody tr {
   border-radius: var(--radius-md);
 }
 
+/* Nova's --input-bg is close enough to --color-surface that the "off" toggle track was
+   nearly invisible against a card. --switch-track-off is a dedicated, higher-contrast token
+   just for this — border is dropped entirely rather than using --color-border, since an
+   admin-configured custom accent color tints that border cyan (via an inline override in
+   loadBranding()) which read as a stray colored ring around an otherwise "off" control. */
+[data-visual-theme="nova"] .switch .slider {
+  background-color: var(--switch-track-off);
+  border-color: transparent;
+}
+
 /* ─── Nova layout: manually minimized sidebar (icons only), toggled via #nova-sidebar-toggle
    and persisted in localStorage — independent of the narrow-viewport auto-collapse below. ─── */
 [data-visual-theme="nova"].app-authed.nova-sidebar-collapsed #nova-sidebar,
@@ -3455,8 +3464,13 @@ tbody tr {
 [data-visual-theme="nova"].nova-sidebar-collapsed .nova-logo-text,
 [data-visual-theme="nova"].nova-sidebar-collapsed .nova-nav-label,
 [data-visual-theme="nova"].nova-sidebar-collapsed .nova-storage-meter,
-[data-visual-theme="nova"].nova-sidebar-collapsed .user-nav-names {
+[data-visual-theme="nova"].nova-sidebar-collapsed .user-nav-names,
+[data-visual-theme="nova"].nova-sidebar-collapsed .user-menu-trigger svg {
   display: none;
+}
+[data-visual-theme="nova"].nova-sidebar-collapsed .user-menu-trigger {
+  justify-content: center;
+  padding: 0.4rem 0;
 }
 [data-visual-theme="nova"].nova-sidebar-collapsed .nova-sidebar-top {
   justify-content: center;

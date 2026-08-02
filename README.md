@@ -68,8 +68,9 @@ Ein einzelner Node-Prozess bedient jede HTTP-Route, den WebSocket-Server und all
 git clone https://github.com/CtrlCup/myCloud.git
 cd myCloud
 
-# 2. Umgebungsvariablen einrichten
+# 2. Umgebungsvariablen und Docker-Compose-Datei einrichten
 cp .env.example .env
+cp docker-compose.example.yml docker-compose.yml
 # .env nach Bedarf anpassen (siehe Konfiguration unten)
 
 # 3. Starten
