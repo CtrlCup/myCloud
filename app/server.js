@@ -15,6 +15,7 @@ const {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
+const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail } = require('./email');
@@ -855,7 +856,10 @@ app.post('/api/auth/passkey/register-options', requireAuth, async (req, res) => 
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
       rpID: getRpId(req),
-      userID: String(user.id),
+      // generateRegistrationOptions() passes userID straight through into the response JSON's
+      // `user.id` field without encoding it, and the client-side library then base64url-decodes
+      // that field as-is — so it must already be a base64url string, not a raw id/Buffer.
+      userID: isoBase64URL.fromString(String(user.id)),
       userName: user.username,
       userDisplayName: user.username,
       attestationType: 'none',
