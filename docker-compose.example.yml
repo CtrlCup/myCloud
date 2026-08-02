@@ -1,6 +1,6 @@
 version: '3.8'
 
-# COMPOSE_VERSION=1.0.0
+# COMPOSE_VERSION=1.1.0
 # Wird von myCloud beim Start mit der vom Code erwarteten Version verglichen (siehe
 # app/version.js) und in der Admin-Konsole angezeigt, falls diese Datei veraltet ist.
 # Beim manuellen Übernehmen von Struktur-Änderungen aus dem Repository entsprechend
@@ -26,8 +26,14 @@ services:
       dockerfile: Dockerfile
     container_name: mycloud_app
     restart: always
+    # Standardmäßig wird der Port auf den Host gemappt (ports), damit die App direkt
+    # erreichbar ist. Läuft davor bereits ein Reverse-Proxy im selben Docker-Netzwerk
+    # (mycloud_network), kann stattdessen "expose" verwendet werden — dazu den ports-Block
+    # auskommentieren und den expose-Block darunter aktivieren.
     ports:
       - "${PORT:-3000}:3000"
+    # expose:
+    #   - "3000"
     volumes:
       - uploads_data:/usr/src/app/uploads
       - ./.env:/usr/src/app/.env
@@ -58,8 +64,10 @@ services:
     image: ghcr.io/euro-office/documentserver:latest
     container_name: mycloud_eurooffice
     restart: always
-    ports:
-      - "${EURO_OFFICE_PORT:-8080}:80"
+    # Nur intern über das mycloud_network erreichbar (z. B. für einen Reverse-Proxy),
+    # da der Document-Server aktuell ausschließlich für dieses Projekt verwendet wird.
+    expose:
+      - "80"
     environment:
       JWT_ENABLED: "false"
     entrypoint: ["/bin/sh", "-c", "cp /tmp/local.json /etc/euro-office/documentserver/local.json && exec /entrypoint.sh"]

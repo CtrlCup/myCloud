@@ -10,7 +10,7 @@ const COMPOSE_PATH = path.join(__dirname, 'docker-compose.yml');
 // version markers in those files (ENV_VERSION=.. / # COMPOSE_VERSION=..) then fall
 // behind and get flagged as outdated below.
 const EXPECTED_ENV_VERSION = '1.0.0';
-const EXPECTED_COMPOSE_VERSION = '1.0.0';
+const EXPECTED_COMPOSE_VERSION = '1.1.0';
 
 // Reads a "KEY=1.2.3" marker line from a file — plain for .env, as a YAML comment
 // ("# KEY=1.2.3") for docker-compose.yml. Returns null if the file or marker is missing.
