@@ -67,6 +67,18 @@ const storage = multer.diskStorage({
 const MAX_UPLOAD_SIZE_BYTES = parseInt(process.env.MAX_UPLOAD_SIZE_BYTES) || 100 * 1024 * 1024 * 1024; // 100GB
 const upload = multer({ storage: storage, limits: { fileSize: MAX_UPLOAD_SIZE_BYTES } });
 
+// Browsers send multipart filenames as raw UTF-8 bytes, but multer's underlying parser (busboy)
+// decodes multipart header fields as latin1 per the multipart spec. Re-decoding the mangled
+// string as latin1 -> utf8 undoes that mojibake (e.g. "PrÃ¤sentation" -> "Präsentation").
+function fixUploadFilenameEncoding(req, res, next) {
+  const fix = (name) => Buffer.from(name, 'latin1').toString('utf8');
+  if (req.file) req.file.originalname = fix(req.file.originalname);
+  if (Array.isArray(req.files)) {
+    req.files.forEach(f => { f.originalname = fix(f.originalname); });
+  }
+  next();
+}
+
 // The browser/client freely chooses the Content-Type it reports for an uploaded file (multer's
 // req.file.mimetype) — trusting it let an uploader store e.g. a .txt file with mimetype
 // "text/html", which was then served with that same Content-Type on inline view/download,
@@ -1377,7 +1389,7 @@ app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), a
 });
 
 // Upload file
-app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.single('file'), async (req, res) => {
+app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.single('file'), fixUploadFilenameEncoding, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -2081,7 +2093,7 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
 // folder that itself carries is_one_time_note = true, reusing the existing folder-share
 // browsing/zip-download machinery; without attachments it's a single flagged text file exactly
 // as before.
-app.post('/api/files/create-note', requireAuth, upload.array('attachments', 10), async (req, res) => {
+app.post('/api/files/create-note', requireAuth, upload.array('attachments', 10), fixUploadFilenameEncoding, async (req, res) => {
   const { name, content, maxViews, expiresHours, parentId } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId && parentId !== 'null' ? parseInt(parentId) : null;
@@ -3689,7 +3701,7 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 });
 
 // Public Share Upload - Allow uploads to shared folder if write permission exists
-app.post('/api/public/shares/:slug/upload', upload.single('file'), async (req, res) => {
+app.post('/api/public/shares/:slug/upload', upload.single('file'), fixUploadFilenameEncoding, async (req, res) => {
   const { slug } = req.params;
   const parentId = req.body.parentId ? parseInt(req.body.parentId) : null;
 
