@@ -7008,7 +7008,6 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
   viewerSessionToken++;
   const overlay = document.getElementById('image-viewer-overlay');
   const img = document.getElementById('image-viewer-img');
-  const backdrop = document.getElementById('image-viewer-backdrop');
   const loading = document.getElementById('image-viewer-loading');
   const title = document.getElementById('image-viewer-title');
   const filenameEl = document.getElementById('image-viewer-filename');
@@ -7076,20 +7075,12 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
       img.src = downloadUrl;
     }
 
-    // Ambient blurred backdrop: reuses the same src the <img> just got (full image, RAW/HEIC
-    // preview, whatever) so the stage isn't a flat void, but fades in only once the real image
-    // has actually loaded — an errored/never-loaded image shouldn't leave a lit-up backdrop.
-    backdrop.style.backgroundImage = `url("${img.src}")`;
-    backdrop.classList.remove('active');
-
     img.onload = () => {
       loading.style.display = 'none';
       img.style.display = 'block';
-      backdrop.classList.add('active');
     };
     img.onerror = () => {
       loading.style.display = 'none';
-      backdrop.classList.remove('active');
       // Update the icon/filename in place rather than replacing title.innerHTML — that div also
       // hosts the filename span and its rename <input>, and clobbering it here used to leave
       // those elements permanently missing (breaking rename and every later open) after any
@@ -7101,7 +7092,6 @@ async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
   } catch (err) {
     console.error('Image viewer error:', err);
     loading.style.display = 'none';
-    backdrop.classList.remove('active');
     if (titleIcon) { titleIcon.setAttribute('data-lucide', 'alert-circle'); titleIcon.style.color = '#ff5555'; }
     filenameEl.textContent = 'Fehler beim Laden des Bildes';
     lucide.createIcons();
@@ -7112,9 +7102,6 @@ document.getElementById('close-image-viewer-btn').onclick = () => {
   document.getElementById('image-viewer-overlay').classList.remove('active');
   const img = document.getElementById('image-viewer-img');
   img.src = '';
-  const backdrop = document.getElementById('image-viewer-backdrop');
-  backdrop.classList.remove('active');
-  backdrop.style.backgroundImage = '';
   if (currentImageObjectUrl) {
     URL.revokeObjectURL(currentImageObjectUrl);
     currentImageObjectUrl = null;
@@ -7150,18 +7137,8 @@ function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
   const sourceUrl = isPublic
     ? `/api/public/shares/${slug}/download/${fileId}`
     : `/api/files/download/${fileId}`;
-  const thumbUrl = isPublic
-    ? `/api/public/shares/${slug}/thumbnail/${fileId}`
-    : `/api/files/thumbnail/${fileId}`;
 
   document.getElementById('video-viewer-download-btn').onclick = () => { window.location.href = sourceUrl; };
-
-  // Ambient blurred backdrop, reusing the video's own extracted-frame thumbnail — same idea as
-  // the image viewer's backdrop. A missing/failed thumbnail just leaves the backdrop empty,
-  // which is harmless since it's purely decorative.
-  const backdrop = document.getElementById('video-viewer-backdrop');
-  backdrop.style.backgroundImage = `url("${thumbUrl}")`;
-  backdrop.classList.add('active');
 
   player.src = sourceUrl;
   player._playbackHUDAllowed = false;
@@ -7174,9 +7151,6 @@ document.getElementById('close-video-viewer-btn').onclick = () => {
   const player = document.getElementById('video-viewer-player');
   player.pause();
   player.src = '';
-  const backdrop = document.getElementById('video-viewer-backdrop');
-  backdrop.classList.remove('active');
-  backdrop.style.backgroundImage = '';
 };
 
 // Custom video control bar — the native <video controls> UI is replaced entirely because its
