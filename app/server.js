@@ -9,6 +9,7 @@ const archiver = require('archiver');
 const crypto = require('crypto');
 const swaggerUi = require('swagger-ui-express');
 const yaml = require('js-yaml');
+const compression = require('compression');
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -163,14 +164,18 @@ async function ocrPdf(pdfPath) {
   return combined.trim();
 }
 
+// Reads with the async fs API rather than *Sync — this runs on every upload/save (see call
+// sites) and a synchronous read of a large file (a big log/text file, or a many-MB PDF) would
+// block Node's single event loop thread, stalling every other in-flight request on the server
+// until the read finishes, not just this one.
 async function extractTextContent(filePath, mimeType, fileName) {
   try {
     const ext = path.extname(fileName).toLowerCase();
 
     // 1. PDF files
     if (ext === '.pdf' || mimeType === 'application/pdf') {
-      if (!fs.existsSync(filePath)) return null;
-      const dataBuffer = fs.readFileSync(filePath);
+      let dataBuffer;
+      try { dataBuffer = await fs.promises.readFile(filePath); } catch { return null; }
       const uint8Array = new Uint8Array(dataBuffer);
       const parser = new pdfParse.PDFParse(uint8Array);
       const parsed = await parser.getText();
@@ -181,13 +186,23 @@ async function extractTextContent(filePath, mimeType, fileName) {
       return ocrText || text;
     }
 
-    // 2. Plain text / code files
+    // 2. Plain text / code files — only the first 500KB is ever kept (to cap db bloat), so
+    // only that much is actually read off disk instead of loading an arbitrarily large file
+    // (e.g. a multi-hundred-MB log) into memory just to truncate it afterwards.
     const textExts = ['.txt', '.md', '.json', '.js', '.css', '.html', '.py', '.sh', '.xml', '.yaml', '.yml', '.csv', '.ini', '.conf'];
     if (textExts.includes(ext) || (mimeType && mimeType.startsWith('text/'))) {
-      if (!fs.existsSync(filePath)) return null;
-      const text = fs.readFileSync(filePath, 'utf8');
-      // Cap size to 500KB to prevent db bloat
-      return text.substring(0, 500000);
+      const MAX_INDEXED_BYTES = 500000;
+      let handle;
+      try {
+        handle = await fs.promises.open(filePath, 'r');
+        const buffer = Buffer.alloc(MAX_INDEXED_BYTES);
+        const { bytesRead } = await handle.read(buffer, 0, MAX_INDEXED_BYTES, 0);
+        return buffer.toString('utf8', 0, bytesRead);
+      } catch {
+        return null;
+      } finally {
+        await handle?.close();
+      }
     }
 
     // 3. Images — OCR any visible text (screenshots, scanned documents, photos of signs, etc.)
@@ -220,6 +235,21 @@ async function indexExistingFiles() {
   } catch (err) {
     console.error('Error indexing existing files:', err);
   }
+}
+
+// Both the fallback below and the values shipped in docker-compose.yml/.env.example are public
+// (visible to anyone who's looked at this open-source repo), so a deployment that never
+// overrode SESSION_SECRET is signing session cookies with a secret an attacker can just look
+// up — letting them forge a valid session for any userId without ever touching a password.
+const KNOWN_WEAK_SESSION_SECRETS = [
+  'fallback_secret_key_change_me',
+  'change_this_to_a_long_random_string',
+  'a_long_random_and_secure_session_secret_key_12345',
+];
+if (!process.env.SESSION_SECRET || KNOWN_WEAK_SESSION_SECRETS.includes(process.env.SESSION_SECRET)) {
+  console.warn('\n⚠️  WARNUNG: SESSION_SECRET ist nicht gesetzt oder verwendet einen aus dem öffentlichen Repository bekannten Standardwert.');
+  console.warn('   Damit lassen sich Session-Cookies fälschen (voller Account-Zugriff ohne Passwort).');
+  console.warn('   Bitte in .env einen eigenen, zufälligen SESSION_SECRET setzen, z. B. via: openssl rand -hex 32\n');
 }
 
 // Session Configuration using PostgreSQL for session store
@@ -279,6 +309,10 @@ async function isDescendantOf(fileId, ancestorId) {
 }
 
 
+// gzip everything compressible (JSON API responses, app.js/styles.css) — compression's default
+// filter already skips binary formats (zip/images/video/pdf) via their Content-Type, and skips
+// anything that already has a Content-Encoding, so this doesn't double-compress file downloads.
+app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 // index: false — index.html needs SEO tags injected per-request (see renderAppShell below),
@@ -1151,10 +1185,36 @@ app.get('/auth/sso/callback', async (req, res) => {
    ========================================================================== */
 
 // Route to request password reset
+// No limit here meant anyone could trigger unlimited reset e-mails to any account (mail-bombing
+// a victim, or burning through SMTP send quota/reputation) — same in-memory-counter pattern as
+// loginAttempts, keyed by the submitted identifier. Deliberately generous (higher than login's)
+// since a real forgetful user might legitimately retry a few times.
+const resetRequestAttempts = new Map(); // identifier -> { count, resetAt }
+const RESET_REQUEST_MAX_ATTEMPTS = 5;
+const RESET_REQUEST_WINDOW_MS = 15 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of resetRequestAttempts.entries()) {
+    if (entry.resetAt < now) resetRequestAttempts.delete(id);
+  }
+}, 10 * 60 * 1000);
+
 app.post('/api/auth/reset-password-request', async (req, res) => {
   const { username } = req.body;
   if (!username) {
     return res.status(400).json({ error: 'Username is required' });
+  }
+
+  const resetKey = username.trim().toLowerCase();
+  const rateNow = Date.now();
+  const resetAttemptEntry = resetRequestAttempts.get(resetKey);
+  if (resetAttemptEntry && resetAttemptEntry.resetAt >= rateNow && resetAttemptEntry.count >= RESET_REQUEST_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Zu viele Anfragen. Bitte versuche es in ein paar Minuten erneut.' });
+  }
+  if (!resetAttemptEntry || resetAttemptEntry.resetAt < rateNow) {
+    resetRequestAttempts.set(resetKey, { count: 1, resetAt: rateNow + RESET_REQUEST_WINDOW_MS });
+  } else {
+    resetAttemptEntry.count++;
   }
 
   try {
@@ -1434,35 +1494,10 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.s
   const userId = req.session.userId;
 
   try {
-    // Check per-user storage quota
-    const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [userId]);
-    const quotaBytes = parseQuotaBytes(userRes.rows[0].storage_quota).value;
-
-    if (quotaBytes !== null) {
-      const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [userId]);
-      const usedBytes = parseInt(usedRes.rows[0].total || 0);
-      if (usedBytes + req.file.size > quotaBytes) {
-        fs.unlinkSync(req.file.path);
-        return res.status(413).json({ error: 'Speicherplatzlimit überschritten! Bitte lösche Dateien oder wende dich an einen Admin.' });
-      }
-    }
-
-    // Check group (role) storage quota — combined usage of all members of the role
-    const roleName = userRes.rows[0].role;
-    const roleQuotaRes = await pool.query('SELECT storage_quota FROM roles WHERE name = $1', [roleName]);
-    const roleQuotaBytes = parseQuotaBytes(roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota).value;
-    if (roleQuotaBytes !== null) {
-      const groupUsedRes = await pool.query(
-        `SELECT COALESCE(SUM(f.size), 0) as total
-         FROM files f JOIN users u ON f.owner_id = u.id
-         WHERE u.role = $1 AND f.is_folder = false`,
-        [roleName]
-      );
-      const groupUsed = parseInt(groupUsedRes.rows[0].total || 0);
-      if (groupUsed + req.file.size > roleQuotaBytes) {
-        fs.unlinkSync(req.file.path);
-        return res.status(413).json({ error: 'Das gemeinsame Speicherkontingent deiner Gruppe ist erschöpft. Bitte wende dich an einen Admin.' });
-      }
+    const quotaCheck = await checkStorageQuota(userId, req.file.size);
+    if (!quotaCheck.ok) {
+      fs.unlinkSync(req.file.path);
+      return res.status(413).json({ error: quotaCheck.error });
     }
 
     if (parentId !== null) {
@@ -1544,24 +1579,42 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
   }
 });
 
-// Helper for ZIP folder packing
+// Helper for ZIP folder packing — fetches the whole subtree in one recursive-CTE query instead
+// of one round-trip per folder level, then walks the resulting (small, in-memory) tree to add
+// each file at its correct archive path.
 async function addFolderToZip(zip, folderId, currentPath, userId) {
-  const filesRes = await pool.query(
-    'SELECT * FROM files WHERE owner_id = $1 AND parent_id = $2',
-    [userId, folderId]
+  const subtreeRes = await pool.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id, name, parent_id, is_folder, path FROM files WHERE id = $1 AND owner_id = $2
+       UNION ALL
+       SELECT f.id, f.name, f.parent_id, f.is_folder, f.path FROM files f
+       JOIN subtree s ON f.parent_id = s.id
+       WHERE f.owner_id = $2
+     )
+     SELECT id, name, parent_id, is_folder, path FROM subtree WHERE id != $1`,
+    [folderId, userId]
   );
 
-  for (const file of filesRes.rows) {
-    const archivePath = path.join(currentPath, file.name);
-    if (file.is_folder) {
-      await addFolderToZip(zip, file.id, archivePath, userId);
-    } else {
-      const physicalPath = path.join(UPLOADS_DIR, file.path);
-      if (fs.existsSync(physicalPath)) {
-        zip.file(physicalPath, { name: archivePath });
+  const childrenByParent = new Map();
+  for (const file of subtreeRes.rows) {
+    if (!childrenByParent.has(file.parent_id)) childrenByParent.set(file.parent_id, []);
+    childrenByParent.get(file.parent_id).push(file);
+  }
+
+  const addChildren = (parentId, currentArchivePath) => {
+    for (const file of childrenByParent.get(parentId) || []) {
+      const archivePath = path.join(currentArchivePath, file.name);
+      if (file.is_folder) {
+        addChildren(file.id, archivePath);
+      } else {
+        const physicalPath = path.join(UPLOADS_DIR, file.path);
+        if (fs.existsSync(physicalPath)) {
+          zip.file(physicalPath, { name: archivePath });
+        }
       }
     }
-  }
+  };
+  addChildren(folderId, currentPath);
 }
 
 // Download folder as ZIP
@@ -1597,27 +1650,37 @@ app.get('/api/files/download-zip/:id', requireAuth, requirePermission('download'
   }
 });
 
-// Helper: Recursively delete folder files
+// Helper: Recursively delete folder files. Fetches the whole subtree in one recursive-CTE
+// query instead of one round-trip per folder level, then unlinks physical files and removes
+// all the rows in a single batch DELETE.
 async function deleteFolderRecursive(folderId, userId) {
-  const filesRes = await pool.query('SELECT * FROM files WHERE owner_id = $1 AND parent_id = $2', [userId, folderId]);
-  for (const file of filesRes.rows) {
-    if (file.is_folder) {
-      await deleteFolderRecursive(file.id, userId);
-    } else {
-      const filePath = path.join(UPLOADS_DIR, file.path);
-      // fs.existsSync() + fs.unlinkSync() is a TOCTOU race: if the file disappears between
-      // the check and the unlink (e.g. an overlapping delete-multiple call on the same
-      // subtree), unlinkSync throws ENOENT here and aborts the recursion partway through,
-      // leaving some rows deleted and others not. Best-effort delete instead.
-      try {
-        fs.unlinkSync(filePath);
-      } catch (e) {
-        if (e.code !== 'ENOENT') throw e;
-      }
+  const subtreeRes = await pool.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id, path, is_folder FROM files WHERE id = $1 AND owner_id = $2
+       UNION ALL
+       SELECT f.id, f.path, f.is_folder FROM files f
+       JOIN subtree s ON f.parent_id = s.id
+       WHERE f.owner_id = $2
+     )
+     SELECT id, path, is_folder FROM subtree`,
+    [folderId, userId]
+  );
+
+  for (const file of subtreeRes.rows) {
+    if (file.is_folder) continue;
+    const filePath = path.join(UPLOADS_DIR, file.path);
+    // fs.existsSync() + fs.unlinkSync() is a TOCTOU race: if the file disappears between
+    // the check and the unlink (e.g. an overlapping delete-multiple call on the same
+    // subtree), unlinkSync throws ENOENT here and aborts the recursion partway through,
+    // leaving some rows deleted and others not. Best-effort delete instead.
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
     }
   }
-  // Delete folder entry
-  await pool.query('DELETE FROM files WHERE id = $1', [folderId]);
+
+  await pool.query('DELETE FROM files WHERE id = ANY($1)', [subtreeRes.rows.map(f => f.id)]);
 }
 
 // Permanently removes a single trash item (file or folder) — physical file(s) plus DB
@@ -1638,24 +1701,32 @@ async function hardDeleteTrashItem(file, userId) {
   }
 }
 
-// Soft-delete: stamps the file/folder and its entire subtree with the same deleted_at,
-// so it disappears from normal listings/search but can still be restored. The subtree
-// walk mirrors deleteFolderRecursive's traversal, just marking instead of removing.
+// Soft-delete: stamps the file/folder and its entire subtree with the same deleted_at, so it
+// disappears from normal listings/search but can still be restored. One recursive-CTE UPDATE
+// instead of a per-node round-trip walk — same end result, one query instead of N.
 async function moveToTrashRecursive(fileId, userId, deletedAt) {
-  await pool.query('UPDATE files SET deleted_at = $1 WHERE id = $2', [deletedAt, fileId]);
-  const childrenRes = await pool.query('SELECT id FROM files WHERE owner_id = $1 AND parent_id = $2', [userId, fileId]);
-  for (const child of childrenRes.rows) {
-    await moveToTrashRecursive(child.id, userId, deletedAt);
-  }
+  await pool.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id FROM files WHERE id = $1 AND owner_id = $2
+       UNION ALL
+       SELECT f.id FROM files f JOIN subtree s ON f.parent_id = s.id WHERE f.owner_id = $2
+     )
+     UPDATE files SET deleted_at = $3 WHERE id IN (SELECT id FROM subtree)`,
+    [fileId, userId, deletedAt]
+  );
 }
 
 // Restore: clears deleted_at on the item and its whole subtree.
 async function restoreFromTrashRecursive(fileId, userId) {
-  await pool.query('UPDATE files SET deleted_at = NULL WHERE id = $1', [fileId]);
-  const childrenRes = await pool.query('SELECT id FROM files WHERE owner_id = $1 AND parent_id = $2', [userId, fileId]);
-  for (const child of childrenRes.rows) {
-    await restoreFromTrashRecursive(child.id, userId);
-  }
+  await pool.query(
+    `WITH RECURSIVE subtree AS (
+       SELECT id FROM files WHERE id = $1 AND owner_id = $2
+       UNION ALL
+       SELECT f.id FROM files f JOIN subtree s ON f.parent_id = s.id WHERE f.owner_id = $2
+     )
+     UPDATE files SET deleted_at = NULL WHERE id IN (SELECT id FROM subtree)`,
+    [fileId, userId]
+  );
 }
 
 // Delete file/folder
@@ -1881,13 +1952,13 @@ app.post('/api/files/delete-multiple', requireAuth, requirePermission('delete'),
 
   try {
     const deletedAt = new Date();
-    for (const id of ids) {
-      const fileId = parseInt(id);
-      const fileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1', [fileId]);
-      if (fileRes.rows.length === 0) continue;
-      if (fileRes.rows[0].owner_id !== userId) continue;
-
-      await moveToTrashRecursive(fileId, userId, deletedAt);
+    const fileIds = ids.map(id => parseInt(id)).filter(id => !isNaN(id));
+    const ownedRes = await pool.query(
+      'SELECT id FROM files WHERE id = ANY($1) AND owner_id = $2',
+      [fileIds, userId]
+    );
+    for (const row of ownedRes.rows) {
+      await moveToTrashRecursive(row.id, userId, deletedAt);
     }
     res.json({ success: true });
   } catch (err) {
@@ -2992,7 +3063,7 @@ app.get('/api/eurooffice/config/:id', async (req, res) => {
       },
       documentType: docType,
       editorConfig: {
-        callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}?userId=${userId}`,
+        callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}?userId=${userId}&token=${token}`,
         user: {
           id: `${userId}`,
           name: user.username,
@@ -3052,15 +3123,37 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
   const fileId = parseInt(req.params.id);
   const { status, url } = req.body;
 
-  // This endpoint has no user auth — it's called by the internal EuroOffice document server,
-  // not a browser, so a session/token check isn't available here. Without this guard, anyone
-  // on the internet could POST an arbitrary `url` and overwrite any file's content with
-  // whatever that URL serves (SSRF + arbitrary file write). Restricting `url` to the document
-  // server's own internal origin closes that off — we only ever fetch content the document
-  // server itself is serving, never an attacker-supplied host.
+  // This endpoint has no session auth — it's called by the internal EuroOffice document server,
+  // not a browser. Two independent guards stand in for that:
+  //   1. `token` must match the officeTokens entry minted for THIS fileId when the editor was
+  //      opened (config route above) — closes the IDOR (an attacker POSTing an arbitrary fileId
+  //      with no way to know a live token for it).
+  //   2. `url` must resolve to exactly the document server's own host/port/protocol, with no
+  //      embedded userinfo. A plain `startsWith(internalOfficeOrigin)` check looks equivalent
+  //      but isn't: "http://eurooffice:80@attacker.example/x" also starts with
+  //      "http://eurooffice:80" as a string, yet Node's URL/http client treats everything
+  //      before the "@" as userinfo and actually connects to attacker.example — full SSRF
+  //      bypass. Parsing with `new URL()` and comparing fields exactly closes that off.
   const internalOfficeOrigin = process.env.EURO_OFFICE_URL || 'http://eurooffice:80';
+  const tokenData = req.query.token && officeTokens.get(req.query.token);
+  const tokenValid = !!tokenData && tokenData.fileId === fileId && tokenData.expires > Date.now();
 
-  if (status === 2 && url && url.startsWith(internalOfficeOrigin)) {
+  let isInternalUrl = false;
+  if (url) {
+    try {
+      const parsedUrl = new URL(url);
+      const parsedOrigin = new URL(internalOfficeOrigin);
+      const defaultPort = (u) => u.port || (u.protocol === 'https:' ? '443' : '80');
+      isInternalUrl = !parsedUrl.username && !parsedUrl.password
+        && parsedUrl.protocol === parsedOrigin.protocol
+        && parsedUrl.hostname === parsedOrigin.hostname
+        && defaultPort(parsedUrl) === defaultPort(parsedOrigin);
+    } catch {
+      isInternalUrl = false;
+    }
+  }
+
+  if (status === 2 && isInternalUrl && tokenValid) {
     try {
       const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
       if (fileRes.rows.length === 0) {
@@ -3513,9 +3606,28 @@ app.get('/api/public/shares/:slug', async (req, res) => {
 });
 
 // Unlock password protected share
+// Share passwords are typically short/simple (no strength requirement in the UI) and this route
+// had no attempt limit at all, unlike the account-login/2FA equivalents — an unbounded, scriptable
+// brute force against a known slug. Same in-memory-counter pattern as loginAttempts, keyed by slug.
+const shareUnlockAttempts = new Map(); // slug -> { count, resetAt }
+const SHARE_UNLOCK_MAX_ATTEMPTS = 10;
+const SHARE_UNLOCK_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of shareUnlockAttempts.entries()) {
+    if (entry.resetAt < now) shareUnlockAttempts.delete(id);
+  }
+}, 10 * 60 * 1000);
+
 app.post('/api/public/shares/:slug/unlock', async (req, res) => {
   const { slug } = req.params;
   const { password } = req.body;
+
+  const now = Date.now();
+  const attemptEntry = shareUnlockAttempts.get(slug);
+  if (attemptEntry && attemptEntry.resetAt >= now && attemptEntry.count >= SHARE_UNLOCK_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Zu viele Fehlversuche. Bitte versuche es in ein paar Minuten erneut.' });
+  }
 
   try {
     const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
@@ -3530,9 +3642,15 @@ app.post('/api/public/shares/:slug/unlock', async (req, res) => {
 
     const isValid = await bcrypt.compare(password || '', share.password_hash);
     if (!isValid) {
+      if (!attemptEntry || attemptEntry.resetAt < now) {
+        shareUnlockAttempts.set(slug, { count: 1, resetAt: now + SHARE_UNLOCK_ATTEMPT_WINDOW_MS });
+      } else {
+        attemptEntry.count++;
+      }
       return res.status(401).json({ error: 'Falsches Passwort.' });
     }
 
+    shareUnlockAttempts.delete(slug);
     req.session.unlockedShares = req.session.unlockedShares || {};
     req.session.unlockedShares[slug] = true;
 
@@ -3759,7 +3877,7 @@ app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) =
       },
       documentType: docType,
       editorConfig: {
-        callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}`,
+        callbackUrl: `${internalAppUrl}/api/eurooffice/callback/${file.id}?token=${token}`,
         user: {
           id: guestId,
           name: guestName,
@@ -3930,6 +4048,12 @@ app.post('/api/public/shares/:slug/upload', upload.single('file'), fixUploadFile
     if (!isValid) {
       fs.unlinkSync(req.file.path);
       return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    const quotaCheck = await checkStorageQuota(baseFile.owner_id, req.file.size);
+    if (!quotaCheck.ok) {
+      fs.unlinkSync(req.file.path);
+      return res.status(413).json({ error: quotaCheck.error });
     }
 
     const result = await pool.query(
@@ -4192,7 +4316,10 @@ app.post('/api/settings/avatar', requireAuth, upload.single('avatar'), async (re
 });
 
 // Get User Avatar
-app.get('/api/users/:id/avatar', async (req, res) => {
+// No legitimate caller ever requests anyone's avatar but their own (nav bar / settings preview
+// both use currentUser.id) — requireAuth just closes off unauthenticated enumeration/harvesting
+// of every user's profile photo via the sequential numeric id, without affecting real usage.
+app.get('/api/users/:id/avatar', requireAuth, async (req, res) => {
   const userId = parseInt(req.params.id);
 
   try {
@@ -4357,11 +4484,20 @@ app.post('/api/settings/profile', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Benutzername und E-Mail sind erforderlich.' });
   }
 
+  // Unlike /api/auth/set-username, this route accepted any username unvalidated — only
+  // uniqueness was checked. Applying the same character whitelist/length limit here closes that
+  // gap consistently (frontend already escapes usernames wherever it renders one today, but an
+  // unvalidated value is one un-escaped render call away from becoming a stored-XSS vector).
+  const cleanUsername = username.trim().replace(/[^a-zA-Z0-9-_]/g, '');
+  if (cleanUsername.length < 3 || cleanUsername.length > 30) {
+    return res.status(400).json({ error: 'Der Name muss 3 bis 30 Zeichen lang sein und darf nur Buchstaben, Zahlen, Bindestriche und Unterstriche enthalten.' });
+  }
+
   try {
     // Check conflicts
     const conflictRes = await pool.query(
       'SELECT id FROM users WHERE (username = $1 OR email = $2) AND id != $3',
-      [username, email, userId]
+      [cleanUsername, email, userId]
     );
 
     if (conflictRes.rows.length > 0) {
@@ -4369,14 +4505,14 @@ app.post('/api/settings/profile', requireAuth, async (req, res) => {
     }
 
     const result = await pool.query(
-      `UPDATE users 
+      `UPDATE users
        SET first_name = $1, last_name = $2, username = $3, email = $4, display_real_name = $5
        WHERE id = $6 RETURNING id, username, role, email, first_name, last_name, display_real_name`,
-      [first_name || null, last_name || null, username, email, !!display_real_name, userId]
+      [first_name || null, last_name || null, cleanUsername, email, !!display_real_name, userId]
     );
 
     // Update session cache
-    req.session.username = username;
+    req.session.username = cleanUsername;
 
     res.json({ success: true, user: result.rows[0] });
   } catch (err) {
@@ -4769,6 +4905,42 @@ function parseQuotaBytes(raw) {
   const n = parseInt(raw);
   if (!Number.isFinite(n) || n < 0) return { ok: false };
   return { ok: true, value: n };
+}
+
+// Shared by /api/files/upload and the public writable-share upload route — the latter used to
+// skip this check entirely, letting anyone with a writable share link fill up the share owner's
+// storage (and the whole disk, up to MAX_UPLOAD_SIZE_BYTES per file) regardless of their
+// configured quota.
+async function checkStorageQuota(ownerId, additionalBytes) {
+  const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [ownerId]);
+  if (userRes.rows.length === 0) return { ok: true };
+
+  const quotaBytes = parseQuotaBytes(userRes.rows[0].storage_quota).value;
+  if (quotaBytes !== null) {
+    const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [ownerId]);
+    const usedBytes = parseInt(usedRes.rows[0].total || 0);
+    if (usedBytes + additionalBytes > quotaBytes) {
+      return { ok: false, error: 'Speicherplatzlimit überschritten! Bitte lösche Dateien oder wende dich an einen Admin.' };
+    }
+  }
+
+  const roleName = userRes.rows[0].role;
+  const roleQuotaRes = await pool.query('SELECT storage_quota FROM roles WHERE name = $1', [roleName]);
+  const roleQuotaBytes = parseQuotaBytes(roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota).value;
+  if (roleQuotaBytes !== null) {
+    const groupUsedRes = await pool.query(
+      `SELECT COALESCE(SUM(f.size), 0) as total
+       FROM files f JOIN users u ON f.owner_id = u.id
+       WHERE u.role = $1 AND f.is_folder = false`,
+      [roleName]
+    );
+    const groupUsed = parseInt(groupUsedRes.rows[0].total || 0);
+    if (groupUsed + additionalBytes > roleQuotaBytes) {
+      return { ok: false, error: 'Das gemeinsame Speicherkontingent deiner Gruppe ist erschöpft. Bitte wende dich an einen Admin.' };
+    }
+  }
+
+  return { ok: true };
 }
 
 // Admin Role-Management: list roles with member counts & combined storage usage

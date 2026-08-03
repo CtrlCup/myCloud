@@ -24,7 +24,6 @@ let gridSizeIndex = parseInt(localStorage.getItem('gridSizeIndex') || '2');
 let listSizeIndex = parseInt(localStorage.getItem('listSizeIndex') || '2');
 let isEmailConfigured = false;
 let clickTimeout = null;
-let clickTimeoutFileId = null;
 
 let clipboardFileIds = [];
 let clipboardAction = null; // 'copy' or 'cut'
@@ -48,7 +47,6 @@ const PERM_LABELS = {
 
 // Real-time collaboration state
 let collabSocket = null;
-let collabUserColor = null;
 let collabUserDecorations = {}; // userId -> decoration IDs
 let isApplyingRemoteEdit = false;
 let autoSaveDebounceTimeout = null;
@@ -128,6 +126,11 @@ function showInputPrompt(title, label, defaultValue = '', placeholder = '') {
       form.onsubmit = null;
       cancelBtn.onclick = null;
       closeBtn.onclick = null;
+      overlay.onclick = null;
+      document.removeEventListener('keydown', onKeydown);
+    };
+    const onKeydown = (e) => {
+      if (e.key === 'Escape') { cleanup(); resolve(null); }
     };
 
     form.onsubmit = (e) => {
@@ -146,6 +149,9 @@ function showInputPrompt(title, label, defaultValue = '', placeholder = '') {
       cleanup();
       resolve(null);
     };
+
+    overlay.onclick = (e) => { if (e.target === overlay) { cleanup(); resolve(null); } };
+    document.addEventListener('keydown', onKeydown);
   });
 }
 
@@ -1729,11 +1735,9 @@ function renderFiles(files) {
         }
       };
 
-      clickTimeoutFileId = file.id;
       clickTimeout = setTimeout(() => {
         runSelection();
         clickTimeout = null;
-        clickTimeoutFileId = null;
       }, 200);
     };
 
@@ -1878,8 +1882,11 @@ function renderFiles(files) {
 
     grid.appendChild(item);
   });
-  
-  lucide.createIcons();
+
+  // Scoped to the grid instead of the default full-document scan — this runs on every
+  // navigation/refresh, and a full-page icon rescan gets wasteful once the rest of the UI
+  // (sidebar, toolbar, modals) has a non-trivial number of its own [data-lucide] icons too.
+  lucide.createIcons({ el: grid });
 }
 
 // Multi Selection UI Updates
@@ -2423,7 +2430,7 @@ function updateUploadUI() {
       <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; gap: 0.5rem;">
         <span style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 200px;" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
         <div style="display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0;">
-          <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 500;">${statusText}</span>
+          <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 500;">${escapeHtml(statusText)}</span>
           <button class="delete-upload-item-btn" data-index="${index}" style="border: none; background: transparent; cursor: pointer; padding: 0.1rem; display: flex; align-items: center; justify-content: center; opacity: 0.6; transition: opacity 0.2s;" title="Aus Liste entfernen">
             <i data-lucide="x" style="width: 14px; height: 14px; color: var(--color-text);"></i>
           </button>
@@ -3778,8 +3785,8 @@ async function loadApiKeys() {
       const lastUsedText = key.last_used_at ? new Date(key.last_used_at).toLocaleDateString('de-DE') : 'Nie';
 
       row.innerHTML = `
-        <td style="font-weight: 500;">${key.name}</td>
-        <td><code style="font-size: 0.8rem; color: var(--color-text-muted);">${key.key_prefix}…</code></td>
+        <td style="font-weight: 500;">${escapeHtml(key.name)}</td>
+        <td><code style="font-size: 0.8rem; color: var(--color-text-muted);">${escapeHtml(key.key_prefix)}…</code></td>
         <td>${createdText}</td>
         <td>${lastUsedText}</td>
         <td>
@@ -4004,7 +4011,7 @@ function renderPasskeyList(passkeys) {
 
     row.innerHTML = `
       <td>${date}</td>
-      <td style="font-weight: 500;">${pk.name || 'Passkey'} <span style="font-family: monospace; font-size: 0.8rem; color: var(--color-text-muted); font-weight: normal; margin-left: 0.5rem;">(${pk.id.slice(0, 10)}...)</span></td>
+      <td style="font-weight: 500;">${escapeHtml(pk.name || 'Passkey')} <span style="font-family: monospace; font-size: 0.8rem; color: var(--color-text-muted); font-weight: normal; margin-left: 0.5rem;">(${escapeHtml(pk.id.slice(0, 10))}...)</span></td>
       <td>
         <button class="btn btn-action-delete-passkey" style="color: #ff5555; border-color: rgba(255,0,0,0.2); padding: 4px 10px;">
           Löschen
@@ -4623,7 +4630,7 @@ async function loadAdminRoles() {
     if (newRoleSelect) {
       const prev = newRoleSelect.value;
       newRoleSelect.innerHTML = adminRolesCache
-        .map(r => `<option value="${r.name}">${r.name}</option>`).join('');
+        .map(r => `<option value="${escapeHtml(r.name)}">${escapeHtml(r.name)}</option>`).join('');
       if (adminRolesCache.some(r => r.name === prev)) newRoleSelect.value = prev;
       else { const def = adminRolesCache.find(r => r.is_default); if (def) newRoleSelect.value = def.name; }
       if (!newRoleSelect._styledAsDropdown) {
@@ -5415,9 +5422,9 @@ async function loadBranding() {
     const logoTexts = document.querySelectorAll('.logo');
     logoTexts.forEach(logo => {
       const name = data.name || 'myCloud';
-      const prefix = name.length > 2 ? name.slice(0, 2) : name;
-      const suffix = name.length > 2 ? name.slice(2) : '';
-      
+      const prefix = escapeHtml(name.length > 2 ? name.slice(0, 2) : name);
+      const suffix = escapeHtml(name.length > 2 ? name.slice(2) : '');
+
       let iconHTML = `<i data-lucide="cloud"></i>`;
       if (data.hasIcon) {
         iconHTML = `<img src="/api/public/branding/icon?t=${Date.now()}" style="width: 32px; height: 32px; object-fit: contain; border-radius: 4px; margin-right: 0.5rem;" alt="Logo">`;
@@ -6289,7 +6296,6 @@ function initCollabSocket(fileId, username, userId, isPublic = false, slug = '',
       const data = JSON.parse(event.data);
 
       if (data.type === 'init') {
-        collabUserColor = data.color;
         if (data.userId) myCollabUserId = data.userId;
         updateCollabUsersListUI(data.users);
       } else if (data.type === 'user_joined') {

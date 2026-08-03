@@ -11,8 +11,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <!-- Lucide Icons -->
-  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Lucide Icons — pinned + SRI, see index.html for the policy/regeneration note. -->
+  <script src="https://unpkg.com/lucide@1.28.0" integrity="sha384-VrnzGPiSyQxm3mI2VhlssyR85zugSHtxMkgO42qV3wUAbNk1oRdZkCWjXKOhuVu6" crossorigin="anonymous"></script>
   <!-- Custom Stylesheet -->
   <link rel="stylesheet" href="/styles.css">
   <!-- PDF.js viewer component styles (page/text-layer rendering) -->
@@ -584,7 +584,7 @@
       menu.innerHTML = items.map(it => `
         <button type="button" class="btn-menu-item" data-action="${it.action}" ${it.danger ? 'style="color:#ff5555;"' : ''}>
           <i data-lucide="${it.icon}" style="width:15px;height:15px;"></i>
-          <span>${it.label}</span>
+          <span>${escapeHtml(it.label)}</span>
         </button>
       `).join('');
       document.body.appendChild(menu);
@@ -1313,9 +1313,9 @@
 
         grid.appendChild(item);
       });
-      
-      // Update newly appended Lucide icons
-      lucide.createIcons();
+
+      // Scoped to the grid instead of the default full-document scan.
+      lucide.createIcons({ el: grid });
     }
 
     // Uploads one file into a specific target folder (falls back to the currently browsed
@@ -1542,8 +1542,8 @@
         const logo = document.querySelector('.logo');
         if (logo) {
           const name = data.name || 'myCloud';
-          const prefix = name.length > 2 ? name.slice(0, 2) : name;
-          const suffix = name.length > 2 ? name.slice(2) : '';
+          const prefix = escapeHtml(name.length > 2 ? name.slice(0, 2) : name);
+          const suffix = escapeHtml(name.length > 2 ? name.slice(2) : '');
           
           let iconHTML = `<i data-lucide="cloud"></i>`;
           if (data.hasIcon) {
@@ -1650,7 +1650,6 @@
 
     // Real-time collaboration state
     let collabSocket = null;
-    let collabUserColor = null;
     let collabUserDecorations = {}; // userId -> decoration IDs
     let isApplyingRemoteEdit = false;
     let myCollabUserId = null;        // identity the server assigned to us
@@ -1882,7 +1881,6 @@
           const data = JSON.parse(event.data);
 
           if (data.type === 'init') {
-            collabUserColor = data.color;
             if (data.userId) myCollabUserId = data.userId;
             updateCollabUsersListUI(data.users);
           } else if (data.type === 'user_joined') {

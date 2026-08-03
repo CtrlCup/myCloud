@@ -190,6 +190,14 @@ async function initDb() {
     // trash_retention_days setting.
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP');
     await client.query('CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at) WHERE deleted_at IS NOT NULL');
+    // The listing query filters owner_id + parent_id + deleted_at IS NULL together on every
+    // folder navigation; the single-column indexes above don't serve that combination directly.
+    await client.query('CREATE INDEX IF NOT EXISTS idx_files_owner_parent ON files(owner_id, parent_id) WHERE deleted_at IS NULL');
+    // pg_trgm (enabled above) only actually speeds up ILIKE/word_similarity search once a
+    // matching trigram index exists — without one, both fall back to a sequential scan.
+    // Scoped to `name` only (not the up-to-500KB `content` column, which would make the index
+    // itself disproportionately large for the benefit) — content search stays a sequential scan.
+    await client.query('CREATE INDEX IF NOT EXISTS idx_files_name_trgm ON files USING GIN (name gin_trgm_ops)');
 
     // Lean autosave version history for the code editor — a rolling checkpoint per file,
     // throttled server-side (see maybeSaveFileVersion in server.js) so continuous typing

@@ -9,12 +9,19 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <!-- Lucide Icons -->
-  <script src="https://unpkg.com/lucide@latest"></script>
-  <!-- QRCode Client-side Generator -->
-  <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
-  <!-- SimpleWebAuthn Browser helper -->
-  <script src="https://unpkg.com/@simplewebauthn/browser@9/dist/bundle/index.umd.min.js"></script>
+  <!-- Lucide Icons — pinned + SRI so a compromised/MITM'd CDN response can't run arbitrary JS
+       here; bump the version and regenerate the hash together when upgrading (unpkg.com/lucide,
+       sha384 of the fetched file). -->
+  <script src="https://unpkg.com/lucide@1.28.0" integrity="sha384-VrnzGPiSyQxm3mI2VhlssyR85zugSHtxMkgO42qV3wUAbNk1oRdZkCWjXKOhuVu6" crossorigin="anonymous"></script>
+  <!-- QRCode Client-side Generator — pinned to 1.5.1, the last published version whose tarball
+       still contains build/qrcode.min.js (newer versions only ship lib/browser.min.js, a CJS
+       file that needs a bundler and can't be used as a bare <script> tag). Deliberately WITHOUT
+       an integrity hash: this path is jsDelivr's on-the-fly minification proxy, and jsDelivr's
+       own docs explicitly warn against SRI on dynamically-generated files since the byte output
+       can change between requests/cache invalidations. -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+  <!-- SimpleWebAuthn Browser helper — pinned + SRI, see lucide comment above for the policy. -->
+  <script src="https://unpkg.com/@simplewebauthn/browser@9.0.1/dist/bundle/index.umd.min.js" integrity="sha384-9+Bm5pUMP2324xMjhRahdomA9HaTxP6JcMhbl3tUAcV2+Jiohq8/T+dGj/rx/MaM" crossorigin="anonymous"></script>
   <!-- Custom Stylesheet -->
   <link rel="stylesheet" href="/styles.css">
   <!-- PDF.js viewer component styles (page/text-layer rendering) -->
