@@ -5839,6 +5839,9 @@ function collapseDashboardSearch(force = false) {
 
 // Keyboard ESC listener & Modal overlay backdrop click listener & Admin toggle auto-save & Desktop Explorer Hotkeys
 window.addEventListener('keydown', (e) => {
+  // Some synthetic keydown events (e.g. dispatched by password managers or automation tools) omit e.key
+  if (typeof e.key !== 'string') return;
+
   // Check if user is typing in an input, textarea, select, or Monaco/Office editor
   const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
   const isInput = activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select' || document.activeElement.closest('.monaco-editor') || document.activeElement.closest('#office-editor-overlay');
