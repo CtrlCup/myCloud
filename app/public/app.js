@@ -5464,7 +5464,11 @@ function renderAppFooter(data) {
     document.body.appendChild(footer);
   }
   const year = new Date().getFullYear();
-  const links = (data.footerLinks || []).map(link => `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`).join('');
+  // Admin-configured, but escapeHtml() alone only stops attribute breakout, not a
+  // javascript:-scheme href — whitelist to http(s) so a compromised/malicious admin account
+  // can't turn a footer link into a click-to-execute payload for every visitor.
+  const isSafeFooterUrl = (url) => /^https?:\/\//i.test(url || '');
+  const links = (data.footerLinks || []).filter(link => isSafeFooterUrl(link.url)).map(link => `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`).join('');
   footer.innerHTML = `
     ${links}
     <span>&copy; ${year} ${escapeHtml(data.name || 'myCloud')}</span>
@@ -6233,7 +6237,11 @@ function addCollabUserStyles(userId, color, username) {
     styleEl.id = styleId;
     document.head.appendChild(styleEl);
   }
-  styleEl.innerHTML = `
+  // textContent, not innerHTML — this is a <style> element, and innerHTML runs the browser's
+  // HTML parser over the string first (which scans for "</style>" regardless of CSS syntax);
+  // escapeCssString() only makes `username` valid *inside* a CSS string, it doesn't stop a
+  // "</style><script>..." payload from closing the tag before any of that CSS is even parsed.
+  styleEl.textContent = `
     .collab-selection-${safeId} {
       background-color: ${color}33 !important;
     }

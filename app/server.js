@@ -2431,6 +2431,18 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
       return res.status(400).json({ error: 'File not found or is a folder' });
     }
 
+    // Only the net size increase counts against quota — usedBytes below still includes this
+    // file's OLD size (its row hasn't been updated yet), so checking the full new size on top
+    // of that would double-count the very file being replaced.
+    const netAdditionalBytes = req.file.size - (file.size || 0);
+    if (netAdditionalBytes > 0) {
+      const quotaCheck = await checkStorageQuota(userId, netAdditionalBytes);
+      if (!quotaCheck.ok) {
+        fs.unlinkSync(req.file.path);
+        return res.status(413).json({ error: quotaCheck.error });
+      }
+    }
+
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
     const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
 
@@ -2983,6 +2995,11 @@ app.get('/api/shares', requireAuth, async (req, res) => {
 
 // EuroOffice Temporary Token Store
 const officeTokens = new Map();
+// The callback route (below) now requires this same token, not just the download route — so
+// its lifetime has to cover a whole editing session, not just the initial fetch. It's refreshed
+// (see the download and callback handlers) on every use, so an actively-edited document never
+// times out; only a genuinely abandoned session ages out and gets swept below.
+const OFFICE_TOKEN_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 // Tokens are only ever pruned lazily when reused past expiry, never on the (common) success
 // path — without this sweep the map grows without bound as more documents get opened.
@@ -3047,7 +3064,7 @@ app.get('/api/eurooffice/config/:id', async (req, res) => {
     officeTokens.set(token, {
       fileId: file.id,
       userId,
-      expires: Date.now() + 10 * 60 * 1000 // 10 minutes
+      expires: Date.now() + OFFICE_TOKEN_TTL_MS
     });
 
     const docType = getOfficeDocType(ext);
@@ -3098,6 +3115,10 @@ app.get('/api/eurooffice/download/:id', async (req, res) => {
     officeTokens.delete(token);
     return res.status(403).json({ error: 'Forbidden: Expired token' });
   }
+  // Sliding renewal — the document server re-fetches the doc periodically during a live editing
+  // session, so as long as that's happening the token keeps getting pushed back out; only a
+  // session with no activity for the full TTL actually expires.
+  tokenData.expires = Date.now() + OFFICE_TOKEN_TTL_MS;
 
   try {
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
@@ -3154,6 +3175,7 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
   }
 
   if (status === 2 && isInternalUrl && tokenValid) {
+    tokenData.expires = Date.now() + OFFICE_TOKEN_TTL_MS; // sliding renewal, see download handler
     try {
       const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
       if (fileRes.rows.length === 0) {
@@ -3549,17 +3571,21 @@ app.get('/api/public/shares/:slug', async (req, res) => {
       // those are meant to keep working as plain direct-download links).
       files = [];
     } else if (baseFile.is_folder) {
+      // Scoped to the share owner (like the equivalent authenticated listing/search queries) —
+      // without owner_id here, this recursively aggregated over every file of every user on the
+      // whole server on every single (unauthenticated, unrate-limited) request to this route.
       const filesRes = await pool.query(
         `WITH RECURSIVE folder_sizes AS (
            SELECT id, size, parent_id
            FROM files
-           WHERE is_folder = false AND deleted_at IS NULL
+           WHERE is_folder = false AND owner_id = $2 AND deleted_at IS NULL
 
            UNION ALL
 
            SELECT f.id, fs.size, f.parent_id
            FROM files f
            JOIN folder_sizes fs ON f.id = fs.parent_id
+           WHERE f.owner_id = $2
          )
          SELECT f.id, f.name, COALESCE(f.size, sz.total_size, 0) as size, f.is_folder, f.mime_type, f.created_at, f.parent_id
          FROM files f
@@ -3570,7 +3596,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
          ) sz ON f.id = sz.id
          WHERE f.parent_id = $1 AND f.deleted_at IS NULL
          ORDER BY f.is_folder DESC, f.name ASC`,
-        [currentFolderId]
+        [currentFolderId, baseFile.owner_id]
       );
       files = filesRes.rows;
     } else {
@@ -3818,6 +3844,18 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', upload.single('file')
       return res.status(400).json({ error: 'Folders do not have binary content' });
     }
 
+    // Charged against the file OWNER's quota (there's no uploader account on a public share) —
+    // only the net size increase counts, since usedBytes below still includes this file's OLD
+    // size until the UPDATE below runs.
+    const netAdditionalBytes = req.file.size - (file.size || 0);
+    if (netAdditionalBytes > 0) {
+      const quotaCheck = await checkStorageQuota(file.owner_id, netAdditionalBytes);
+      if (!quotaCheck.ok) {
+        fs.unlinkSync(req.file.path);
+        return res.status(413).json({ error: quotaCheck.error });
+      }
+    }
+
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
     const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
 
@@ -3861,7 +3899,7 @@ app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) =
     officeTokens.set(token, {
       fileId: file.id,
       userId: null,
-      expires: Date.now() + 10 * 60 * 1000
+      expires: Date.now() + OFFICE_TOKEN_TTL_MS
     });
 
     const docType = getOfficeDocType(ext);
@@ -5492,7 +5530,15 @@ function initWebSocket(server) {
       const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
       const fileId = parseInt(url.searchParams.get('fileId'));
       const isGuest = url.searchParams.get('guest') === '1';
-      let username = url.searchParams.get('username') || '';
+      // For a logged-in caller, the session's own username is authoritative — never trust the
+      // query param, which anyone can set to arbitrary text (this is what gets broadcast to
+      // every other collaborator and rendered into a <style> block client-side; a raw client
+      // value here was a stored-XSS vector against every co-editor). Only an anonymous guest
+      // (no session) gets to pick a display name at all, and even then it's whitelisted to a
+      // safe charset — same policy as the persistent username field in /api/auth/set-username.
+      let username = request.session.userId
+        ? (request.session.username || '')
+        : (url.searchParams.get('username') || '').trim().replace(/[^\p{L}\p{N} _-]/gu, '').slice(0, 30);
       const userId = url.searchParams.get('userId') || `guest_${Math.random().toString(36).substring(2, 11)}`;
 
       if (!fileId) {
