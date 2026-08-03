@@ -1666,11 +1666,12 @@
         </div>
       </div>
       <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden; position: relative;">
+        <div id="image-viewer-backdrop" class="viewer-blur-backdrop"></div>
         <button class="viewer-nav-btn viewer-nav-btn-prev" id="image-viewer-prev-btn" title="Vorheriges Medium" style="display: none;">
           <i data-lucide="chevron-left"></i>
         </button>
         <div id="image-viewer-container" style="width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; background: transparent; overflow: hidden; padding: 0.5rem;">
-          <img id="image-viewer-img" style="max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: none;">
+          <img id="image-viewer-img" class="viewer-checkerboard" style="max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: none;">
           <div id="image-viewer-loading" style="color: var(--color-accent); font-weight: bold; display: flex; flex-direction: column; align-items: center; gap: 1rem;">
             <div class="spinner" style="width: 40px; height: 40px; border: 4px solid rgba(0,210,255,0.1); border-left-color: var(--color-accent); border-radius: 50%; animation: spin 1s linear infinite;"></div>
             <span>Lade Bild...</span>
@@ -1706,10 +1707,11 @@
         </div>
       </div>
       <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 0.75rem; overflow: hidden; position: relative;" id="video-viewer-stage">
+        <div id="video-viewer-backdrop" class="viewer-blur-backdrop"></div>
         <button class="viewer-nav-btn viewer-nav-btn-prev" id="video-viewer-prev-btn" title="Vorheriges Medium" style="display: none;">
           <i data-lucide="chevron-left"></i>
         </button>
-        <video id="video-viewer-player" autoplay style="width: 100%; height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
+        <video id="video-viewer-player" autoplay style="width: 100%; height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: transparent;"></video>
         <button class="viewer-nav-btn viewer-nav-btn-next" id="video-viewer-next-btn" title="Nächstes Medium" style="display: none;">
           <i data-lucide="chevron-right"></i>
         </button>
@@ -2006,6 +2008,6 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.32"></script>
+  <script src="/app.js?v=1.1.33"></script>
 </body>
 </html>

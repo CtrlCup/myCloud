@@ -216,11 +216,12 @@
         </div>
       </div>
       <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden; position: relative;">
+        <div id="image-viewer-backdrop" class="viewer-blur-backdrop"></div>
         <button class="viewer-nav-btn viewer-nav-btn-prev" id="image-viewer-prev-btn" title="Vorheriges Medium" style="display: none;">
           <i data-lucide="chevron-left"></i>
         </button>
         <div id="image-viewer-container" style="width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; background: transparent; overflow: hidden; padding: 0.5rem;">
-          <img id="image-viewer-img" style="max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: none;">
+          <img id="image-viewer-img" class="viewer-checkerboard" style="max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); display: none;">
           <div id="image-viewer-loading" style="color: var(--color-accent); font-weight: bold; display: flex; flex-direction: column; align-items: center; gap: 1rem;">
             <div class="spinner" style="width: 40px; height: 40px; border: 4px solid rgba(0,210,255,0.1); border-left-color: var(--color-accent); border-radius: 50%; animation: spin 1s linear infinite;"></div>
             <span>Lade Bild...</span>
@@ -254,10 +255,11 @@
         </div>
       </div>
       <div style="flex: 1; display: flex; justify-content: center; align-items: center; padding: 2rem; overflow: hidden; position: relative;" id="video-viewer-stage">
+        <div id="video-viewer-backdrop" class="viewer-blur-backdrop"></div>
         <button class="viewer-nav-btn viewer-nav-btn-prev" id="video-viewer-prev-btn" title="Vorheriges Medium" style="display: none;">
           <i data-lucide="chevron-left"></i>
         </button>
-        <video id="video-viewer-player" autoplay style="max-width: 90%; max-height: 90%; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: #000;"></video>
+        <video id="video-viewer-player" autoplay style="max-width: 90%; max-height: 90%; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); outline: none; background: transparent;"></video>
         <button class="viewer-nav-btn viewer-nav-btn-next" id="video-viewer-next-btn" title="Nächstes Medium" style="display: none;">
           <i data-lucide="chevron-right"></i>
         </button>
@@ -2263,6 +2265,7 @@
       const loadToken = ++imageViewerLoadToken;
       const overlay = document.getElementById('image-viewer-overlay');
       const img = document.getElementById('image-viewer-img');
+      const backdrop = document.getElementById('image-viewer-backdrop');
       const loading = document.getElementById('image-viewer-loading');
       const title = document.getElementById('image-viewer-title');
 
@@ -2324,12 +2327,18 @@
           img.src = downloadUrl;
         }
 
+        // Ambient blurred backdrop — see app.js's identical implementation for the rationale.
+        backdrop.style.backgroundImage = `url("${img.src}")`;
+        backdrop.classList.remove('active');
+
         img.onload = () => {
           loading.style.display = 'none';
           img.style.display = 'block';
+          backdrop.classList.add('active');
         };
         img.onerror = () => {
           loading.style.display = 'none';
+          backdrop.classList.remove('active');
           title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
           lucide.createIcons();
         };
@@ -2337,6 +2346,7 @@
         console.error('Image viewer error:', err);
         if (loadToken !== imageViewerLoadToken) return; // user navigated away meanwhile
         loading.style.display = 'none';
+        backdrop.classList.remove('active');
         title.innerHTML = `<i data-lucide="alert-circle" style="color: #ff5555;"></i> Fehler beim Laden des Bildes`;
         lucide.createIcons();
       }
@@ -2346,6 +2356,9 @@
       document.getElementById('image-viewer-overlay').classList.remove('active');
       const img = document.getElementById('image-viewer-img');
       img.src = '';
+      const backdrop = document.getElementById('image-viewer-backdrop');
+      backdrop.classList.remove('active');
+      backdrop.style.backgroundImage = '';
       if (currentImageObjectUrl) {
         URL.revokeObjectURL(currentImageObjectUrl);
         currentImageObjectUrl = null;
@@ -2371,6 +2384,9 @@
       const sourceUrl = isPublic
         ? `/api/public/shares/${slug}/download/${fileId}`
         : `/api/files/download/${fileId}`;
+      const thumbUrl = isPublic
+        ? `/api/public/shares/${slug}/thumbnail/${fileId}`
+        : `/api/files/thumbnail/${fileId}`;
 
       // Same reasoning as the image viewer: hide the button rather than let a can_download=false
       // share hit the 403 JSON response as a full-page navigation.
@@ -2378,6 +2394,11 @@
       const videoCanDownload = !isPublic || (shareConfig && shareConfig.can_download);
       videoDownloadBtn.style.display = videoCanDownload ? '' : 'none';
       videoDownloadBtn.onclick = () => guardedDownload(sourceUrl);
+
+      // Ambient blurred backdrop, reusing the video's own extracted-frame thumbnail.
+      const backdrop = document.getElementById('video-viewer-backdrop');
+      backdrop.style.backgroundImage = `url("${thumbUrl}")`;
+      backdrop.classList.add('active');
 
       player.src = sourceUrl;
       player._playbackHUDAllowed = false;
@@ -2390,6 +2411,9 @@
       const player = document.getElementById('video-viewer-player');
       player.pause();
       player.src = '';
+      const backdrop = document.getElementById('video-viewer-backdrop');
+      backdrop.classList.remove('active');
+      backdrop.style.backgroundImage = '';
     };
 
     // Custom video control bar — see app.js's identical implementation for the rationale

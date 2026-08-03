@@ -242,6 +242,39 @@ body {
   right: 1.25rem;
 }
 
+/* ─── Image/Video viewer ambient backdrop + transparency grid ───
+   The backdrop shows a heavily blurred, darkened copy of the media itself behind it, so the
+   stage isn't a flat void — the sharp foreground media's real edges/size stay clearly readable
+   against it. The checkerboard sits directly on the <img> element itself (as its CSS
+   background, painted only within the image's own box) so transparent PNG/SVG pixels read
+   against the grid instead of just vanishing into the backdrop. */
+.viewer-blur-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(50px) saturate(1.3) brightness(0.55);
+  transform: scale(1.15);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.viewer-blur-backdrop.active {
+  opacity: 1;
+}
+.viewer-checkerboard {
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.09) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.09) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.09) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.09) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+  background-color: rgba(0, 0, 0, 0.2);
+}
+
 /* ─── Video HUD Overlay ─── */
 .video-hud {
   position: absolute;

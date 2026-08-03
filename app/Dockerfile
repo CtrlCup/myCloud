@@ -1,6 +1,6 @@
 FROM node:20-alpine
 
-RUN apk add --no-cache ffmpeg exiftool tesseract-ocr tesseract-ocr-data-deu tesseract-ocr-data-eng poppler-utils
+RUN apk add --no-cache ffmpeg exiftool tesseract-ocr tesseract-ocr-data-deu tesseract-ocr-data-eng poppler-utils rsvg-convert
 
 WORKDIR /usr/src/app
 

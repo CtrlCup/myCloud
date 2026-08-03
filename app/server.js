@@ -2605,20 +2605,34 @@ function getExifSummary(physicalFilename) {
 function generateThumbnail(physicalFilename, extension) {
   return new Promise((resolve) => {
     const inputPath = path.join(UPLOADS_DIR, physicalFilename);
-    const outputPath = path.join(THUMBNAILS_DIR, physicalFilename + '.jpg');
+    const lowerExt = extension.toLowerCase();
+    // SVG thumbnails are rasterized to PNG (keeps transparency) — the vector source is never
+    // served as a thumbnail itself, only this pre-rendered raster derivative, so no SVG markup
+    // (and no <script>/external reference it might contain) ever reaches the client here.
+    const outputPath = path.join(THUMBNAILS_DIR, physicalFilename + (lowerExt === 'svg' ? '.png' : '.jpg'));
 
     if (fs.existsSync(outputPath)) {
       return resolve(outputPath);
     }
 
-    const lowerExt = extension.toLowerCase();
-    
     // Check if it's a video
     const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
     // Check if it's a RAW image
     const rawExts = ['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
 
-    if (videoExts.includes(lowerExt)) {
+    if (lowerExt === 'svg') {
+      // rsvg-convert never fetches remote http(s) references, unlike e.g. ImageMagick's SVG
+      // delegate — that's precisely why it's the standard safe choice for untrusted SVG input.
+      const { exec } = require('child_process');
+      const cmd = `rsvg-convert -a -w 512 -h 512 -o "${outputPath}" "${inputPath}"`;
+      exec(cmd, (err) => {
+        if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+          return resolve(outputPath);
+        }
+        console.error(`rsvg-convert failed for ${physicalFilename}:`, err);
+        resolve(null);
+      });
+    } else if (videoExts.includes(lowerExt)) {
       // Generate video thumbnail using ffmpeg
       const { exec } = require('child_process');
       const cmd = `ffmpeg -y -i "${inputPath}" -ss 00:00:01 -vframes 1 -f image2 -vcodec mjpeg "${outputPath}"`;
