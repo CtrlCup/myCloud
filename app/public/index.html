@@ -1738,51 +1738,97 @@
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
       <div class="pdf-toolbar">
         <div class="pdf-toolbar-row">
-          <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600; min-width: 0;" id="pdf-viewer-title">
+          <div class="pdf-toolbar-left" id="pdf-viewer-title">
             <i data-lucide="file-text"></i>
-            <span id="pdf-viewer-filename" title="Doppelklick zum Umbenennen" style="cursor: text; border-bottom: 1px dashed transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px;">PDF-Vorschau</span>
+            <span id="pdf-viewer-filename" title="Doppelklick zum Umbenennen" style="cursor: text; border-bottom: 1px dashed transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1;">PDF-Vorschau</span>
             <input id="pdf-viewer-filename-input" type="text" style="display: none; background: var(--input-bg); border: 1px solid var(--color-accent); border-radius: 4px; color: var(--color-text); font-weight: 600; font-size: inherit; font-family: inherit; padding: 0.1rem 0.4rem;">
           </div>
 
-          <div class="pdf-toolbar-group">
+          <div class="pdf-toolbar-center">
             <button type="button" class="pdf-tool-btn" id="pdf-toc-toggle-btn" title="Inhaltsverzeichnis"><i data-lucide="list"></i></button>
-            <div class="pdf-toolbar-sep"></div>
-            <button type="button" class="pdf-tool-btn" id="pdf-zoom-out-btn" title="Verkleinern (Strg + -)"><i data-lucide="minus"></i></button>
-            <button type="button" class="pdf-zoom-display" id="pdf-zoom-display" title="Zoomstufe">100%</button>
-            <button type="button" class="pdf-tool-btn" id="pdf-zoom-in-btn" title="Vergrößern (Strg + +)"><i data-lucide="plus"></i></button>
-            <button type="button" class="pdf-tool-btn" id="pdf-fit-page-btn" title="An Fenster anpassen (Höhe/Breite)"><i data-lucide="scan"></i></button>
-            <div class="pdf-toolbar-sep"></div>
-            <button type="button" class="pdf-tool-btn" id="pdf-prev-page-btn" title="Vorherige Seite (←)"><i data-lucide="chevron-left"></i></button>
-            <input type="number" id="pdf-page-input" class="pdf-page-input" min="1" value="1" title="Seite springen">
-            <span class="pdf-page-count">/ <span id="pdf-page-count">1</span></span>
-            <button type="button" class="pdf-tool-btn" id="pdf-next-page-btn" title="Nächste Seite (→)"><i data-lucide="chevron-right"></i></button>
+            <button type="button" class="pdf-tool-btn" id="pdf-zoom-menu-btn" title="Zoom"><i data-lucide="search"></i></button>
+            <button type="button" class="pdf-tool-btn pdf-tool-btn-wide" id="pdf-page-menu-btn" title="Seite"><span id="pdf-page-menu-label">1 / 1</span></button>
+            <button type="button" class="pdf-tool-btn" id="pdf-layout-menu-btn" title="Ansicht"><i data-lucide="layout-grid"></i></button>
+            <button type="button" class="pdf-tool-btn" id="pdf-tools-menu-btn" title="Zeichenwerkzeuge"><i data-lucide="pencil"></i></button>
           </div>
 
-          <div class="pdf-toolbar-group">
-            <div class="pdf-layout-toggle" id="pdf-layout-toggle">
-              <button type="button" class="pdf-layout-btn active" data-spread="0" title="Einzelseite"><i data-lucide="file"></i></button>
-              <button type="button" class="pdf-layout-btn" data-spread="1" title="Zwei Seiten (Seite 1 einzeln)"><i data-lucide="book-open"></i></button>
-              <button type="button" class="pdf-layout-btn" data-spread="2" title="Zwei Seiten (Seite 1 & 2 zusammen)"><i data-lucide="gallery-horizontal"></i></button>
-            </div>
-          </div>
-
-          <div class="pdf-toolbar-group">
-            <button type="button" class="pdf-tool-btn" id="pdf-tool-pen-btn" title="Freihand-Stift"><i data-lucide="pencil"></i></button>
-            <button type="button" class="pdf-tool-btn" id="pdf-tool-highlight-btn" title="Textmarker"><i data-lucide="highlighter"></i></button>
-            <div id="pdf-tool-params" class="pdf-tool-params" style="display: none;">
-              <input type="color" id="pdf-tool-color" value="#ff2d55" title="Farbe">
-              <input type="range" id="pdf-tool-thickness" min="1" max="30" value="3" title="Stärke">
-            </div>
-          </div>
-
-          <div class="pdf-toolbar-group" id="pdf-actions-group">
+          <div class="pdf-toolbar-right">
             <button type="button" class="pdf-tool-btn" id="pdf-save-btn" title="Speichern" disabled><i data-lucide="save"></i></button>
             <button type="button" class="pdf-tool-btn" id="pdf-download-btn" title="Herunterladen"><i data-lucide="download"></i></button>
+            <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
+              <i data-lucide="x"></i>
+            </button>
           </div>
+        </div>
+      </div>
 
-          <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text); margin-left: auto;">
-            <i data-lucide="x"></i>
-          </button>
+      <!-- Toolbar dropdown popovers — persistent in the DOM, toggled open/closed and repositioned
+           under their trigger button on click (see wirePdfToolbarMenu in app.js). Keeping the
+           toolbar itself down to single icon-buttons is what keeps it a single row at any width,
+           including mobile — everything with more than one control lives behind one of these. -->
+      <div class="card context-menu pdf-toolbar-menu" id="pdf-zoom-menu">
+        <div class="pdf-menu-row">
+          <button type="button" class="pdf-tool-btn" id="pdf-zoom-out-btn" title="Verkleinern (Strg + -)"><i data-lucide="minus"></i></button>
+          <span class="pdf-zoom-display" id="pdf-zoom-display">100%</span>
+          <button type="button" class="pdf-tool-btn" id="pdf-zoom-in-btn" title="Vergrößern (Strg + +)"><i data-lucide="plus"></i></button>
+        </div>
+        <div class="pdf-menu-preset-grid" id="pdf-zoom-presets">
+          <button type="button" class="btn-menu-item pdf-zoom-preset" data-zoom="0.5">50%</button>
+          <button type="button" class="btn-menu-item pdf-zoom-preset" data-zoom="0.75">75%</button>
+          <button type="button" class="btn-menu-item pdf-zoom-preset" data-zoom="1">100%</button>
+          <button type="button" class="btn-menu-item pdf-zoom-preset" data-zoom="1.25">125%</button>
+          <button type="button" class="btn-menu-item pdf-zoom-preset" data-zoom="1.5">150%</button>
+          <button type="button" class="btn-menu-item pdf-zoom-preset" data-zoom="2">200%</button>
+        </div>
+        <button type="button" class="btn-menu-item" id="pdf-fit-width-btn"><i data-lucide="move-horizontal"></i> An Breite anpassen</button>
+        <button type="button" class="btn-menu-item" id="pdf-fit-page-btn"><i data-lucide="scan"></i> An Seite anpassen</button>
+      </div>
+
+      <div class="card context-menu pdf-toolbar-menu" id="pdf-page-menu">
+        <div class="pdf-menu-row">
+          <button type="button" class="pdf-tool-btn" id="pdf-prev-page-btn" title="Vorherige Seite (←)"><i data-lucide="chevron-left"></i></button>
+          <input type="number" id="pdf-page-input" class="pdf-page-input" min="1" value="1" title="Seite springen">
+          <span class="pdf-page-count">/ <span id="pdf-page-count">1</span></span>
+          <button type="button" class="pdf-tool-btn" id="pdf-next-page-btn" title="Nächste Seite (→)"><i data-lucide="chevron-right"></i></button>
+        </div>
+      </div>
+
+      <div class="card context-menu pdf-toolbar-menu" id="pdf-layout-menu">
+        <button type="button" class="btn-menu-item pdf-menu-spread-item active" data-spread="0"><i data-lucide="file"></i> Einzelseite</button>
+        <button type="button" class="btn-menu-item pdf-menu-spread-item" data-spread="1"><i data-lucide="book-open"></i> Zwei Seiten (Seite 1 einzeln)</button>
+        <button type="button" class="btn-menu-item pdf-menu-spread-item" data-spread="2"><i data-lucide="gallery-horizontal"></i> Zwei Seiten (Seite 1 &amp; 2 zusammen)</button>
+      </div>
+
+      <div class="card context-menu pdf-toolbar-menu" id="pdf-tools-menu">
+        <div class="pdf-menu-row">
+          <button type="button" class="pdf-tool-btn" id="pdf-tool-pen-btn" title="Freihand-Stift"><i data-lucide="pencil"></i></button>
+          <button type="button" class="pdf-tool-btn" id="pdf-tool-highlight-btn" title="Textmarker"><i data-lucide="highlighter"></i></button>
+          <button type="button" class="pdf-tool-btn" id="pdf-tool-eraser-btn" title="Radiergummi"><i data-lucide="eraser"></i></button>
+        </div>
+        <div id="pdf-tool-params" class="pdf-tool-params" style="display: none;">
+          <div class="pdf-menu-row">
+            <label class="pdf-menu-label" id="pdf-tool-color-label">Farbe</label>
+            <input type="color" id="pdf-tool-color" value="#ff2d55" title="Farbe">
+          </div>
+          <div class="pdf-menu-row">
+            <label class="pdf-menu-label" id="pdf-tool-thickness-label">Stärke</label>
+            <input type="range" id="pdf-tool-thickness" min="1" max="30" value="3" title="Stärke" style="flex: 1;">
+          </div>
+          <div id="pdf-tool-shape-group" class="pdf-menu-row" style="display: none;">
+            <label class="pdf-menu-label">Form</label>
+            <div class="pdf-layout-toggle">
+              <button type="button" class="pdf-layout-btn active" id="pdf-shape-round-btn" data-shape="round" title="Runder Textmarker"><i data-lucide="circle"></i></button>
+              <button type="button" class="pdf-layout-btn" id="pdf-shape-square-btn" data-shape="square" title="Eckiger Textmarker"><i data-lucide="square"></i></button>
+            </div>
+          </div>
+          <div id="pdf-eraser-mode-group" class="pdf-menu-row" style="display: none;">
+            <label class="pdf-menu-label">Modus</label>
+            <div class="pdf-layout-toggle">
+              <button type="button" class="pdf-layout-btn active" id="pdf-eraser-pixel-btn" data-mode="pixel" title="Direkter Radiergummi"><i data-lucide="eraser"></i></button>
+              <button type="button" class="pdf-layout-btn" id="pdf-eraser-stroke-btn" data-mode="stroke" title="Kompletten Strich entfernen"><i data-lucide="x-circle"></i></button>
+            </div>
+          </div>
+          <p class="pdf-menu-hint">Shift beim Zeichnen gedrückt halten für eine gerade Linie.</p>
         </div>
       </div>
       <div style="flex: 1; position: relative; overflow: hidden; background: #525659; display: flex;">

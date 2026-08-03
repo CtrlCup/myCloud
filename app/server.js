@@ -294,6 +294,13 @@ app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 // just static JS/HTML); the PDF it loads goes through our existing authenticated download route.
 app.use('/pdfjs', express.static(path.join(__dirname, 'node_modules/pdfjs-dist')));
 
+// pdf-lib: used client-side only to flatten the custom pen/highlighter/eraser drawing layer
+// (see openPdfViewer in app.js) into the saved PDF as an image overlay per annotated page —
+// pdf.js's own AnnotationEditor has no eraser primitive and no way to force a straight line,
+// so those tools are hand-rolled on a canvas rather than going through pdf.js's ink/highlight
+// editors, and need a separate library to bake the result back into PDF bytes on save.
+app.use('/pdf-lib', express.static(path.join(__dirname, 'node_modules/pdf-lib/dist')));
+
 // API-Key Authentication (Bearer token, for external/app clients)
 // Populates req.session.userId/.username/.role from a personal API key, exactly like a browser
 // login would — every existing route below reads those three session fields, so this lets the

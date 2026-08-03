@@ -7423,9 +7423,10 @@ document.addEventListener('keydown', (e) => {
 
 // pdfjs-dist only ships the library + the reusable PDFViewer component on npm (not the
 // prebuilt viewer.html app, which Mozilla only distributes as a separate GitHub release ZIP) —
-// so the two-page/spread view, zoom/page toolbar, TOC sidebar and annotation tools here are all
+// so the two-page/spread view, zoom/page toolbar, TOC sidebar and drawing tools here are all
 // built directly on top of PDFViewer's own documented APIs rather than embedding a full
-// prebuilt app.
+// prebuilt app. The pen/highlighter/eraser tools are a hand-rolled canvas layer rather than
+// pdf.js's own AnnotationEditor (see the "Drawing tools" section below for why).
 let pdfjsLib = null;
 let pdfjsViewerLib = null;
 let currentPdfViewer = null;
@@ -7437,7 +7438,8 @@ let currentPdfIsPublic = false;
 let currentPdfSlug = '';
 let currentPdfParentId = null;
 let currentPdfHasChanges = false;
-let currentPdfActiveTool = null; // null | 'pen' | 'highlight'
+let pdfFormFieldsModified = false; // AcroForm field edits, tracked via pdf.js's own annotationStorage
+let pdfDrawLayerModified = false;  // pen/highlighter/eraser edits, tracked by us (see below)
 let pdfViewerSession = 0; // guards against a slow-loading PDF finishing after the viewer moved on
 
 async function loadPdfJsLibs() {
@@ -7470,9 +7472,12 @@ async function openPdfViewer(fileId, fileName, isPublic = false, slug = '', pare
   currentPdfSlug = slug;
   currentPdfParentId = parentId;
   currentPdfHasChanges = false;
-  currentPdfActiveTool = null;
+  pdfFormFieldsModified = false;
+  pdfDrawLayerModified = false;
   currentPdfDocument = null;
   currentPdfLinkService = null;
+  pdfPageOps = new Map();
+  pdfActiveStroke = null;
 
   const sourceUrl = isPublic
     ? `/api/public/shares/${slug}/download/${fileId}?inline=true`
@@ -7485,12 +7490,14 @@ async function openPdfViewer(fileId, fileName, isPublic = false, slug = '', pare
   inner.innerHTML = '';
   loading.style.display = 'flex';
   loadingText.textContent = 'Lade PDF…';
-  document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.spread === '0'));
+  document.querySelectorAll('.pdf-menu-spread-item').forEach(btn => btn.classList.toggle('active', btn.dataset.spread === '0'));
   closePdfToc();
-  setPdfAnnotationTool(null);
+  closeAllPdfToolbarMenus();
+  setPdfDrawTool(null);
   updatePdfSaveButton();
   document.getElementById('pdf-page-input').value = 1;
   document.getElementById('pdf-page-count').textContent = '1';
+  document.getElementById('pdf-page-menu-label').textContent = '1 / 1';
   document.getElementById('pdf-zoom-display').textContent = '100%';
 
   try {
@@ -7504,6 +7511,12 @@ async function openPdfViewer(fileId, fileName, isPublic = false, slug = '', pare
 
     const eventBus = new pdfjsViewerLib.EventBus();
     const linkService = new pdfjsViewerLib.PDFLinkService({ eventBus });
+    // Deliberately NOT setting annotationEditorMode: DISABLE here — pdf.js's own
+    // "select text -> auto-highlight" listener only fires while its internal mode is HIGHLIGHT,
+    // and our code below never switches it there (the pen/highlighter/eraser tools are a
+    // separate canvas layer — see the Drawing tools section), so it stays inert at the default
+    // NONE. DISABLE looks safer on paper but actually breaks this pdfjs-dist build's page
+    // rendering pipeline (pages never leave the RUNNING state / 'pagerendered' never fires).
     const pdfViewer = new pdfjsViewerLib.PDFViewer({ container, viewer: inner, eventBus, linkService });
     linkService.setViewer(pdfViewer);
     currentPdfViewer = pdfViewer;
@@ -7525,6 +7538,15 @@ async function openPdfViewer(fileId, fileName, isPublic = false, slug = '', pare
     eventBus.on('pagechanging', (evt) => {
       if (session !== pdfViewerSession) return;
       document.getElementById('pdf-page-input').value = evt.pageNumber;
+      updatePdfPageMenuLabel();
+    });
+
+    // Each page fires this once rendered (initial paint, and again after every re-render — e.g.
+    // a zoom change) — the hook point for (re)creating and correctly resizing our own drawing
+    // canvas on top of that page.
+    eventBus.on('pagerendered', (evt) => {
+      if (session !== pdfViewerSession) return;
+      ensurePdfPageCanvas(evt.pageNumber);
     });
 
     // Progressive/range-request loading: with disableAutoFetch the document's remaining pages
@@ -7550,16 +7572,17 @@ async function openPdfViewer(fileId, fileName, isPublic = false, slug = '', pare
     pdfViewer.setDocument(pdfDocument);
     linkService.setDocument(pdfDocument);
     document.getElementById('pdf-page-count').textContent = pdfDocument.numPages;
+    updatePdfPageMenuLabel();
 
     pdfDocument.annotationStorage.onSetModified = () => {
       if (session !== pdfViewerSession) return;
-      currentPdfHasChanges = true;
-      updatePdfSaveButton();
+      pdfFormFieldsModified = true;
+      updatePdfHasChanges();
     };
     pdfDocument.annotationStorage.onResetModified = () => {
       if (session !== pdfViewerSession) return;
-      currentPdfHasChanges = false;
-      updatePdfSaveButton();
+      pdfFormFieldsModified = false;
+      updatePdfHasChanges();
     };
 
     renderPdfToc(pdfDocument);
@@ -7579,7 +7602,8 @@ function closePdfViewer() {
   document.getElementById('pdf-viewer-inner').innerHTML = '';
   document.getElementById('pdf-viewer-loading').style.display = 'none';
   closePdfToc();
-  setPdfAnnotationTool(null);
+  closeAllPdfToolbarMenus();
+  setPdfDrawTool(null);
   if (currentPdfLoadingTask) {
     currentPdfLoadingTask.destroy().catch(() => {});
     currentPdfLoadingTask = null;
@@ -7588,6 +7612,8 @@ function closePdfViewer() {
   currentPdfDocument = null;
   currentPdfLinkService = null;
   currentPdfHasChanges = false;
+  pdfPageOps = new Map();
+  pdfActiveStroke = null;
 }
 
 document.getElementById('close-pdf-viewer-btn').onclick = closePdfViewer;
@@ -7599,6 +7625,51 @@ document.getElementById('pdf-viewer-filename').ondblclick = () => {
   startViewerRename('pdf', currentPdfFileId);
 };
 
+/* ── Toolbar dropdown popovers (zoom/page/layout/tools) ──
+   The toolbar itself is just single icon-buttons so it always fits in one row (including on
+   mobile); everything with more than one control lives behind one of these persistent, initially
+   hidden popovers, positioned under its trigger button on open. */
+function closeAllPdfToolbarMenus() {
+  document.querySelectorAll('.pdf-toolbar-menu.open').forEach(m => m.classList.remove('open'));
+}
+
+function togglePdfToolbarMenu(trigger, menu) {
+  const willOpen = !menu.classList.contains('open');
+  closeAllPdfToolbarMenus();
+  if (!willOpen) return;
+  menu.classList.add('open');
+  const rect = trigger.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  let left = rect.left;
+  if (left + menuRect.width > window.innerWidth - 8) left = window.innerWidth - menuRect.width - 8;
+  left = Math.max(8, left);
+  let top = rect.bottom + 6;
+  if (top + menuRect.height > window.innerHeight - 8) top = Math.max(8, rect.top - menuRect.height - 6);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function wirePdfToolbarMenu(triggerId, menuId) {
+  const trigger = document.getElementById(triggerId);
+  const menu = document.getElementById(menuId);
+  trigger.onclick = (e) => {
+    e.stopPropagation();
+    togglePdfToolbarMenu(trigger, menu);
+  };
+}
+wirePdfToolbarMenu('pdf-zoom-menu-btn', 'pdf-zoom-menu');
+wirePdfToolbarMenu('pdf-page-menu-btn', 'pdf-page-menu');
+wirePdfToolbarMenu('pdf-layout-menu-btn', 'pdf-layout-menu');
+wirePdfToolbarMenu('pdf-tools-menu-btn', 'pdf-tools-menu');
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.pdf-toolbar-menu') || e.target.closest('.pdf-toolbar-center')) return;
+  closeAllPdfToolbarMenus();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeAllPdfToolbarMenus();
+});
+
 /* ── Zoom ── */
 function setPdfScale(newScale) {
   if (!currentPdfViewer) return;
@@ -7606,7 +7677,17 @@ function setPdfScale(newScale) {
 }
 document.getElementById('pdf-zoom-in-btn').onclick = () => currentPdfViewer && setPdfScale(currentPdfViewer.currentScale * 1.15);
 document.getElementById('pdf-zoom-out-btn').onclick = () => currentPdfViewer && setPdfScale(currentPdfViewer.currentScale / 1.15);
-document.getElementById('pdf-zoom-display').onclick = () => currentPdfViewer && (currentPdfViewer.currentScaleValue = 'page-width');
+document.querySelectorAll('.pdf-zoom-preset').forEach(btn => {
+  btn.onclick = () => currentPdfViewer && setPdfScale(parseFloat(btn.dataset.zoom));
+});
+document.getElementById('pdf-fit-width-btn').onclick = () => {
+  if (currentPdfViewer) currentPdfViewer.currentScaleValue = 'page-width';
+};
+// "page-fit" scales the page so both its height and width fit entirely inside the viewport —
+// exactly the "match the displayed height/width ratio" fit the user asked for.
+document.getElementById('pdf-fit-page-btn').onclick = () => {
+  if (currentPdfViewer) currentPdfViewer.currentScaleValue = 'page-fit';
+};
 
 // Ctrl/Cmd + mouse wheel to zoom, centered on the cursor being over the document itself.
 document.getElementById('pdf-viewer-container').addEventListener('wheel', (e) => {
@@ -7637,23 +7718,22 @@ document.getElementById('pdf-viewer-container').addEventListener('touchend', () 
   pdfPinchStartScale = null;
 });
 
-document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(btn => {
+document.querySelectorAll('.pdf-menu-spread-item').forEach(btn => {
   btn.onclick = () => {
     if (!currentPdfViewer) return;
-    document.querySelectorAll('#pdf-layout-toggle .pdf-layout-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.pdf-menu-spread-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentPdfViewer.spreadMode = parseInt(btn.dataset.spread, 10);
+    closeAllPdfToolbarMenus();
   };
 });
 
-// "page-fit" scales the page so both its height and width fit entirely inside the viewport —
-// exactly the "match the displayed height/width ratio" fit the user asked for.
-document.getElementById('pdf-fit-page-btn').onclick = () => {
-  if (!currentPdfViewer) return;
-  currentPdfViewer.currentScaleValue = 'page-fit';
-};
-
 /* ── Page navigation ── */
+function updatePdfPageMenuLabel() {
+  const current = pdfPageInput.value || '1';
+  const total = document.getElementById('pdf-page-count').textContent || '1';
+  document.getElementById('pdf-page-menu-label').textContent = `${current} / ${total}`;
+}
 document.getElementById('pdf-prev-page-btn').onclick = () => currentPdfViewer && currentPdfViewer.previousPage();
 document.getElementById('pdf-next-page-btn').onclick = () => currentPdfViewer && currentPdfViewer.nextPage();
 
@@ -7663,6 +7743,7 @@ function jumpToPdfPageInput() {
   const n = Math.max(1, Math.min(currentPdfDocument.numPages, parseInt(pdfPageInput.value, 10) || 1));
   pdfPageInput.value = n;
   currentPdfViewer.currentPageNumber = n;
+  updatePdfPageMenuLabel();
 }
 pdfPageInput.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); jumpToPdfPageInput(); pdfPageInput.blur(); } };
 pdfPageInput.onblur = jumpToPdfPageInput;
@@ -7742,62 +7823,363 @@ async function renderPdfToc(pdfDocument) {
   }
 }
 
-/* ── Annotation tools (pdf.js's own AnnotationEditor: freehand pen = INK, marker = HIGHLIGHT) ── */
+/* ── Drawing tools (pen, highlighter, eraser) ──
+   pdf.js's own AnnotationEditor (INK/HIGHLIGHT) has no eraser primitive at all, and no way to
+   force a straight line while dragging — both explicitly requested here — so instead of fighting
+   its internal pointer-gesture state machine, each page gets its own plain <canvas> overlay that
+   we draw on directly and fully control. Strokes are kept as vector path data in PDF-space units
+   (i.e. independent of the current on-screen zoom — see pdfPointFromEvent/drawPdfOp) so they
+   redraw correctly at any scale. On save, getPdfEditedBlob() flattens each annotated page's
+   canvas into a PNG and stamps it onto the PDF via pdf-lib — see the Save section below. */
+let pdfPageOps = new Map();       // pageNumber -> op[]; op = {kind:'draw'|'erase', tool, shape, color, thickness, opacity, points}
+let pdfActiveStroke = null;       // the in-progress op while the pointer is down, or null
+let currentPdfDrawTool = null;    // null | 'pen' | 'highlight' | 'eraser'
+let currentPdfHighlightShape = 'round';
+let currentPdfEraserMode = 'pixel';
+const pdfToolSettings = {
+  pen: { color: '#ff2d55', thickness: 3 },
+  highlight: { color: '#ffe066', thickness: 16, shape: 'round' },
+  eraser: { thickness: 20, mode: 'pixel' },
+};
+
+function getPdfPageOps(pageNumber) {
+  if (!pdfPageOps.has(pageNumber)) pdfPageOps.set(pageNumber, []);
+  return pdfPageOps.get(pageNumber);
+}
+
+// Angle-snaps a drag to the nearest 45° increment around the stroke's start point — this is
+// what "hold Shift for a straight line" means for both the pen and the round highlighter.
+function snapStraightLine(start, current) {
+  const dx = current.x - start.x, dy = current.y - start.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 0.0001) return { x: current.x, y: current.y };
+  const step = Math.PI / 4;
+  const angle = Math.round(Math.atan2(dy, dx) / step) * step;
+  return { x: start.x + Math.cos(angle) * dist, y: start.y + Math.sin(angle) * dist };
+}
+
+function distancePointToSegment(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSq));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+function isPointNearOp(point, op, tolerance) {
+  if (op.tool === 'highlight' && op.shape === 'square' && op.points.length >= 2) {
+    const p0 = op.points[0], p1 = op.points[op.points.length - 1];
+    const minX = Math.min(p0.x, p1.x) - tolerance, maxX = Math.max(p0.x, p1.x) + tolerance;
+    const minY = Math.min(p0.y, p1.y) - tolerance, maxY = Math.max(p0.y, p1.y) + tolerance;
+    return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
+  }
+  const hitRadius = op.thickness / 2 + tolerance;
+  if (op.points.length === 1) return Math.hypot(point.x - op.points[0].x, point.y - op.points[0].y) <= hitRadius;
+  for (let i = 1; i < op.points.length; i++) {
+    if (distancePointToSegment(point, op.points[i - 1], op.points[i]) <= hitRadius) return true;
+  }
+  return false;
+}
+
+function eraseStrokeAtPoint(pageNumber, point, viewport) {
+  const ops = getPdfPageOps(pageNumber);
+  const toleranceOnScreenPx = Math.max(parseInt(pdfToolThicknessInput.value, 10) || 10, 10);
+  const tolerance = toleranceOnScreenPx / viewport.scale;
+  let changed = false;
+  for (let i = ops.length - 1; i >= 0; i--) {
+    if (ops[i].kind === 'draw' && isPointNearOp(point, ops[i], tolerance)) {
+      ops.splice(i, 1);
+      changed = true;
+    }
+  }
+  if (changed) {
+    markPdfDrawChanges();
+    redrawPdfPageCanvas(pageNumber);
+  }
+}
+
+function drawPdfOp(ctx, op, viewport) {
+  if (!op.points.length) return;
+  const pts = op.points.map(p => {
+    const [x, y] = viewport.convertToViewportPoint(p.x, p.y);
+    return { x, y };
+  });
+  const lineWidth = Math.max(0.5, op.thickness * viewport.scale);
+  ctx.save();
+  ctx.globalCompositeOperation = op.kind === 'erase' ? 'destination-out' : 'source-over';
+  ctx.globalAlpha = op.kind === 'erase' ? 1 : op.opacity;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = lineWidth;
+  ctx.strokeStyle = op.color;
+  ctx.fillStyle = op.color;
+
+  if (op.tool === 'highlight' && op.shape === 'square' && pts.length >= 2) {
+    const p0 = pts[0], p1 = pts[pts.length - 1];
+    let x = Math.min(p0.x, p1.x), y = Math.min(p0.y, p1.y);
+    let w = Math.abs(p1.x - p0.x), h = Math.abs(p1.y - p0.y);
+    if (h < lineWidth) { y = (p0.y + p1.y) / 2 - lineWidth / 2; h = lineWidth; }
+    if (w < 2) w = 2;
+    ctx.fillRect(x, y, w, h);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    if (pts.length === 1) {
+      ctx.lineTo(pts[0].x + 0.01, pts[0].y + 0.01);
+    } else {
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function redrawPdfPageCanvas(pageNumber) {
+  if (!currentPdfViewer) return;
+  const pageView = currentPdfViewer.getPageView(pageNumber - 1);
+  if (!pageView) return;
+  const canvas = pageView.div.querySelector(':scope > .pdf-draw-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+  for (const op of getPdfPageOps(pageNumber)) drawPdfOp(ctx, op, pageView.viewport);
+  if (pdfActiveStroke && pdfActiveStroke.pageNumber === pageNumber) {
+    drawPdfOp(ctx, pdfActiveStroke, pageView.viewport);
+  }
+}
+
+function pdfPointFromEvent(e, canvas, pageView) {
+  const rect = canvas.getBoundingClientRect();
+  const [x, y] = pageView.viewport.convertToPdfPoint(e.clientX - rect.left, e.clientY - rect.top);
+  return { x, y };
+}
+
+function wirePdfCanvasPointerEvents(canvas, pageNumber) {
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!currentPdfDrawTool || pdfActiveStroke) return;
+    e.preventDefault();
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    const pageView = currentPdfViewer.getPageView(pageNumber - 1);
+    const point = pdfPointFromEvent(e, canvas, pageView);
+
+    if (currentPdfDrawTool === 'eraser' && currentPdfEraserMode === 'stroke') {
+      eraseStrokeAtPoint(pageNumber, point, pageView.viewport);
+      return;
+    }
+
+    const thicknessPdf = parseInt(pdfToolThicknessInput.value, 10) / pageView.viewport.scale;
+    pdfActiveStroke = {
+      pageNumber,
+      kind: currentPdfDrawTool === 'eraser' ? 'erase' : 'draw',
+      tool: currentPdfDrawTool === 'eraser' ? null : currentPdfDrawTool,
+      shape: currentPdfDrawTool === 'highlight' ? currentPdfHighlightShape : null,
+      color: pdfToolColorInput.value,
+      thickness: thicknessPdf,
+      opacity: currentPdfDrawTool === 'highlight' ? 0.45 : 1,
+      points: [point],
+      startPoint: point,
+    };
+    redrawPdfPageCanvas(pageNumber);
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (currentPdfDrawTool === 'eraser' && currentPdfEraserMode === 'stroke') {
+      if (e.buttons !== 1) return;
+      const pageView = currentPdfViewer.getPageView(pageNumber - 1);
+      eraseStrokeAtPoint(pageNumber, pdfPointFromEvent(e, canvas, pageView), pageView.viewport);
+      return;
+    }
+    if (!pdfActiveStroke || pdfActiveStroke.pageNumber !== pageNumber) return;
+    const pageView = currentPdfViewer.getPageView(pageNumber - 1);
+    const point = pdfPointFromEvent(e, canvas, pageView);
+
+    if (pdfActiveStroke.shape === 'square') {
+      // Rectangular highlighter: always a two-point drag box, like a text-selection marker.
+      pdfActiveStroke.points = [pdfActiveStroke.startPoint, point];
+    } else if (e.shiftKey && (pdfActiveStroke.tool === 'pen' || pdfActiveStroke.tool === 'highlight')) {
+      pdfActiveStroke.points = [pdfActiveStroke.startPoint, snapStraightLine(pdfActiveStroke.startPoint, point)];
+    } else {
+      pdfActiveStroke.points.push(point);
+    }
+    redrawPdfPageCanvas(pageNumber);
+  });
+
+  const finishStroke = () => {
+    if (!pdfActiveStroke || pdfActiveStroke.pageNumber !== pageNumber) return;
+    const stroke = pdfActiveStroke;
+    pdfActiveStroke = null;
+    getPdfPageOps(pageNumber).push(stroke);
+    markPdfDrawChanges();
+    redrawPdfPageCanvas(pageNumber);
+  };
+  canvas.addEventListener('pointerup', finishStroke);
+  canvas.addEventListener('pointercancel', finishStroke);
+}
+
+function ensurePdfPageCanvas(pageNumber) {
+  if (!currentPdfViewer) return;
+  const pageView = currentPdfViewer.getPageView(pageNumber - 1);
+  if (!pageView || !pageView.div) return;
+  let canvas = pageView.div.querySelector(':scope > .pdf-draw-canvas');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.className = 'pdf-draw-canvas';
+    pageView.div.appendChild(canvas);
+    wirePdfCanvasPointerEvents(canvas, pageNumber);
+  }
+  const viewport = pageView.viewport;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.ceil(viewport.width * dpr);
+  canvas.height = Math.ceil(viewport.height * dpr);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+  redrawPdfPageCanvas(pageNumber);
+}
+
+/* ── Drawing tools toolbar wiring ── */
 const pdfToolColorInput = document.getElementById('pdf-tool-color');
 const pdfToolThicknessInput = document.getElementById('pdf-tool-thickness');
 const pdfToolParams = document.getElementById('pdf-tool-params');
+const pdfToolColorRow = pdfToolColorInput.closest('.pdf-menu-row');
+const pdfToolThicknessLabel = document.getElementById('pdf-tool-thickness-label');
+const pdfToolShapeGroup = document.getElementById('pdf-tool-shape-group');
+const pdfEraserModeGroup = document.getElementById('pdf-eraser-mode-group');
 
-function setPdfAnnotationTool(tool) {
-  currentPdfActiveTool = tool;
+function setPdfDrawTool(tool) {
+  currentPdfDrawTool = tool;
   document.getElementById('pdf-tool-pen-btn').classList.toggle('active', tool === 'pen');
   document.getElementById('pdf-tool-highlight-btn').classList.toggle('active', tool === 'highlight');
-  pdfToolParams.style.display = tool ? 'flex' : 'none';
+  document.getElementById('pdf-tool-eraser-btn').classList.toggle('active', tool === 'eraser');
+  document.getElementById('pdf-tools-menu-btn').classList.toggle('active', !!tool);
 
-  if (!currentPdfViewer || !currentPdfDocument) return;
-  const AnnotationEditorType = pdfjsLib.AnnotationEditorType;
+  pdfToolParams.style.display = tool ? 'block' : 'none';
+  pdfToolColorRow.style.display = (tool === 'pen' || tool === 'highlight') ? 'flex' : 'none';
+  pdfToolShapeGroup.style.display = tool === 'highlight' ? 'flex' : 'none';
+  pdfEraserModeGroup.style.display = tool === 'eraser' ? 'flex' : 'none';
+  pdfToolThicknessLabel.textContent = tool === 'eraser' ? 'Größe' : 'Stärke';
+
+  const inner = document.getElementById('pdf-viewer-inner');
+  if (inner) inner.classList.toggle('pdf-drawing-active', !!tool);
+
   if (tool === 'pen') {
-    pdfToolColorInput.value = '#ff2d55';
-    pdfToolThicknessInput.min = 1; pdfToolThicknessInput.max = 30; pdfToolThicknessInput.value = 3;
-    currentPdfViewer.annotationEditorMode = { mode: AnnotationEditorType.INK };
-    dispatchPdfToolParams();
+    pdfToolThicknessInput.min = 1; pdfToolThicknessInput.max = 20;
+    pdfToolColorInput.value = pdfToolSettings.pen.color;
+    pdfToolThicknessInput.value = pdfToolSettings.pen.thickness;
   } else if (tool === 'highlight') {
-    pdfToolColorInput.value = '#ffe066';
-    pdfToolThicknessInput.min = 4; pdfToolThicknessInput.max = 40; pdfToolThicknessInput.value = 14;
-    currentPdfViewer.annotationEditorMode = { mode: AnnotationEditorType.HIGHLIGHT };
-    dispatchPdfToolParams();
-  } else {
-    currentPdfViewer.annotationEditorMode = { mode: AnnotationEditorType.NONE };
+    pdfToolThicknessInput.min = 6; pdfToolThicknessInput.max = 40;
+    pdfToolColorInput.value = pdfToolSettings.highlight.color;
+    pdfToolThicknessInput.value = pdfToolSettings.highlight.thickness;
+    currentPdfHighlightShape = pdfToolSettings.highlight.shape;
+    document.getElementById('pdf-shape-round-btn').classList.toggle('active', currentPdfHighlightShape === 'round');
+    document.getElementById('pdf-shape-square-btn').classList.toggle('active', currentPdfHighlightShape === 'square');
+  } else if (tool === 'eraser') {
+    pdfToolThicknessInput.min = 8; pdfToolThicknessInput.max = 60;
+    pdfToolThicknessInput.value = pdfToolSettings.eraser.thickness;
+    currentPdfEraserMode = pdfToolSettings.eraser.mode;
+    document.getElementById('pdf-eraser-pixel-btn').classList.toggle('active', currentPdfEraserMode === 'pixel');
+    document.getElementById('pdf-eraser-stroke-btn').classList.toggle('active', currentPdfEraserMode === 'stroke');
   }
 }
 
-function dispatchPdfToolParams() {
-  if (!currentPdfViewer || !currentPdfActiveTool) return;
-  const ParamsType = pdfjsLib.AnnotationEditorParamsType;
-  const eventBus = currentPdfViewer.eventBus;
-  const color = pdfToolColorInput.value;
-  const thickness = parseInt(pdfToolThicknessInput.value, 10);
-  if (currentPdfActiveTool === 'pen') {
-    eventBus.dispatch('switchannotationeditorparams', { source: null, type: ParamsType.INK_COLOR, value: color });
-    eventBus.dispatch('switchannotationeditorparams', { source: null, type: ParamsType.INK_THICKNESS, value: thickness });
-  } else if (currentPdfActiveTool === 'highlight') {
-    eventBus.dispatch('switchannotationeditorparams', { source: null, type: ParamsType.HIGHLIGHT_COLOR, value: color });
-    eventBus.dispatch('switchannotationeditorparams', { source: null, type: ParamsType.HIGHLIGHT_THICKNESS, value: thickness });
-  }
-}
-pdfToolColorInput.oninput = dispatchPdfToolParams;
-pdfToolThicknessInput.oninput = dispatchPdfToolParams;
+pdfToolColorInput.oninput = () => {
+  if (currentPdfDrawTool === 'pen') pdfToolSettings.pen.color = pdfToolColorInput.value;
+  else if (currentPdfDrawTool === 'highlight') pdfToolSettings.highlight.color = pdfToolColorInput.value;
+};
+pdfToolThicknessInput.oninput = () => {
+  const v = parseInt(pdfToolThicknessInput.value, 10);
+  if (currentPdfDrawTool === 'pen') pdfToolSettings.pen.thickness = v;
+  else if (currentPdfDrawTool === 'highlight') pdfToolSettings.highlight.thickness = v;
+  else if (currentPdfDrawTool === 'eraser') pdfToolSettings.eraser.thickness = v;
+};
+document.getElementById('pdf-shape-round-btn').onclick = () => {
+  currentPdfHighlightShape = 'round';
+  pdfToolSettings.highlight.shape = 'round';
+  document.getElementById('pdf-shape-round-btn').classList.add('active');
+  document.getElementById('pdf-shape-square-btn').classList.remove('active');
+};
+document.getElementById('pdf-shape-square-btn').onclick = () => {
+  currentPdfHighlightShape = 'square';
+  pdfToolSettings.highlight.shape = 'square';
+  document.getElementById('pdf-shape-square-btn').classList.add('active');
+  document.getElementById('pdf-shape-round-btn').classList.remove('active');
+};
+document.getElementById('pdf-eraser-pixel-btn').onclick = () => {
+  currentPdfEraserMode = 'pixel';
+  pdfToolSettings.eraser.mode = 'pixel';
+  document.getElementById('pdf-eraser-pixel-btn').classList.add('active');
+  document.getElementById('pdf-eraser-stroke-btn').classList.remove('active');
+};
+document.getElementById('pdf-eraser-stroke-btn').onclick = () => {
+  currentPdfEraserMode = 'stroke';
+  pdfToolSettings.eraser.mode = 'stroke';
+  document.getElementById('pdf-eraser-stroke-btn').classList.add('active');
+  document.getElementById('pdf-eraser-pixel-btn').classList.remove('active');
+};
 
-document.getElementById('pdf-tool-pen-btn').onclick = () => setPdfAnnotationTool(currentPdfActiveTool === 'pen' ? null : 'pen');
-document.getElementById('pdf-tool-highlight-btn').onclick = () => setPdfAnnotationTool(currentPdfActiveTool === 'highlight' ? null : 'highlight');
+document.getElementById('pdf-tool-pen-btn').onclick = () => setPdfDrawTool(currentPdfDrawTool === 'pen' ? null : 'pen');
+document.getElementById('pdf-tool-highlight-btn').onclick = () => setPdfDrawTool(currentPdfDrawTool === 'highlight' ? null : 'highlight');
+document.getElementById('pdf-tool-eraser-btn').onclick = () => setPdfDrawTool(currentPdfDrawTool === 'eraser' ? null : 'eraser');
 
 /* ── Save (annotations + filled form fields) ── */
+function updatePdfHasChanges() {
+  currentPdfHasChanges = pdfFormFieldsModified || pdfDrawLayerModified;
+  updatePdfSaveButton();
+}
+function markPdfDrawChanges() {
+  pdfDrawLayerModified = true;
+  updatePdfHasChanges();
+}
 function updatePdfSaveButton() {
   document.getElementById('pdf-save-btn').disabled = !currentPdfHasChanges;
 }
 
+let pdfLibModule = null;
+async function loadPdfLib() {
+  if (!pdfLibModule) pdfLibModule = await import('/pdf-lib/pdf-lib.esm.min.js');
+  return pdfLibModule;
+}
+
+// Bakes form-field edits in via pdf.js's own saveDocument() first, then — for every page that
+// has pen/highlighter/eraser strokes — rasterizes that page's drawing layer at a higher-than-
+// screen resolution and stamps it onto the page as a full-page image overlay via pdf-lib. This
+// flattens the drawings into the PDF (they're no longer separately editable afterwards), which
+// is the trade-off for controlling the drawing/erasing behavior ourselves instead of using
+// pdf.js's own annotation format.
 async function getPdfEditedBlob() {
-  const data = await currentPdfDocument.saveDocument();
-  return new Blob([data], { type: 'application/pdf' });
+  const formBytes = await currentPdfDocument.saveDocument();
+  if (pdfPageOps.size === 0) return new Blob([formBytes], { type: 'application/pdf' });
+
+  const { PDFDocument } = await loadPdfLib();
+  const pdfLibDoc = await PDFDocument.load(formBytes);
+
+  const EXPORT_SCALE = 3;
+  for (const [pageNumber, ops] of pdfPageOps.entries()) {
+    if (!ops || ops.length === 0) continue;
+    const pdfPage = await currentPdfDocument.getPage(pageNumber);
+    const exportViewport = pdfPage.getViewport({ scale: EXPORT_SCALE });
+
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = Math.ceil(exportViewport.width);
+    offCanvas.height = Math.ceil(exportViewport.height);
+    const ctx = offCanvas.getContext('2d');
+    for (const op of ops) drawPdfOp(ctx, op, exportViewport);
+
+    const pngBytes = await new Promise((resolve, reject) => {
+      offCanvas.toBlob(async (blob) => {
+        if (!blob) return reject(new Error('canvas export failed'));
+        resolve(new Uint8Array(await blob.arrayBuffer()));
+      }, 'image/png');
+    });
+    const pngImage = await pdfLibDoc.embedPng(pngBytes);
+    const libPage = pdfLibDoc.getPage(pageNumber - 1);
+    const { width, height } = libPage.getSize();
+    libPage.drawImage(pngImage, { x: 0, y: 0, width, height });
+  }
+
+  const finalBytes = await pdfLibDoc.save();
+  return new Blob([finalBytes], { type: 'application/pdf' });
 }
 
 // Generic 3-way "which version" modal shared by the save flow (Kopie/Original) and the
@@ -7866,6 +8248,8 @@ async function savePdfChanges() {
 
     if (session === pdfViewerSession) {
       currentPdfDocument.annotationStorage.resetModified();
+      pdfDrawLayerModified = false;
+      updatePdfHasChanges();
     }
     loadFiles(currentFolderId);
   } catch (err) {
