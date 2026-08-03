@@ -2012,33 +2012,6 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
-  /api/settings/email:
-    post:
-      tags: [Settings]
-      summary: Nur die E-Mail-Adresse aktualisieren
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email]
-              properties:
-                email: { type: string }
-      responses:
-        '200':
-          description: Gespeichert
-          content:
-            application/json:
-              schema:
-                type: object
-                properties: { success: { type: boolean }, message: { type: string } }
-        '400':
-          description: E-Mail fehlt
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
-
   /api/settings/passkeys/{id}:
     delete:
       tags: [Settings]

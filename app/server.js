@@ -516,10 +516,37 @@ app.get('/api/auth/status', async (req, res) => {
   }
 });
 
+// No limit here meant anyone could script unlimited account creation — each one sends a
+// verification email (see below) to whatever address is supplied, so this was also an
+// unauthenticated mail-bombing vector against arbitrary third-party inboxes, not just DB
+// spam. Same in-memory-counter pattern as loginAttempts/resetRequestAttempts, keyed by IP
+// (the target email varies per attempt, unlike a password-reset request against one account).
+const registerAttempts = new Map(); // ip -> { count, resetAt }
+const REGISTER_MAX_ATTEMPTS = 5;
+const REGISTER_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of registerAttempts.entries()) {
+    if (entry.resetAt < now) registerAttempts.delete(id);
+  }
+}, 15 * 60 * 1000);
+
 // Standard Register Route
 app.post('/api/auth/register', async (req, res) => {
   if ((await getSetting('sso_only')) === 'true') {
     return res.status(403).json({ error: 'Die Anmeldung ist nur über SSO möglich.' });
+  }
+
+  const registerIp = req.ip;
+  const registerNow = Date.now();
+  const registerEntry = registerAttempts.get(registerIp);
+  if (registerEntry && registerEntry.resetAt >= registerNow && registerEntry.count >= REGISTER_MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Zu viele Registrierungsversuche. Bitte versuche es später erneut.' });
+  }
+  if (!registerEntry || registerEntry.resetAt < registerNow) {
+    registerAttempts.set(registerIp, { count: 1, resetAt: registerNow + REGISTER_ATTEMPT_WINDOW_MS });
+  } else {
+    registerEntry.count++;
   }
 
   const { email, password } = req.body;
@@ -4576,26 +4603,6 @@ app.post('/api/settings/theme', requireAuth, async (req, res) => {
 });
 
 // Post settings email
-app.post('/api/settings/email', requireAuth, async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email is required' });
-  try {
-    const conflictRes = await pool.query(
-      'SELECT id FROM users WHERE email = $1 AND id != $2',
-      [email, req.session.userId]
-    );
-    if (conflictRes.rows.length > 0) {
-      return res.status(400).json({ error: 'Diese E-Mail-Adresse wird bereits von einem anderen Benutzer verwendet.' });
-    }
-
-    await pool.query('UPDATE users SET email = $1 WHERE id = $2', [email, req.session.userId]);
-    res.json({ success: true, message: 'E-Mail-Adresse erfolgreich gespeichert.' });
-  } catch (err) {
-    console.error('Error updating email:', err);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
 // Toggle Email 2FA
 app.post('/api/settings/2fa/email', requireAuth, async (req, res) => {
   const { enabled } = req.body;

@@ -4092,33 +4092,6 @@ document.getElementById('change-password-form').onsubmit = async (e) => {
   }
 };
 
-// Change Email Form Submit
-const changeEmailForm = document.getElementById('change-email-form');
-if (changeEmailForm) {
-  changeEmailForm.onsubmit = async (e) => {
-    e.preventDefault();
-    const email = document.getElementById('settings-email-input').value.trim();
-
-    try {
-      const res = await fetch('/api/settings/email', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        showToast('E-Mail-Adresse erfolgreich gespeichert.');
-        loadSettings();
-      } else {
-        showToast(data.error);
-      }
-    } catch (err) {
-      showToast('Fehler beim Ändern der E-Mail-Adresse.');
-    }
-  };
-}
-
 function renderVersionRow(label, version, expected, outdated) {
   const valueColor = outdated ? '#ff9f0a' : 'var(--color-text)';
   const valueText = version ? escapeHtml(version) : 'nicht gesetzt';
@@ -5660,13 +5633,6 @@ async function openOfficeEditor(fileId, fileName) {
 
     // Dynamically load EuroOffice Javascript API
     await loadOfficeScript(publicUrl);
-
-    // Title update
-    const titleEl = document.getElementById('office-editor-title');
-    if (titleEl) {
-      titleEl.innerHTML = `<i data-lucide="file-text"></i> ${escapeHtml(fileName)}`;
-      lucide.createIcons();
-    }
 
     // Clear previous editor
     const container = document.getElementById('office-iframe-container');
