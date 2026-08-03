@@ -2433,6 +2433,11 @@ function updateUploadUI() {
         <span style="font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 200px;" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
         <div style="display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0;">
           <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 500;">${escapeHtml(statusText)}</span>
+          ${item.status === 'error' ? `
+            <button class="retry-upload-item-btn" data-index="${index}" style="border: none; background: transparent; cursor: pointer; padding: 0.1rem; display: flex; align-items: center; justify-content: center; opacity: 0.8; transition: opacity 0.2s;" title="Erneut versuchen">
+              <i data-lucide="rotate-cw" style="width: 14px; height: 14px; color: var(--color-primary);"></i>
+            </button>
+          ` : ''}
           <button class="delete-upload-item-btn" data-index="${index}" style="border: none; background: transparent; cursor: pointer; padding: 0.1rem; display: flex; align-items: center; justify-content: center; opacity: 0.6; transition: opacity 0.2s;" title="Aus Liste entfernen">
             <i data-lucide="x" style="width: 14px; height: 14px; color: var(--color-text);"></i>
           </button>
@@ -2444,6 +2449,15 @@ function updateUploadUI() {
         </div>
       ` : ''}
     `;
+
+    const retryBtn = row.querySelector('.retry-upload-item-btn');
+    if (retryBtn) {
+      retryBtn.onclick = (e) => {
+        e.stopPropagation();
+        const idx = parseInt(retryBtn.getAttribute('data-index'));
+        retryUploadItem(idx);
+      };
+    }
 
     const deleteBtn = row.querySelector('.delete-upload-item-btn');
     if (deleteBtn) {
@@ -2539,6 +2553,17 @@ function updateUploadUI() {
   }
 
   lucide.createIcons();
+}
+
+// Nach einem erfolgreichen Einzel-Upload (oder Abschluss der ganzen Warteschlange) die
+// Dashboard-Ansicht nur dann neu laden, wenn sie den Zielordner der Datei gerade anzeigt —
+// sonst würde man z.B. aus der "Zuletzt hinzugefügt"-Ansicht ungewollt herausgerissen.
+function refreshDashboardAfterUpload(targetParentId) {
+  if (viewingRecents) {
+    loadRecentFiles();
+  } else if (currentFolderId === targetParentId) {
+    loadFiles(currentFolderId);
+  }
 }
 
 const resolvedFolderCache = {};
@@ -2658,6 +2683,14 @@ async function uploadMultipleFiles(filesList) {
 
   updateUploadUI();
 
+  await processUploadQueue();
+}
+
+// Arbeitet die Warteschlange (Status 'pending') sequentiell ab. Wird sowohl beim ersten
+// Auslösen eines Uploads als auch beim erneuten Versuch einer fehlgeschlagenen Datei
+// aufgerufen — läuft bereits eine Verarbeitung, hängt sich ein zweiter Aufruf einfach an
+// (die laufende Schleife findet das neu auf 'pending' gesetzte Item von selbst).
+async function processUploadQueue() {
   if (uploadActive) {
     return;
   }
@@ -2694,6 +2727,9 @@ async function uploadMultipleFiles(filesList) {
           uploadItem.uploaded = uploadItem.size;
           uploadItem.xhr = null;
           updateUploadUI();
+          // Sofort anzeigen, statt auf den Abschluss der gesamten Warteschlange zu warten —
+          // bei mehreren Dateien tauchen sie so nach und nach im Dashboard auf.
+          refreshDashboardAfterUpload(uploadParentId);
         },
         (errMsg) => {
           if (uploadItem.status !== 'cancelled') {
@@ -2718,19 +2754,35 @@ async function uploadMultipleFiles(filesList) {
   }
 
   uploadActive = false;
-  
+
   updateUploadUI();
-  loadFiles(currentFolderId);
+  // Fallback für z.B. neu angelegte Ordner-Segmente ohne eigenes 'done'-Callback.
+  refreshDashboardAfterUpload(currentFolderId);
+  loadStorageSettings();
 
   const errors = currentUploadQueue.filter(item => item.status === 'error');
   const done = currentUploadQueue.filter(item => item.status === 'done');
   if (errors.length > 0) {
     showToast(`${done.length} von ${currentUploadQueue.filter(item => item.status !== 'cancelled').length} erfolgreich hochgeladen, ${errors.length} fehlgeschlagen.`);
-  } else {
+  } else if (done.length > 0) {
     showToast('Alle Datei-Uploads erfolgreich abgeschlossen!');
   }
 
   checkAndTriggerAutoHide();
+}
+
+// Setzt ein fehlgeschlagenes Upload-Item zurück auf 'pending' und stößt die Warteschlange
+// erneut an, damit genau diese eine Datei noch einmal hochgeladen wird.
+function retryUploadItem(index) {
+  const item = currentUploadQueue[index];
+  if (!item || item.status !== 'error') return;
+
+  item.status = 'pending';
+  item.error = null;
+  item.uploaded = 0;
+  item.xhr = null;
+  updateUploadUI();
+  processUploadQueue();
 }
 
 function setUploadWidgetState(state) {
