@@ -1736,25 +1736,86 @@
   <!-- PDF VIEWER MODAL -->
   <div class="modal-overlay" id="pdf-viewer-overlay" style="display: none; padding: 0; z-index: 10000; width: 100vw; height: 100vh; background: var(--modal-bg);">
     <div style="display: flex; flex-direction: column; width: 100%; height: 100%;">
-      <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem 2rem; background: var(--glass-bg); border-bottom: 1px solid var(--color-border); color: var(--color-text); flex-shrink: 0; backdrop-filter: var(--glass-blur);">
-        <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600;" id="pdf-viewer-title">
-          <i data-lucide="file-text"></i> PDF-Vorschau
-        </div>
-        <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <div class="pdf-layout-toggle" id="pdf-layout-toggle">
-            <button type="button" class="pdf-layout-btn active" data-spread="0" title="Einzelseite"><i data-lucide="file"></i></button>
-            <button type="button" class="pdf-layout-btn" data-spread="1" title="Zwei Seiten (Seite 1 einzeln)"><i data-lucide="book-open"></i></button>
-            <button type="button" class="pdf-layout-btn" data-spread="2" title="Zwei Seiten (Seite 1 & 2 zusammen)"><i data-lucide="gallery-horizontal"></i></button>
+      <div class="pdf-toolbar">
+        <div class="pdf-toolbar-row">
+          <div style="display: flex; align-items: center; gap: 0.5rem; font-weight: 600; min-width: 0;" id="pdf-viewer-title">
+            <i data-lucide="file-text"></i>
+            <span id="pdf-viewer-filename" title="Doppelklick zum Umbenennen" style="cursor: text; border-bottom: 1px dashed transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px;">PDF-Vorschau</span>
+            <input id="pdf-viewer-filename-input" type="text" style="display: none; background: var(--input-bg); border: 1px solid var(--color-accent); border-radius: 4px; color: var(--color-text); font-weight: 600; font-size: inherit; font-family: inherit; padding: 0.1rem 0.4rem;">
           </div>
-          <button type="button" class="pdf-layout-btn" id="pdf-fit-page-btn" title="An Fenster anpassen (Höhe/Breite)" style="background: rgba(255,255,255,0.05); border: 1px solid var(--color-border); width: 34px; height: 34px;"><i data-lucide="scan"></i></button>
+
+          <div class="pdf-toolbar-group">
+            <button type="button" class="pdf-tool-btn" id="pdf-toc-toggle-btn" title="Inhaltsverzeichnis"><i data-lucide="list"></i></button>
+            <div class="pdf-toolbar-sep"></div>
+            <button type="button" class="pdf-tool-btn" id="pdf-zoom-out-btn" title="Verkleinern (Strg + -)"><i data-lucide="minus"></i></button>
+            <button type="button" class="pdf-zoom-display" id="pdf-zoom-display" title="Zoomstufe">100%</button>
+            <button type="button" class="pdf-tool-btn" id="pdf-zoom-in-btn" title="Vergrößern (Strg + +)"><i data-lucide="plus"></i></button>
+            <button type="button" class="pdf-tool-btn" id="pdf-fit-page-btn" title="An Fenster anpassen (Höhe/Breite)"><i data-lucide="scan"></i></button>
+            <div class="pdf-toolbar-sep"></div>
+            <button type="button" class="pdf-tool-btn" id="pdf-prev-page-btn" title="Vorherige Seite (←)"><i data-lucide="chevron-left"></i></button>
+            <input type="number" id="pdf-page-input" class="pdf-page-input" min="1" value="1" title="Seite springen">
+            <span class="pdf-page-count">/ <span id="pdf-page-count">1</span></span>
+            <button type="button" class="pdf-tool-btn" id="pdf-next-page-btn" title="Nächste Seite (→)"><i data-lucide="chevron-right"></i></button>
+          </div>
+
+          <div class="pdf-toolbar-group">
+            <div class="pdf-layout-toggle" id="pdf-layout-toggle">
+              <button type="button" class="pdf-layout-btn active" data-spread="0" title="Einzelseite"><i data-lucide="file"></i></button>
+              <button type="button" class="pdf-layout-btn" data-spread="1" title="Zwei Seiten (Seite 1 einzeln)"><i data-lucide="book-open"></i></button>
+              <button type="button" class="pdf-layout-btn" data-spread="2" title="Zwei Seiten (Seite 1 & 2 zusammen)"><i data-lucide="gallery-horizontal"></i></button>
+            </div>
+          </div>
+
+          <div class="pdf-toolbar-group">
+            <button type="button" class="pdf-tool-btn" id="pdf-tool-pen-btn" title="Freihand-Stift"><i data-lucide="pencil"></i></button>
+            <button type="button" class="pdf-tool-btn" id="pdf-tool-highlight-btn" title="Textmarker"><i data-lucide="highlighter"></i></button>
+            <div id="pdf-tool-params" class="pdf-tool-params" style="display: none;">
+              <input type="color" id="pdf-tool-color" value="#ff2d55" title="Farbe">
+              <input type="range" id="pdf-tool-thickness" min="1" max="30" value="3" title="Stärke">
+            </div>
+          </div>
+
+          <div class="pdf-toolbar-group" id="pdf-actions-group">
+            <button type="button" class="pdf-tool-btn" id="pdf-save-btn" title="Speichern" disabled><i data-lucide="save"></i></button>
+            <button type="button" class="pdf-tool-btn" id="pdf-download-btn" title="Herunterladen"><i data-lucide="download"></i></button>
+          </div>
+
+          <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text); margin-left: auto;">
+            <i data-lucide="x"></i>
+          </button>
         </div>
-        <button class="btn btn-icon close-btn" id="close-pdf-viewer-btn" style="padding: 0.25rem; background: transparent; border: none; color: var(--color-text);">
-          <i data-lucide="x"></i>
-        </button>
       </div>
-      <div style="flex: 1; position: relative; overflow: hidden; background: #525659;">
-        <div id="pdf-viewer-container" style="position: absolute; inset: 0; overflow: auto;">
-          <div id="pdf-viewer-inner" class="pdfViewer"></div>
+      <div style="flex: 1; position: relative; overflow: hidden; background: #525659; display: flex;">
+        <div id="pdf-toc-sidebar" class="pdf-toc-sidebar">
+          <div class="pdf-toc-header">Inhaltsverzeichnis</div>
+          <div id="pdf-toc-list" class="pdf-toc-list"></div>
+        </div>
+        <div style="position: relative; flex: 1;">
+          <div id="pdf-viewer-container" style="position: absolute; inset: 0; overflow: auto;">
+            <div id="pdf-viewer-inner" class="pdfViewer"></div>
+          </div>
+          <div id="pdf-viewer-loading" style="display: none; position: absolute; inset: 0; align-items: center; justify-content: center; flex-direction: column; gap: 1rem; color: var(--color-accent); font-weight: bold; background: #525659;">
+            <div class="spinner" style="width: 40px; height: 40px; border: 4px solid rgba(0,210,255,0.1); border-left-color: var(--color-accent); border-radius: 50%; animation: spin 1s linear infinite;"></div>
+            <span id="pdf-viewer-loading-text">Lade PDF…</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PDF SAVE/DOWNLOAD CHOICE MODAL (Original vs. bearbeitete Version) -->
+  <div class="modal-overlay" id="pdf-choice-modal-overlay">
+    <div class="card modal" style="max-width: 400px; width: 90%;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="pdf-choice-title">Version wählen</h3>
+        <button class="close-btn" id="close-pdf-choice-btn" type="button">&times;</button>
+      </div>
+      <div style="margin-top: 1rem;">
+        <p id="pdf-choice-message" style="font-size: 0.95rem; color: var(--color-text-muted); line-height: 1.5; margin-bottom: 1.5rem;"></p>
+        <div class="form-actions" style="display: flex; gap: 0.5rem;">
+          <button type="button" class="btn btn-primary" id="pdf-choice-edited-btn" style="justify-content: center;">Bearbeitete Version</button>
+          <button type="button" class="btn" id="pdf-choice-original-btn" style="justify-content: center;">Original</button>
+          <button type="button" class="btn" id="cancel-pdf-choice-btn" style="justify-content: center;">Abbrechen</button>
         </div>
       </div>
     </div>

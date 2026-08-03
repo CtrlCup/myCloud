@@ -1336,6 +1336,11 @@ header {
   z-index: 10010;
 }
 
+/* Above the PDF viewer overlay (z-index 10000) so its save/download choice prompt is visible */
+#pdf-choice-modal-overlay {
+  z-index: 10020;
+}
+
 .modal-overlay.active {
   opacity: 1;
   pointer-events: all;
@@ -3038,6 +3043,180 @@ tbody tr {
   margin: 0 auto 1.5rem auto;
   box-shadow: 0 4px 18px rgba(0,0,0,0.4);
   border: none;
+}
+
+/* ─── PDF viewer toolbar ─── */
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 0.6rem 1.25rem;
+  background: var(--glass-bg);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  flex-shrink: 0;
+  backdrop-filter: var(--glass-blur);
+}
+.pdf-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.pdf-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.2rem 0.35rem;
+}
+.pdf-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--color-border);
+  margin: 0 0.15rem;
+}
+.pdf-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.pdf-tool-btn:hover {
+  color: var(--color-text);
+  background: rgba(255,255,255,0.08);
+}
+.pdf-tool-btn.active {
+  color: #fff;
+  background: var(--color-accent);
+}
+.pdf-tool-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.pdf-tool-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.pdf-zoom-display {
+  background: transparent;
+  border: none;
+  color: var(--color-text);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  min-width: 44px;
+  text-align: center;
+}
+.pdf-zoom-display:hover {
+  color: var(--color-accent);
+}
+.pdf-page-input {
+  width: 42px;
+  background: var(--input-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text);
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 0.2rem;
+  -moz-appearance: textfield;
+}
+.pdf-page-input::-webkit-outer-spin-button,
+.pdf-page-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.pdf-page-count {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+.pdf-tool-params {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-left: 0.3rem;
+}
+.pdf-tool-params input[type="color"] {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.pdf-tool-params input[type="range"] {
+  width: 70px;
+}
+
+/* ─── PDF viewer TOC sidebar ─── */
+.pdf-toc-sidebar {
+  width: 0;
+  overflow: hidden;
+  background: var(--glass-bg);
+  border-right: 1px solid var(--color-border);
+  flex-shrink: 0;
+  transition: width 0.2s ease;
+}
+.pdf-toc-sidebar.open {
+  width: 260px;
+  overflow-y: auto;
+}
+.pdf-toc-header {
+  padding: 0.85rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+.pdf-toc-list {
+  padding: 0.4rem;
+}
+.pdf-toc-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--color-text);
+  font-size: 0.82rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pdf-toc-item:hover {
+  background: rgba(255,255,255,0.08);
+}
+.pdf-toc-empty {
+  padding: 0.75rem 1rem;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+/* ─── PDF viewer save/download choice modal ─── */
+#pdf-choice-modal-overlay .form-actions {
+  flex-direction: column;
+}
+#pdf-choice-modal-overlay .btn {
+  width: 100%;
 }
 
 /* ─── Image/Video viewer info panel ─── */

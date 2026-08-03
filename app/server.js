@@ -2328,6 +2328,49 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
   }
 });
 
+// Overwrite a file's binary content in place (e.g. a PDF re-saved with annotations/filled-in
+// form fields from the in-browser viewer). Unlike /content/:id above this is multipart/binary,
+// not JSON text, and keeps the same file id/row — only the on-disk path changes (multer already
+// wrote the upload under a fresh UUID name, so we just point the row at it and drop the old
+// physical file, same idea as the trash/copy routes swapping `path` without touching `id`).
+app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_files'), upload.single('file'), async (req, res) => {
+  const fileId = parseInt(req.params.id);
+  const userId = req.session.userId;
+
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  try {
+    const isOwner = await verifyFileOwner(fileId, userId);
+    if (!isOwner) {
+      fs.unlinkSync(req.file.path);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    const file = fileRes.rows[0];
+    if (!file || file.is_folder) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'File not found or is a folder' });
+    }
+
+    const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
+    const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
+
+    await pool.query(
+      'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
+      [req.file.filename, req.file.size, textContent, fileId]
+    );
+
+    if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+
+    res.json({ success: true, size: req.file.size });
+  } catch (err) {
+    console.error('Error saving binary file content:', err);
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // List version history for a file (newest first)
 app.get('/api/files/:id/versions', requireAuth, async (req, res) => {
   const fileId = parseInt(req.params.id);
@@ -3622,6 +3665,48 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     res.json({ success: true, size: stats.size });
   } catch (err) {
     console.error('Public content save error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Overwrite a publicly-shared file's binary content in place — the writable-share counterpart
+// to PUT /api/files/:id/binary-content above (e.g. a guest filling in/annotating a shared PDF).
+app.put('/api/public/shares/:slug/binary-content/:fileId', upload.single('file'), async (req, res) => {
+  const { slug, fileId } = req.params;
+
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  try {
+    const access = await verifyPublicShareAccess(slug, fileId, req);
+    if (access.error) {
+      fs.unlinkSync(req.file.path);
+      return res.status(access.status).json({ error: access.error });
+    }
+
+    const { file, share } = access;
+    if (!share.can_write) {
+      fs.unlinkSync(req.file.path);
+      return res.status(403).json({ error: 'Write permission denied.' });
+    }
+    if (file.is_folder) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Folders do not have binary content' });
+    }
+
+    const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
+    const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
+
+    await pool.query(
+      'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
+      [req.file.filename, req.file.size, textContent, file.id]
+    );
+
+    if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+
+    res.json({ success: true, size: req.file.size });
+  } catch (err) {
+    console.error('Public binary content save error:', err);
+    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
