@@ -978,16 +978,16 @@ header {
 }
 
 /* ─── Tile View ─── */
-/* align-content/align-items: start — without this, the grid's reserved #file-grid
-   min-height (kept as a drop-zone/empty-state area) gets distributed into the auto row
-   track and then into each item (default align stretch), inflating every tile's height
-   independently of its actual content and breaking the icon's aspect-ratio proportions. */
+/* align-content: start — without this, the grid's reserved #file-grid min-height (kept as a
+   drop-zone/empty-state area) gets distributed into the row tracks (default align-content:
+   stretch), inflating every tile's height independently of its actual content and breaking
+   the icon's aspect-ratio proportions. align-items stays default (stretch) so tiles WITHIN
+   the same row still match each other's height (e.g. a 2-line name growing its neighbors). */
 .file-grid:not(.list-view) {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 0.85rem;
   align-content: start;
-  align-items: start;
 }
 
 .file-grid:not(.list-view) .file-item {
