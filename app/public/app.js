@@ -2635,7 +2635,11 @@ async function resolveFolderSegments(segments, rootParentId) {
   return currentParentId;
 }
 
-async function uploadMultipleFiles(filesList) {
+// targetFolderId defaults to the currently open folder, evaluated at call time — callers with
+// an async gap between the user's drop/click and this call (e.g. drag-drop folder traversal)
+// should instead capture and pass it explicitly, so a later navigation can't retarget the
+// upload: files should land where the user dropped them, not wherever they browse to next.
+async function uploadMultipleFiles(filesList, targetFolderId = currentFolderId) {
   const trigger = document.getElementById('upload-status-trigger');
   const panel = document.getElementById('upload-details-panel');
   const circle = document.getElementById('upload-status-circle');
@@ -2660,7 +2664,8 @@ async function uploadMultipleFiles(filesList) {
     uploaded: 0,
     status: 'pending',
     error: null,
-    fileObj: file
+    fileObj: file,
+    parentId: targetFolderId
   }));
 
   currentUploadQueue = currentUploadQueue.concat(newUploads);
@@ -2711,12 +2716,16 @@ async function processUploadQueue() {
     updateUploadUI();
 
     try {
-      let uploadParentId = currentFolderId;
+      // The folder this file lands in — captured on the item back when it was queued (see
+      // uploadMultipleFiles), NOT the live currentFolderId. Uploads are processed sequentially,
+      // so by the time a later item in the queue reaches here the user may well have already
+      // navigated elsewhere; it must still land where it was originally dropped/selected.
+      let uploadParentId = uploadItem.parentId;
       if (uploadItem.fileObj.webkitRelativePath) {
         const pathParts = uploadItem.fileObj.webkitRelativePath.split('/');
         if (pathParts.length > 1) {
           pathParts.pop(); // Remove filename
-          uploadParentId = await resolveFolderSegments(pathParts, currentFolderId);
+          uploadParentId = await resolveFolderSegments(pathParts, uploadItem.parentId);
         }
       }
 
@@ -3231,6 +3240,11 @@ dashboard.addEventListener('drop', async (e) => {
   // Internal drag-and-drop (moving items into folders) is handled by folder items themselves
   if (e.dataTransfer.types.includes('text/x-mycloud-ids')) return;
 
+  // Captured now, before the (possibly slow, for a large dropped folder) traversal below —
+  // uploads should land in the folder the user dropped onto, even if they navigate away
+  // while entries are still being walked.
+  const dropTargetFolderId = currentFolderId;
+
   const entries = [];
   if (e.dataTransfer.items) {
     for (let i = 0; i < e.dataTransfer.items.length; i++) {
@@ -3258,7 +3272,7 @@ dashboard.addEventListener('drop', async (e) => {
 
   if (files.length === 0) return;
 
-  await uploadMultipleFiles(files);
+  await uploadMultipleFiles(files, dropTargetFolderId);
 });
 
 document.addEventListener('dragover', (e) => {
