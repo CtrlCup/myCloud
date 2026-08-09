@@ -65,9 +65,35 @@ const storage = multer.diskStorage({
 // Without a limit, multer will happily write an unbounded request body to disk before the
 // app-level storage-quota check (further down) ever runs — a single oversized upload could
 // fill the disk regardless of any quota. This is a generous ceiling (not the per-user quota),
-// just a backstop against a genuinely unbounded request.
-const MAX_UPLOAD_SIZE_BYTES = parseInt(process.env.MAX_UPLOAD_SIZE_BYTES) || 100 * 1024 * 1024 * 1024; // 100GB
-const upload = multer({ storage: storage, limits: { fileSize: MAX_UPLOAD_SIZE_BYTES } });
+// just a backstop against a genuinely unbounded request. Admin-configurable at runtime (see
+// max_upload_size_mb setting) so an instance can tighten it well below the 5GB fallback
+// default without a redeploy; DEFAULT_MAX_UPLOAD_SIZE_BYTES only applies until the admin
+// (or MAX_UPLOAD_SIZE_BYTES env var, kept for backwards compatibility) sets one explicitly.
+const DEFAULT_MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024 * 1024; // 5GB
+const MIN_UPLOAD_SIZE_MB = 1;
+const MAX_UPLOAD_SIZE_MB_CEILING = 512000; // 500GB — sanity cap on the admin setting itself
+let maxUploadSizeBytes = parseInt(process.env.MAX_UPLOAD_SIZE_BYTES) || DEFAULT_MAX_UPLOAD_SIZE_BYTES;
+
+// Loads the admin-configured limit from the DB (falling back to the env var / default above)
+// into the in-memory cache multer reads from. Called once at startup and again whenever the
+// setting is saved, so a running process picks up a new limit without a restart.
+async function refreshMaxUploadSizeBytes() {
+  const raw = await getSetting('max_upload_size_mb');
+  const mb = parseInt(raw);
+  if (Number.isFinite(mb) && mb >= MIN_UPLOAD_SIZE_MB && mb <= MAX_UPLOAD_SIZE_MB_CEILING) {
+    maxUploadSizeBytes = mb * 1024 * 1024;
+  }
+}
+
+// multer() is constructed fresh per request instead of once at module load, so a limit change
+// takes effect immediately instead of requiring the process (and its one frozen multer
+// instance) to restart.
+function uploadSingle(fieldName) {
+  return (req, res, next) => multer({ storage, limits: { fileSize: maxUploadSizeBytes } }).single(fieldName)(req, res, next);
+}
+function uploadArray(fieldName, maxCount) {
+  return (req, res, next) => multer({ storage, limits: { fileSize: maxUploadSizeBytes } }).array(fieldName, maxCount)(req, res, next);
+}
 
 // Browsers send multipart filenames as raw UTF-8 bytes, but multer's underlying parser (busboy)
 // decodes multipart header fields as latin1 per the multipart spec. Re-decoding the mangled
@@ -1512,7 +1538,7 @@ app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), a
 });
 
 // Upload file
-app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.single('file'), fixUploadFilenameEncoding, async (req, res) => {
+app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -1521,12 +1547,6 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.s
   const userId = req.session.userId;
 
   try {
-    const quotaCheck = await checkStorageQuota(userId, req.file.size);
-    if (!quotaCheck.ok) {
-      fs.unlinkSync(req.file.path);
-      return res.status(413).json({ error: quotaCheck.error });
-    }
-
     if (parentId !== null) {
       const isOwner = await verifyFileOwner(parentId, userId);
       if (!isOwner) {
@@ -1538,13 +1558,17 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), upload.s
     const safeMimeType = getSafeMimeType(req.file.originalname);
     const textContent = await extractTextContent(req.file.path, safeMimeType, req.file.originalname);
 
-    const result = await pool.query(
+    const quotaResult = await withStorageQuotaLock(userId, req.file.size, (client) => client.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
       [req.file.originalname, req.file.filename, safeMimeType, req.file.size, false, parentId, userId, textContent]
-    );
+    ));
+    if (!quotaResult.ok) {
+      fs.unlinkSync(req.file.path);
+      return res.status(413).json({ error: quotaResult.error });
+    }
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(quotaResult.data.rows[0]);
   } catch (err) {
     console.error('Error uploading file:', err);
     // Cleanup file
@@ -2227,7 +2251,7 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
 // folder that itself carries is_one_time_note = true, reusing the existing folder-share
 // browsing/zip-download machinery; without attachments it's a single flagged text file exactly
 // as before.
-app.post('/api/files/create-note', requireAuth, upload.array('attachments', 10), fixUploadFilenameEncoding, async (req, res) => {
+app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), fixUploadFilenameEncoding, async (req, res) => {
   const { name, content, maxViews, expiresHours, parentId } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId && parentId !== 'null' ? parseInt(parentId) : null;
@@ -2438,7 +2462,7 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
 // not JSON text, and keeps the same file id/row — only the on-disk path changes (multer already
 // wrote the upload under a fresh UUID name, so we just point the row at it and drop the old
 // physical file, same idea as the trash/copy routes swapping `path` without touching `id`).
-app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_files'), upload.single('file'), async (req, res) => {
+app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_files'), uploadSingle('file'), async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
 
@@ -2458,25 +2482,26 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
       return res.status(400).json({ error: 'File not found or is a folder' });
     }
 
-    // Only the net size increase counts against quota — usedBytes below still includes this
-    // file's OLD size (its row hasn't been updated yet), so checking the full new size on top
-    // of that would double-count the very file being replaced.
-    const netAdditionalBytes = req.file.size - (file.size || 0);
-    if (netAdditionalBytes > 0) {
-      const quotaCheck = await checkStorageQuota(userId, netAdditionalBytes);
-      if (!quotaCheck.ok) {
-        fs.unlinkSync(req.file.path);
-        return res.status(413).json({ error: quotaCheck.error });
-      }
-    }
-
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
     const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
 
-    await pool.query(
+    // Only the net size increase counts against quota — usedBytes inside the lock still
+    // includes this file's OLD size (its row hasn't been updated yet), so checking the full
+    // new size on top of that would double-count the very file being replaced.
+    const netAdditionalBytes = req.file.size - (file.size || 0);
+    const doUpdate = (client) => client.query(
       'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
       [req.file.filename, req.file.size, textContent, fileId]
     );
+    if (netAdditionalBytes > 0) {
+      const quotaResult = await withStorageQuotaLock(userId, netAdditionalBytes, doUpdate);
+      if (!quotaResult.ok) {
+        fs.unlinkSync(req.file.path);
+        return res.status(413).json({ error: quotaResult.error });
+      }
+    } else {
+      await doUpdate(pool);
+    }
 
     if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
 
@@ -3366,7 +3391,7 @@ app.get('/api/public/branding/login-bg', async (req, res) => {
 });
 
 // Upload Cloud Icon (Admin only)
-app.post('/api/settings/admin/icon', requireAdmin, upload.single('icon'), async (req, res) => {
+app.post('/api/settings/admin/icon', requireAdmin, uploadSingle('icon'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No icon file provided.' });
   }
@@ -3393,7 +3418,7 @@ app.post('/api/settings/admin/icon', requireAdmin, upload.single('icon'), async 
 });
 
 // Upload SEO/Open-Graph preview image (Admin only)
-app.post('/api/settings/admin/seo-image', requireAdmin, upload.single('image'), async (req, res) => {
+app.post('/api/settings/admin/seo-image', requireAdmin, uploadSingle('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided.' });
   }
@@ -3438,7 +3463,7 @@ app.delete('/api/settings/admin/seo-image', requireAdmin, async (req, res) => {
 });
 
 // Upload Dashboard Background (Admin only) — variant: dark (default) | light
-app.post('/api/settings/admin/dashboard-bg', requireAdmin, upload.single('image'), async (req, res) => {
+app.post('/api/settings/admin/dashboard-bg', requireAdmin, uploadSingle('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
@@ -3481,7 +3506,7 @@ app.delete('/api/settings/admin/dashboard-bg', requireAdmin, async (req, res) =>
 });
 
 // Upload Login Background (Admin only) — variant: dark (default) | light
-app.post('/api/settings/admin/login-bg', requireAdmin, upload.single('image'), async (req, res) => {
+app.post('/api/settings/admin/login-bg', requireAdmin, uploadSingle('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
@@ -3863,7 +3888,7 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
 
 // Overwrite a publicly-shared file's binary content in place — the writable-share counterpart
 // to PUT /api/files/:id/binary-content above (e.g. a guest filling in/annotating a shared PDF).
-app.put('/api/public/shares/:slug/binary-content/:fileId', upload.single('file'), async (req, res) => {
+app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'), async (req, res) => {
   const { slug, fileId } = req.params;
 
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
@@ -3885,25 +3910,26 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', upload.single('file')
       return res.status(400).json({ error: 'Folders do not have binary content' });
     }
 
-    // Charged against the file OWNER's quota (there's no uploader account on a public share) —
-    // only the net size increase counts, since usedBytes below still includes this file's OLD
-    // size until the UPDATE below runs.
-    const netAdditionalBytes = req.file.size - (file.size || 0);
-    if (netAdditionalBytes > 0) {
-      const quotaCheck = await checkStorageQuota(file.owner_id, netAdditionalBytes);
-      if (!quotaCheck.ok) {
-        fs.unlinkSync(req.file.path);
-        return res.status(413).json({ error: quotaCheck.error });
-      }
-    }
-
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
     const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
 
-    await pool.query(
+    // Charged against the file OWNER's quota (there's no uploader account on a public share) —
+    // only the net size increase counts, since usedBytes inside the lock still includes this
+    // file's OLD size until the UPDATE below runs.
+    const netAdditionalBytes = req.file.size - (file.size || 0);
+    const doUpdate = (client) => client.query(
       'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
       [req.file.filename, req.file.size, textContent, file.id]
     );
+    if (netAdditionalBytes > 0) {
+      const quotaResult = await withStorageQuotaLock(file.owner_id, netAdditionalBytes, doUpdate);
+      if (!quotaResult.ok) {
+        fs.unlinkSync(req.file.path);
+        return res.status(413).json({ error: quotaResult.error });
+      }
+    } else {
+      await doUpdate(pool);
+    }
 
     if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
 
@@ -4072,7 +4098,7 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 });
 
 // Public Share Upload - Allow uploads to shared folder if write permission exists
-app.post('/api/public/shares/:slug/upload', upload.single('file'), fixUploadFilenameEncoding, async (req, res) => {
+app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
   const { slug } = req.params;
   const parentId = req.body.parentId ? parseInt(req.body.parentId) : null;
 
@@ -4129,19 +4155,17 @@ app.post('/api/public/shares/:slug/upload', upload.single('file'), fixUploadFile
       return res.status(403).json({ error: 'Access denied.' });
     }
 
-    const quotaCheck = await checkStorageQuota(baseFile.owner_id, req.file.size);
-    if (!quotaCheck.ok) {
-      fs.unlinkSync(req.file.path);
-      return res.status(413).json({ error: quotaCheck.error });
-    }
-
-    const result = await pool.query(
+    const quotaResult = await withStorageQuotaLock(baseFile.owner_id, req.file.size, (client) => client.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
       [req.file.originalname, req.file.filename, getSafeMimeType(req.file.originalname), req.file.size, false, targetFolderId, baseFile.owner_id]
-    );
+    ));
+    if (!quotaResult.ok) {
+      fs.unlinkSync(req.file.path);
+      return res.status(413).json({ error: quotaResult.error });
+    }
 
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(quotaResult.data.rows[0]);
   } catch (err) {
     console.error('Public upload error:', err);
     if (req.file && fs.existsSync(req.file.path)) {
@@ -4348,7 +4372,7 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
    ========================================================================== */
 
 // Upload Avatar
-app.post('/api/settings/avatar', requireAuth, upload.single('avatar'), async (req, res) => {
+app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided.' });
   }
@@ -4826,6 +4850,14 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
       configs.trash_retention_days = String(n);
     }
 
+    if ('max_upload_size_mb' in configs) {
+      const n = parseInt(configs.max_upload_size_mb);
+      if (!Number.isFinite(n) || n < MIN_UPLOAD_SIZE_MB || n > MAX_UPLOAD_SIZE_MB_CEILING) {
+        return res.status(400).json({ error: `Maximale Upload-Größe muss zwischen ${MIN_UPLOAD_SIZE_MB} und ${MAX_UPLOAD_SIZE_MB_CEILING} MB liegen.` });
+      }
+      configs.max_upload_size_mb = String(n);
+    }
+
     if ('sso_button_text' in configs && configs.sso_button_text.length > 60) {
       return res.status(400).json({ error: 'Button-Text darf maximal 60 Zeichen lang sein.' });
     }
@@ -4880,6 +4912,10 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
 
     // Write updates back to .env
     updateEnvFile(activeConfigs);
+
+    if ('max_upload_size_mb' in activeConfigs) {
+      await refreshMaxUploadSizeBytes();
+    }
 
     res.json({ success: true, message: 'System configurations updated.' });
   } catch (err) {
@@ -4970,36 +5006,73 @@ function parseQuotaBytes(raw) {
 // skip this check entirely, letting anyone with a writable share link fill up the share owner's
 // storage (and the whole disk, up to MAX_UPLOAD_SIZE_BYTES per file) regardless of their
 // configured quota.
-async function checkStorageQuota(ownerId, additionalBytes) {
-  const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [ownerId]);
-  if (userRes.rows.length === 0) return { ok: true };
+//
+// Runs the quota check and the caller's write (`writeFn`) inside a single DB transaction,
+// serialized behind advisory locks keyed on the owner id (and, if a role quota applies, the
+// role name). Without this, two concurrent requests could both run the SELECT SUM(size) check
+// against the same "before" total, both see themselves as within quota, and both commit their
+// insert/update — letting quota be exceeded by any multiple simply by firing uploads in
+// parallel (e.g. several browser tabs, or a trivial curl loop), which on a disk-full event can
+// take down Postgres (failed WAL writes) for every user, not just the one over quota. The
+// advisory lock closes that window: the second transaction blocks until the first commits (or
+// rolls back), so it always sees the first upload's write when it re-reads "used bytes".
+//
+// `writeFn(client)` must perform the caller's actual DB write (insert/update of the files row)
+// using the given `client`, not `pool`, so it lands in the same transaction as the check.
+async function withStorageQuotaLock(ownerId, additionalBytes, writeFn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // pg_advisory_xact_lock auto-releases at COMMIT/ROLLBACK — no separate unlock needed.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`quota_user_${ownerId}`]);
 
-  const quotaBytes = parseQuotaBytes(userRes.rows[0].storage_quota).value;
-  if (quotaBytes !== null) {
-    const usedRes = await pool.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [ownerId]);
-    const usedBytes = parseInt(usedRes.rows[0].total || 0);
-    if (usedBytes + additionalBytes > quotaBytes) {
-      return { ok: false, error: 'Speicherplatzlimit überschritten! Bitte lösche Dateien oder wende dich an einen Admin.' };
+    const userRes = await client.query('SELECT storage_quota, role FROM users WHERE id = $1', [ownerId]);
+    if (userRes.rows.length === 0) {
+      const data = await writeFn(client);
+      await client.query('COMMIT');
+      return { ok: true, data };
     }
-  }
 
-  const roleName = userRes.rows[0].role;
-  const roleQuotaRes = await pool.query('SELECT storage_quota FROM roles WHERE name = $1', [roleName]);
-  const roleQuotaBytes = parseQuotaBytes(roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota).value;
-  if (roleQuotaBytes !== null) {
-    const groupUsedRes = await pool.query(
-      `SELECT COALESCE(SUM(f.size), 0) as total
-       FROM files f JOIN users u ON f.owner_id = u.id
-       WHERE u.role = $1 AND f.is_folder = false`,
-      [roleName]
-    );
-    const groupUsed = parseInt(groupUsedRes.rows[0].total || 0);
-    if (groupUsed + additionalBytes > roleQuotaBytes) {
-      return { ok: false, error: 'Das gemeinsame Speicherkontingent deiner Gruppe ist erschöpft. Bitte wende dich an einen Admin.' };
+    const quotaBytes = parseQuotaBytes(userRes.rows[0].storage_quota).value;
+    if (quotaBytes !== null) {
+      const usedRes = await client.query('SELECT SUM(size) as total FROM files WHERE owner_id = $1 AND is_folder = false', [ownerId]);
+      const usedBytes = parseInt(usedRes.rows[0].total || 0);
+      if (usedBytes + additionalBytes > quotaBytes) {
+        await client.query('ROLLBACK');
+        return { ok: false, error: 'Speicherplatzlimit überschritten! Bitte lösche Dateien oder wende dich an einen Admin.' };
+      }
     }
-  }
 
-  return { ok: true };
+    const roleName = userRes.rows[0].role;
+    // Locking the role too serializes concurrent uploads from *different* users who share a
+    // role-level quota — otherwise they'd each pass the per-user lock (different keys) and
+    // still race each other on the shared group total below.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`quota_role_${roleName}`]);
+    const roleQuotaRes = await client.query('SELECT storage_quota FROM roles WHERE name = $1', [roleName]);
+    const roleQuotaBytes = parseQuotaBytes(roleQuotaRes.rows[0] && roleQuotaRes.rows[0].storage_quota).value;
+    if (roleQuotaBytes !== null) {
+      const groupUsedRes = await client.query(
+        `SELECT COALESCE(SUM(f.size), 0) as total
+         FROM files f JOIN users u ON f.owner_id = u.id
+         WHERE u.role = $1 AND f.is_folder = false`,
+        [roleName]
+      );
+      const groupUsed = parseInt(groupUsedRes.rows[0].total || 0);
+      if (groupUsed + additionalBytes > roleQuotaBytes) {
+        await client.query('ROLLBACK');
+        return { ok: false, error: 'Das gemeinsame Speicherkontingent deiner Gruppe ist erschöpft. Bitte wende dich an einen Admin.' };
+      }
+    }
+
+    const data = await writeFn(client);
+    await client.query('COMMIT');
+    return { ok: true, data };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Admin Role-Management: list roles with member counts & combined storage usage
@@ -5702,7 +5775,8 @@ function initWebSocket(server) {
 }
 
 initDb()
-  .then(() => {
+  .then(async () => {
+    await refreshMaxUploadSizeBytes();
     logVersionStatus();
     const server = app.listen(PORT, () => {
       console.log(`myCloud app is running on ${EXPECTED_ORIGIN}`);

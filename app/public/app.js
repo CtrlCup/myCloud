@@ -4259,6 +4259,7 @@ async function loadAdminSettings() {
 
       // Systemeinstellungen befüllen
       document.getElementById('admin-trash-retention-days').value = conf.trash_retention_days || '30';
+      document.getElementById('admin-max-upload-size-mb').value = conf.max_upload_size_mb || '5120';
 
       // Registrierung & SSO befüllen
       document.getElementById('admin-reg-enabled').checked = conf.registration_enabled === 'true';
@@ -4436,6 +4437,7 @@ document.getElementById('admin-system-form').onsubmit = async (e) => {
   e.preventDefault();
   const payload = {
     trash_retention_days: document.getElementById('admin-trash-retention-days').value.trim() || '30',
+    max_upload_size_mb: document.getElementById('admin-max-upload-size-mb').value.trim() || '5120',
   };
   await saveAdminConfig(payload);
 };

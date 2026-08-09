@@ -899,6 +899,14 @@
                   <span style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.35rem; display: block;">Gelöschte Dateien werden nach dieser Anzahl Tage im Papierkorb endgültig entfernt.</span>
                 </div>
               </div>
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>Uploads</h3>
+                <div class="form-group" style="margin-top: 1.5rem;">
+                  <label for="admin-max-upload-size-mb">Maximale Dateigröße pro Upload (MB)</label>
+                  <input type="number" id="admin-max-upload-size-mb" class="form-control" min="1" max="512000" placeholder="5120">
+                  <span style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 0.35rem; display: block;">Harte Obergrenze pro Datei, unabhängig vom Speicherkontingent der Nutzer. Änderung wirkt sofort, kein Neustart nötig.</span>
+                </div>
+              </div>
               <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
                 Systemkonfigurationen speichern
               </button>
