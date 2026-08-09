@@ -296,7 +296,10 @@ async function checkAuthStatus() {
         viewingRecents = true;
         showView('dashboard');
       } else {
-        window.location.hash = '#dashboard';
+        // Dashboard is the default/home view — keep the URL bare (no hash) instead of
+        // stamping #dashboard onto it. replaceState so a stray legacy #dashboard link
+        // doesn't add an extra "back" stop.
+        if (hash) window.history.replaceState(null, '', window.location.pathname + window.location.search);
         showView('dashboard');
       }
     } else {
@@ -311,7 +314,10 @@ async function checkAuthStatus() {
         updateAuthUI(true);
         showToast('Ersteinrichtung: Registriere den ersten Admin-Benutzer.');
       }
-      
+
+      // Not logged in — drop any stale view hash (e.g. #admin left over from an expired
+      // session) so a reload lands on the clean login URL instead of re-showing it mid-flash.
+      if (window.location.hash) window.history.replaceState(null, '', window.location.pathname + window.location.search);
       showView('auth');
     }
   } catch (err) {
@@ -410,7 +416,7 @@ function showView(viewName) {
       }
       loadAdminSettings();
     } else {
-      window.location.hash = '#dashboard';
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
       showView('dashboard');
     }
   }
@@ -453,10 +459,9 @@ function updateNovaPageHeader(viewName) {
 
 window.addEventListener('hashchange', () => {
   const hash = window.location.hash;
-  if (!currentUser && hash !== '#login') {
-    window.location.hash = '#login';
+  if (!currentUser) {
     showView('auth');
-  } else if (currentUser) {
+  } else {
     if (hash === '#settings') {
       showView('settings');
     } else if (hash === '#notes') {
@@ -734,7 +739,7 @@ if (dropdownLogoutBtn) {
       if (res.ok) {
         currentUser = null;
         userDropdownMenu.classList.remove('show');
-        window.location.hash = '#login';
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
         checkAuthStatus();
       }
     } catch (err) {
@@ -801,7 +806,7 @@ if (dropdownAdminBtn) {
 
 function closeSettingsOrAdmin() {
   viewingRecents = false;
-  window.history.replaceState(null, '', '#dashboard');
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
   showView('dashboard');
 }
 
@@ -823,7 +828,7 @@ function goToDashboardRoot(e) {
   currentFolderId = null;
   breadcrumbsHistory = [];
   clearSelection();
-  window.location.hash = '#dashboard';
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
   showView('dashboard');
 }
 
