@@ -1,6 +1,6 @@
 {
   "name": "mycloud-app",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Minimalistic 2-color Cloud Storage Application",
   "main": "server.js",
   "scripts": {
