@@ -1089,6 +1089,22 @@
       return 'file';
     }
 
+    // Same type-badge text as the dashboard's getFileTypeLabel() (see app.js) — no need for the
+    // dashboard's full per-type icon-color map here, just the label shown under the tile name.
+    function shareFileTypeLabel(file) {
+      if (file.is_folder) return 'Ordner';
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (ext === 'pdf') return 'PDF';
+      if (['docx', 'doc', 'odt', 'rtf'].includes(ext)) return 'Dokument';
+      if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) return 'Tabelle';
+      if (['pptx', 'ppt', 'odp'].includes(ext)) return 'Präsentation';
+      if (['heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) return 'RAW-Bild';
+      if (SHARE_IMAGE_EXTS.includes(ext)) return 'Bild';
+      if (SHARE_VIDEO_EXTS.includes(ext)) return 'Video';
+      if (['zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz'].includes(ext)) return 'Archiv';
+      return ext ? ext.toUpperCase() : 'Datei';
+    }
+
     function openShareFile(file) {
       const ext = file.name.split('.').pop().toLowerCase();
       if (SHARE_IMAGE_EXTS.includes(ext)) openImageViewer(file.id, file.name, true, slug);
@@ -1227,41 +1243,28 @@
         const item = document.createElement('div');
         item.className = 'file-item';
 
-        let iconName = 'file';
-        if (file.is_folder) {
-          iconName = 'folder';
-        } else {
-          const ext = file.name.split('.').pop().toLowerCase();
-          if (['docx', 'doc', 'odt', 'rtf', 'pdf'].includes(ext)) {
-            iconName = 'file-text';
-          } else if (['xlsx', 'xls', 'ods', 'csv'].includes(ext)) {
-            iconName = 'file-spreadsheet';
-          } else if (['pptx', 'ppt', 'odp'].includes(ext)) {
-            iconName = 'presentation';
-          } else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext)) {
-            iconName = 'file-image';
-          } else if (['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext)) {
-            iconName = 'file-video';
-          } else if (['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'].includes(ext)) {
-            iconName = 'file-code';
-          }
-        }
-
         const ext = file.is_folder ? '' : file.name.split('.').pop().toLowerCase();
-        const isImg = !file.is_folder && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'].includes(ext);
-        const isVid = !file.is_folder && ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'].includes(ext);
+        const iconName = shareFileIconName(file);
+        const isThumb = !file.is_folder && (SHARE_IMAGE_EXTS.includes(ext) || SHARE_VIDEO_EXTS.includes(ext));
+        if (isThumb) item.classList.add('has-thumb');
 
         let iconHTML = `<i data-lucide="${iconName}"></i>`;
-        if (isImg || isVid) {
+        if (isThumb) {
           const thumbUrl = `/api/public/shares/${slug}/thumbnail/${file.id}`;
           iconHTML = `<img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                       <i data-lucide="${iconName}" style="display: none;"></i>`;
         }
 
+        // Same markup shape as the dashboard's tiles (see renderFiles() in app.js) — the grid
+        // CSS positions children by class (.file-icon/.file-info-group/.file-type-label/
+        // .file-info) via flex `order`, so this needs to match structurally, not just visually.
         item.innerHTML = `
-          <div class="file-icon" style="display: flex; align-items: center; justify-content: center; overflow: hidden; width: 40px; height: 40px;">${iconHTML}</div>
-          <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
-          <div class="file-info">${file.is_folder ? 'Ordner' : formatBytes(file.size)}</div>
+          <div class="file-icon">${iconHTML}</div>
+          <div class="file-info-group">
+            <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+          </div>
+          <div class="file-type-label">${escapeHtml(shareFileTypeLabel(file))}</div>
+          <div class="file-info">${formatBytes(file.size)}</div>
         `;
 
         item.oncontextmenu = (e) => showFileContextMenu(e, file);

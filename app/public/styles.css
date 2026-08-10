@@ -3757,8 +3757,14 @@ tbody tr {
    welcome header instead of leaving it in normal flow below — the header text only
    fills the left side, so the row's right side sits empty above the icons otherwise. ─── */
 @media (min-width: 769px) {
-  [data-visual-theme="nova"] .explorer { position: relative; }
-  [data-visual-theme="nova"] .toolbar > div:last-child {
+  /* .app-authed-scoped: this is the main dashboard's own layout trick (pulling its
+     search/trash/+ icon row up next to the welcome header) — .explorer/.toolbar are also
+     used by the public share page (share.html), which has a differently-structured toolbar
+     (upload buttons, not a small icon group) and never gets the .app-authed class, so
+     without this scope the rule below yanked its upload buttons out of flow and on top of
+     the share-meta-card above instead. */
+  [data-visual-theme="nova"].app-authed .explorer { position: relative; }
+  [data-visual-theme="nova"].app-authed .toolbar > div:last-child {
     /* Overrides the element's inline `position: relative` (kept there so the
        #plus-dropdown-menu popover has an anchor in every theme). */
     position: absolute !important;
