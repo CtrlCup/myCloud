@@ -2906,8 +2906,42 @@ function checkAndTriggerAutoHide() {
   }, 3000);
 }
 
+// Bricht den gesamten laufenden Upload ab: die aktuell hochladende Datei wird per XHR-Abort
+// gestoppt, alle noch wartenden Dateien werden verworfen — dieselbe Mechanik wie der
+// Einzel-Cancel-Button pro Zeile (siehe delete-upload-item-btn oben), nur für die komplette
+// Warteschlange auf einmal.
+function cancelAllUploads() {
+  const hadActiveWork = currentUploadQueue.some(item => item.status === 'uploading' || item.status === 'pending');
+
+  currentUploadQueue.forEach(item => {
+    if (item.status === 'uploading' && item.xhr) {
+      item.status = 'cancelled';
+      try {
+        item.xhr.abort();
+      } catch (err) {
+        console.error('Error aborting upload:', err);
+      }
+    } else if (item.status === 'pending') {
+      item.status = 'cancelled';
+    }
+  });
+
+  currentUploadQueue = [];
+  if (dashboardRefreshTimer) {
+    clearTimeout(dashboardRefreshTimer);
+    dashboardRefreshTimer = null;
+    pendingDashboardRefreshParent = undefined;
+  }
+
+  const container = document.getElementById('upload-container');
+  if (container) container.style.display = 'none';
+
+  if (hadActiveWork) showToast('Upload abgebrochen.');
+}
+
 // Upload Panel Toggle Event Listeners
 const uploadTrigger = document.getElementById('upload-status-trigger');
+const minimizeUploadPanelBtn = document.getElementById('minimize-upload-panel-btn');
 const closeUploadPanelBtn = document.getElementById('close-upload-panel-btn');
 
 if (uploadTrigger) {
@@ -2916,10 +2950,17 @@ if (uploadTrigger) {
   };
 }
 
+if (minimizeUploadPanelBtn) {
+  minimizeUploadPanelBtn.onclick = (e) => {
+    e.stopPropagation();
+    setUploadWidgetState('minimized');
+  };
+}
+
 if (closeUploadPanelBtn) {
   closeUploadPanelBtn.onclick = (e) => {
     e.stopPropagation();
-    setUploadWidgetState('minimized');
+    cancelAllUploads();
   };
 }
 

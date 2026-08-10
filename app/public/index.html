@@ -1984,9 +1984,14 @@
           <i data-lucide="upload" style="width: 18px; height: 18px; color: var(--color-primary);"></i>
           <h4 style="margin: 0; font-size: 0.95rem;">Uploads</h4>
         </div>
-        <button class="btn-icon" id="close-upload-panel-btn" style="padding: 0.4rem; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.05); transition: background 0.1s ease, transform 0.1s ease; border: none; cursor: pointer; color: var(--color-text);" onmousedown="this.style.transform='scale(0.9)'" onmouseup="this.style.transform=''" onmouseleave="this.style.transform=''">
-          <i data-lucide="x" style="width: 16px; height: 16px;"></i>
-        </button>
+        <div style="display: flex; align-items: center; gap: 0.35rem;">
+          <button class="btn-icon" id="minimize-upload-panel-btn" title="Minimieren" style="padding: 0.4rem; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.05); transition: background 0.1s ease, transform 0.1s ease; border: none; cursor: pointer; color: var(--color-text);" onmousedown="this.style.transform='scale(0.9)'" onmouseup="this.style.transform=''" onmouseleave="this.style.transform=''">
+            <i data-lucide="minus" style="width: 16px; height: 16px;"></i>
+          </button>
+          <button class="btn-icon" id="close-upload-panel-btn" title="Upload abbrechen" style="padding: 0.4rem; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: rgba(255,255,255,0.05); transition: background 0.1s ease, transform 0.1s ease; border: none; cursor: pointer; color: var(--color-text);" onmousedown="this.style.transform='scale(0.9)'" onmouseup="this.style.transform=''" onmouseleave="this.style.transform=''">
+            <i data-lucide="x" style="width: 16px; height: 16px;"></i>
+          </button>
+        </div>
       </div>
       <!-- Overall progress -->
       <div style="padding: 1rem; border-bottom: 1px solid var(--color-border); background: rgba(0,0,0,0.15); flex-shrink: 0;">
