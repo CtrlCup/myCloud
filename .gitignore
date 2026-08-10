@@ -27,6 +27,9 @@ uploads/
 db_data/
 temp/
 
+# DB-/Uploads-Backups (enthalten echte Nutzerdaten, z.B. vor riskanten Migrationen)
+backups/
+
 # IDE und OS-spezifische Dateien
 .DS_Store
 .vscode/

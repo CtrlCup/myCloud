@@ -45,6 +45,29 @@ function safeFileExtension(originalName) {
   return /^\.[A-Za-z0-9]{1,15}$/.test(ext) ? ext : '';
 }
 
+// Physical layout: each user's files live under UPLOADS_DIR/<ownerId>/ rather than flat in
+// UPLOADS_DIR. files.path always stores the path *relative to UPLOADS_DIR* — "<ownerId>/<uuid>.ext"
+// for anything created since this was introduced — so every existing `path.join(UPLOADS_DIR,
+// file.path)` call site throughout this file keeps working unchanged. Pre-existing installs get
+// their old flat "<uuid>.ext" rows moved into this layout by migrateUploadsToPerUserFolders()
+// below, once, on startup.
+function ensureUserUploadDir(ownerId) {
+  const dir = path.join(UPLOADS_DIR, String(ownerId));
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+// multer always writes new uploads flat into UPLOADS_DIR (see `storage` below) — this moves
+// the just-written file into its owner's subfolder and returns the files.path-relative value
+// (e.g. "3/ab12...-f9.jpg") to store for it. Called by every route that turns a multer upload
+// into a `files` row or updates one's binary content.
+function relocateUploadToOwnerDir(ownerId, filenameAtRoot) {
+  ensureUserUploadDir(ownerId);
+  const relativePath = `${ownerId}/${filenameAtRoot}`;
+  fs.renameSync(path.join(UPLOADS_DIR, filenameAtRoot), path.join(UPLOADS_DIR, relativePath));
+  return relativePath;
+}
+
 // Admin-controlled settings (SEO title/description) get reflected into HTML served to every
 // visitor, including unauthenticated ones — escape before injecting so a compromised admin
 // account (or a stray "<" in the description) can't inject markup/script into the page shell.
@@ -241,6 +264,61 @@ async function extractTextContent(filePath, mimeType, fileName) {
     console.error('Error extracting text content from file:', fileName, err);
   }
   return null;
+}
+
+// One-time, resumable migration for instances updating from before per-user upload folders
+// existed: moves every file still stored flat in UPLOADS_DIR ("<uuid>.ext", i.e. its path has
+// no '/') into UPLOADS_DIR/<owner_id>/ and updates its row to match. Runs on every startup —
+// already-migrated rows (path already contains '/', which a bare uuid+extension never does)
+// are simply not selected, so this is a no-op once done.
+//
+// Safe to interrupt/resume: a row is only updated after its physical file is confirmed to be at
+// the new location (moved just now, or already there from an earlier run that got interrupted
+// after the rename but before the UPDATE) — so files.path and the file's actual disk location
+// can never disagree for a given row, and a crash mid-migration just means the next startup
+// picks up where it left off. Runs after the server starts accepting requests (like
+// indexExistingFiles() below) since each row stays internally consistent throughout — a file
+// not yet reached by this loop is simply still exactly where it was before the update.
+async function migrateUploadsToPerUserFolders() {
+  try {
+    const res = await pool.query(
+      "SELECT id, path, owner_id FROM files WHERE is_folder = false AND path NOT LIKE '%/%'"
+    );
+    if (res.rows.length === 0) return;
+
+    console.log(`Migrating ${res.rows.length} file(s) into per-user upload folders...`);
+    let moved = 0;
+    let skipped = 0;
+    for (const row of res.rows) {
+      if (!row.owner_id) {
+        console.warn(`Skipping file ${row.id} ("${row.path}") during upload folder migration: no owner_id.`);
+        skipped++;
+        continue;
+      }
+      const relativePath = `${row.owner_id}/${row.path}`;
+      const oldAbsPath = path.join(UPLOADS_DIR, row.path);
+      const newAbsPath = path.join(UPLOADS_DIR, relativePath);
+      try {
+        if (!fs.existsSync(newAbsPath)) {
+          if (!fs.existsSync(oldAbsPath)) {
+            console.warn(`Skipping file ${row.id} ("${row.path}") during upload folder migration: physical file missing.`);
+            skipped++;
+            continue;
+          }
+          ensureUserUploadDir(row.owner_id);
+          fs.renameSync(oldAbsPath, newAbsPath);
+        }
+        await pool.query('UPDATE files SET path = $1 WHERE id = $2', [relativePath, row.id]);
+        moved++;
+      } catch (err) {
+        console.error(`Error migrating file ${row.id} ("${row.path}") into its owner's upload folder:`, err);
+        skipped++;
+      }
+    }
+    console.log(`Upload folder migration done: ${moved} moved, ${skipped} skipped.`);
+  } catch (err) {
+    console.error('Error migrating uploads to per-user folders:', err);
+  }
 }
 
 async function indexExistingFiles() {
@@ -1545,25 +1623,31 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
 
   const parentId = req.body.parentId && req.body.parentId !== 'null' ? parseInt(req.body.parentId) : null;
   const userId = req.session.userId;
+  // Tracks wherever the physical file currently is, so error-path cleanup below always unlinks
+  // the right place whether or not relocateUploadToOwnerDir() has run yet.
+  let currentPhysicalPath = req.file.path;
 
   try {
     if (parentId !== null) {
       const isOwner = await verifyFileOwner(parentId, userId);
       if (!isOwner) {
-        fs.unlinkSync(req.file.path); // Delete file if unauthorized
+        fs.unlinkSync(currentPhysicalPath); // Delete file if unauthorized
         return res.status(403).json({ error: 'Access denied' });
       }
     }
+
+    const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
+    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
 
     const safeMimeType = getSafeMimeType(req.file.originalname);
 
     const quotaResult = await withStorageQuotaLock(userId, req.file.size, (client) => client.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NULL) RETURNING *`,
-      [req.file.originalname, req.file.filename, safeMimeType, req.file.size, false, parentId, userId]
+      [req.file.originalname, relativePath, safeMimeType, req.file.size, false, parentId, userId]
     ));
     if (!quotaResult.ok) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(413).json({ error: quotaResult.error });
     }
 
@@ -1575,7 +1659,7 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
     // the client, so doing this beforehand serialized the whole batch behind it. A stale/failed
     // extraction here just leaves content NULL, same as any pre-existing file — indexExistingFiles()
     // picks those up as a backfill on the next server start.
-    extractTextContent(req.file.path, safeMimeType, req.file.originalname)
+    extractTextContent(currentPhysicalPath, safeMimeType, req.file.originalname)
       .then((textContent) => {
         if (textContent === null) return;
         return pool.query('UPDATE files SET content = $1 WHERE id = $2', [textContent, insertedFile.id]);
@@ -1585,8 +1669,8 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
   } catch (err) {
     console.error('Error uploading file:', err);
     // Cleanup file
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
+      fs.unlinkSync(currentPhysicalPath);
     }
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -1913,17 +1997,17 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
     if (!fs.existsSync(oldPath)) return;
 
     const newFilename = crypto.randomUUID() + safeFileExtension(file.name);
-    const newPath = path.join(UPLOADS_DIR, newFilename);
-    fs.copyFileSync(oldPath, newPath);
+    const newRelativePath = `${userId}/${newFilename}`;
+    fs.copyFileSync(oldPath, path.join(ensureUserUploadDir(userId), newFilename));
 
-    const newName = file.name.includes('.') 
-      ? file.name.replace(/(\.[^.]+)$/, ' (Kopie)$1') 
+    const newName = file.name.includes('.')
+      ? file.name.replace(/(\.[^.]+)$/, ' (Kopie)$1')
       : `${file.name} (Kopie)`;
 
     await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content) 
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, $3, $4, false, $5, $6, $7)`,
-      [newName, newFilename, file.mime_type, file.size, targetFolderId, userId, file.content]
+      [newName, newRelativePath, file.mime_type, file.size, targetFolderId, userId, file.content]
     );
   }
 }
@@ -2236,8 +2320,9 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     // paths (thumbnailing, OCR, EXIF read) later shell out with the physical filename
     // interpolated into an exec() string.
     const uniqueFilename = crypto.randomUUID() + safeFileExtension(finalName);
-    const physicalPath = path.join(UPLOADS_DIR, uniqueFilename);
-    
+    const relativePath = `${userId}/${uniqueFilename}`;
+    const physicalPath = path.join(ensureUserUploadDir(userId), uniqueFilename);
+
     let fileSize = 0;
     if (templateFile && fs.existsSync(templateFile)) {
       fs.copyFileSync(templateFile, physicalPath);
@@ -2247,9 +2332,9 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     }
 
     const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id) 
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [finalName, uniqueFilename, mimeType, fileSize, false, parsedParentId, userId]
+      [finalName, relativePath, mimeType, fileSize, false, parsedParentId, userId]
     );
 
     res.status(201).json(result.rows[0]);
@@ -2303,34 +2388,37 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
       const folderId = folderRes.rows[0].id;
 
       const uniqueFilename = crypto.randomUUID() + '.txt';
-      fs.writeFileSync(path.join(UPLOADS_DIR, uniqueFilename), content, 'utf8');
+      const relativePath = `${userId}/${uniqueFilename}`;
+      fs.writeFileSync(path.join(ensureUserUploadDir(userId), uniqueFilename), content, 'utf8');
       const size = Buffer.byteLength(content, 'utf8');
       // Children are also flagged is_one_time_note so the flat "exclude one-time notes from
       // listing/search" filter catches them too, without needing a recursive ancestor check.
       await pool.query(
         `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
          VALUES ($1, $2, 'text/plain', $3, false, $4, $5, true, $6)`,
-        [cleanName, uniqueFilename, size, folderId, userId, content]
+        [cleanName, relativePath, size, folderId, userId, content]
       );
 
       for (const att of attachments) {
         const safeMimeType = getSafeMimeType(att.originalname);
+        const attRelativePath = relocateUploadToOwnerDir(userId, att.filename);
         await pool.query(
           `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note)
            VALUES ($1, $2, $3, $4, false, $5, $6, true)`,
-          [att.originalname, att.filename, safeMimeType, att.size, folderId, userId]
+          [att.originalname, attRelativePath, safeMimeType, att.size, folderId, userId]
         );
       }
 
       containerFileId = folderId;
     } else {
       const uniqueFilename = crypto.randomUUID() + '.txt';
-      fs.writeFileSync(path.join(UPLOADS_DIR, uniqueFilename), content, 'utf8');
+      const relativePath = `${userId}/${uniqueFilename}`;
+      fs.writeFileSync(path.join(ensureUserUploadDir(userId), uniqueFilename), content, 'utf8');
       const size = Buffer.byteLength(content, 'utf8');
       const fileRes = await pool.query(
         `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
          VALUES ($1, $2, $3, $4, false, $5, $6, true, $7) RETURNING id`,
-        [cleanName, uniqueFilename, 'text/plain', size, parsedParentId, userId, content]
+        [cleanName, relativePath, 'text/plain', size, parsedParentId, userId, content]
       );
       containerFileId = fileRes.rows[0].id;
     }
@@ -2478,25 +2566,28 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
 app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_files'), uploadSingle('file'), async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
+  let currentPhysicalPath = req.file && req.file.path;
 
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   try {
     const isOwner = await verifyFileOwner(fileId, userId);
     if (!isOwner) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(403).json({ error: 'Access denied' });
     }
 
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
     const file = fileRes.rows[0];
     if (!file || file.is_folder) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(400).json({ error: 'File not found or is a folder' });
     }
 
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
-    const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
+    const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
+    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
+    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name);
 
     // Only the net size increase counts against quota — usedBytes inside the lock still
     // includes this file's OLD size (its row hasn't been updated yet), so checking the full
@@ -2504,12 +2595,12 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
     const netAdditionalBytes = req.file.size - (file.size || 0);
     const doUpdate = (client) => client.query(
       'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
-      [req.file.filename, req.file.size, textContent, fileId]
+      [relativePath, req.file.size, textContent, fileId]
     );
     if (netAdditionalBytes > 0) {
       const quotaResult = await withStorageQuotaLock(userId, netAdditionalBytes, doUpdate);
       if (!quotaResult.ok) {
-        fs.unlinkSync(req.file.path);
+        fs.unlinkSync(currentPhysicalPath);
         return res.status(413).json({ error: quotaResult.error });
       }
     } else {
@@ -2521,7 +2612,7 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
     res.json({ success: true, size: req.file.size });
   } catch (err) {
     console.error('Error saving binary file content:', err);
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) fs.unlinkSync(currentPhysicalPath);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -2649,10 +2740,15 @@ function generateThumbnail(physicalFilename, extension) {
   return new Promise((resolve) => {
     const inputPath = path.join(UPLOADS_DIR, physicalFilename);
     const lowerExt = extension.toLowerCase();
+    // Keyed by basename only (not the full "<ownerId>/<uuid>.ext" relative path) — physical
+    // filenames are UUIDs, unique regardless of which owner subfolder they live in, so this
+    // stays a flat cache that needs no migration of its own and keeps working across a file
+    // being moved between physical layouts (see migrateUploadsToPerUserFolders()).
     // SVG thumbnails are rasterized to PNG (keeps transparency) — the vector source is never
     // served as a thumbnail itself, only this pre-rendered raster derivative, so no SVG markup
     // (and no <script>/external reference it might contain) ever reaches the client here.
-    const outputPath = path.join(THUMBNAILS_DIR, physicalFilename + (lowerExt === 'svg' ? '.png' : '.jpg'));
+    const thumbBasename = path.basename(physicalFilename);
+    const outputPath = path.join(THUMBNAILS_DIR, thumbBasename + (lowerExt === 'svg' ? '.png' : '.jpg'));
 
     if (fs.existsSync(outputPath)) {
       return resolve(outputPath);
@@ -3924,41 +4020,45 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
 // to PUT /api/files/:id/binary-content above (e.g. a guest filling in/annotating a shared PDF).
 app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'), async (req, res) => {
   const { slug, fileId } = req.params;
+  let currentPhysicalPath = req.file && req.file.path;
 
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   try {
     const access = await verifyPublicShareAccess(slug, fileId, req);
     if (access.error) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(access.status).json({ error: access.error });
     }
 
     const { file, share } = access;
     if (!share.can_write) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(403).json({ error: 'Write permission denied.' });
     }
     if (file.is_folder) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(400).json({ error: 'Folders do not have binary content' });
     }
 
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
-    const textContent = await extractTextContent(req.file.path, file.mime_type, file.name);
+    // Charged/organized under the file OWNER's account — there's no uploader account on a
+    // public share, and the file already belongs to whoever created the share.
+    const relativePath = relocateUploadToOwnerDir(file.owner_id, req.file.filename);
+    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
+    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name);
 
-    // Charged against the file OWNER's quota (there's no uploader account on a public share) —
-    // only the net size increase counts, since usedBytes inside the lock still includes this
-    // file's OLD size until the UPDATE below runs.
+    // Only the net size increase counts against quota — usedBytes inside the lock still
+    // includes this file's OLD size until the UPDATE below runs.
     const netAdditionalBytes = req.file.size - (file.size || 0);
     const doUpdate = (client) => client.query(
       'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
-      [req.file.filename, req.file.size, textContent, file.id]
+      [relativePath, req.file.size, textContent, file.id]
     );
     if (netAdditionalBytes > 0) {
       const quotaResult = await withStorageQuotaLock(file.owner_id, netAdditionalBytes, doUpdate);
       if (!quotaResult.ok) {
-        fs.unlinkSync(req.file.path);
+        fs.unlinkSync(currentPhysicalPath);
         return res.status(413).json({ error: quotaResult.error });
       }
     } else {
@@ -3970,7 +4070,7 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'),
     res.json({ success: true, size: req.file.size });
   } catch (err) {
     console.error('Public binary content save error:', err);
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) fs.unlinkSync(currentPhysicalPath);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
@@ -4137,34 +4237,35 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
   const { slug } = req.params;
   const parentId = req.body.parentId ? parseInt(req.body.parentId) : null;
+  let currentPhysicalPath = req.file && req.file.path;
 
   if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
 
   try {
     const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
     if (shareRes.rows.length === 0) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(404).json({ error: 'Share link not found.' });
     }
 
     const share = shareRes.rows[0];
     if (share.expires_at && new Date(share.expires_at) < new Date()) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(410).json({ error: 'Share has expired.' });
     }
     if (share.max_downloads !== null && share.download_count >= share.max_downloads) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(410).json({ error: 'This share has reached its download limit.' });
     }
     if (!share.can_write) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(403).json({ error: 'Upload permissions denied.' });
     }
 
     // Check password protection
     const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
     if (share.password_hash && !isUnlocked) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(401).json({ error: 'Password required.' });
     }
 
@@ -4187,25 +4288,30 @@ app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilen
     }
 
     if (!isValid) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(403).json({ error: 'Access denied.' });
     }
+
+    // No uploader account on a public share — the new file is organized/charged under the
+    // share's owner (whoever created it), same as the binary-content route above.
+    const relativePath = relocateUploadToOwnerDir(baseFile.owner_id, req.file.filename);
+    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
 
     const quotaResult = await withStorageQuotaLock(baseFile.owner_id, req.file.size, (client) => client.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.file.originalname, req.file.filename, getSafeMimeType(req.file.originalname), req.file.size, false, targetFolderId, baseFile.owner_id]
+      [req.file.originalname, relativePath, getSafeMimeType(req.file.originalname), req.file.size, false, targetFolderId, baseFile.owner_id]
     ));
     if (!quotaResult.ok) {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(currentPhysicalPath);
       return res.status(413).json({ error: quotaResult.error });
     }
 
     res.status(201).json(quotaResult.data.rows[0]);
   } catch (err) {
     console.error('Public upload error:', err);
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
+      fs.unlinkSync(currentPhysicalPath);
     }
     res.status(500).json({ error: 'Internal server error.' });
   }
@@ -4280,12 +4386,13 @@ app.post('/api/public/shares/:slug/file', async (req, res) => {
 
     const cleanName = rawName.includes('.') ? rawName : rawName + '.txt';
     const uniqueFilename = crypto.randomUUID() + '.txt';
-    fs.writeFileSync(path.join(UPLOADS_DIR, uniqueFilename), '');
+    const relativePath = `${baseFile.owner_id}/${uniqueFilename}`;
+    fs.writeFileSync(path.join(ensureUserUploadDir(baseFile.owner_id), uniqueFilename), '');
 
     const result = await pool.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, 'text/plain', 0, false, $3, $4, '') RETURNING *`,
-      [cleanName, uniqueFilename, targetFolderId, baseFile.owner_id]
+      [cleanName, relativePath, targetFolderId, baseFile.owner_id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -5813,6 +5920,11 @@ function initWebSocket(server) {
 initDb()
   .then(async () => {
     await refreshMaxUploadSizeBytes();
+    // Awaited (unlike indexExistingFiles() below) — it's just filesystem renames, not the CPU-heavy
+    // OCR/text-extraction work indexing does, so it's fast even for a large library, and completing
+    // it before the server accepts any request rules out any window where a request could race an
+    // in-progress move for a given file.
+    await migrateUploadsToPerUserFolders();
     logVersionStatus();
     const server = app.listen(PORT, () => {
       console.log(`myCloud app is running on ${EXPECTED_ORIGIN}`);
