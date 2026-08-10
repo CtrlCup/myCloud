@@ -1556,19 +1556,32 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
     }
 
     const safeMimeType = getSafeMimeType(req.file.originalname);
-    const textContent = await extractTextContent(req.file.path, safeMimeType, req.file.originalname);
 
     const quotaResult = await withStorageQuotaLock(userId, req.file.size, (client) => client.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.file.originalname, req.file.filename, safeMimeType, req.file.size, false, parentId, userId, textContent]
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL) RETURNING *`,
+      [req.file.originalname, req.file.filename, safeMimeType, req.file.size, false, parentId, userId]
     ));
     if (!quotaResult.ok) {
       fs.unlinkSync(req.file.path);
       return res.status(413).json({ error: quotaResult.error });
     }
 
-    res.status(201).json(quotaResult.data.rows[0]);
+    const insertedFile = quotaResult.data.rows[0];
+    res.status(201).json(insertedFile);
+
+    // Text extraction (incl. OCR for scanned PDFs/images) runs after the response — for large
+    // batch uploads it can take up to ~30s per file, and uploads are processed one at a time on
+    // the client, so doing this beforehand serialized the whole batch behind it. A stale/failed
+    // extraction here just leaves content NULL, same as any pre-existing file — indexExistingFiles()
+    // picks those up as a backfill on the next server start.
+    extractTextContent(req.file.path, safeMimeType, req.file.originalname)
+      .then((textContent) => {
+        if (textContent === null) return;
+        return pool.query('UPDATE files SET content = $1 WHERE id = $2', [textContent, insertedFile.id]);
+      })
+      .catch((err) => console.error('Error indexing uploaded file:', req.file.originalname, err));
+    return;
   } catch (err) {
     console.error('Error uploading file:', err);
     // Cleanup file
@@ -2602,6 +2615,11 @@ if (!fs.existsSync(THUMBNAILS_DIR)) {
   fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
 }
 
+// Shared with generateThumbnail() below and both thumbnail routes — SVG is deliberately
+// excluded (see the routes): it's an XML format that can embed <script>, and serving it as-is
+// would let the browser execute attacker-uploaded SVG inline as a "thumbnail".
+const WEB_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
+
 // Reads camera make/model + lens out of an image's EXIF data via exiftool (already used above
 // for RAW thumbnail extraction). Returns null if the file has no such tags at all (e.g.
 // screenshots, AI-generated images, anything stripped of EXIF) so the caller can hide the whole
@@ -2679,6 +2697,20 @@ function generateThumbnail(physicalFilename, extension) {
         console.error(`exiftool failed for ${physicalFilename}:`, err);
         resolve(null);
       });
+    } else if (WEB_IMAGE_EXTS.includes(lowerExt)) {
+      // Standard camera/web images used to be served as their own "thumbnail" (the full
+      // original file, routinely several MB) — every grid render re-downloaded and re-decoded
+      // that for every tile. Downscale to a small cached JPEG instead, same as the other
+      // branches here; callers fall back to the original file if this fails.
+      const { exec } = require('child_process');
+      const cmd = `ffmpeg -y -i "${inputPath}" -vf "scale='min(480,iw)':-1" -q:v 4 "${outputPath}"`;
+      exec(cmd, (err) => {
+        if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+          return resolve(outputPath);
+        }
+        console.error(`ffmpeg image thumbnail failed for ${physicalFilename}:`, err);
+        resolve(null);
+      });
     } else {
       resolve(null);
     }
@@ -2702,18 +2734,20 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
 
-    // Standard web images are served directly. SVG is deliberately excluded — it's an XML
-    // format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
-    // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
-    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
-    if (webImageExts.includes(ext)) {
-      return res.sendFile(filePath);
-    }
-
-    // Try to generate/serve thumbnail for video or RAW
+    // Cached, downscaled thumbnail — covers web images, video and RAW (see generateThumbnail).
+    // Content is immutable once generated (physical filenames are per-upload UUIDs, never
+    // reused/overwritten), so it's safe to cache aggressively client-side.
     const thumbPath = await generateThumbnail(file.path, ext);
     if (thumbPath && fs.existsSync(thumbPath)) {
-      return res.sendFile(thumbPath);
+      return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
+    }
+
+    // Fallback for standard web images if downscaling failed for some reason (e.g. an
+    // unusual/corrupt file ffmpeg can't decode) — SVG is deliberately excluded here, it's an
+    // XML format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
+    // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
+    if (WEB_IMAGE_EXTS.includes(ext)) {
+      return res.sendFile(filePath);
     }
 
     res.status(404).json({ error: 'Thumbnail not available' });
@@ -4018,18 +4052,20 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
 
-    // Standard web images are served directly. SVG is deliberately excluded — it's an XML
-    // format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
-    // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
-    const webImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
-    if (webImageExts.includes(ext)) {
-      return res.sendFile(filePath);
-    }
-
-    // Try to generate/serve thumbnail for video or RAW
+    // Cached, downscaled thumbnail — covers web images, video and RAW (see generateThumbnail).
+    // Content is immutable once generated (physical filenames are per-upload UUIDs, never
+    // reused/overwritten), so it's safe to cache aggressively client-side.
     const thumbPath = await generateThumbnail(file.path, ext);
     if (thumbPath && fs.existsSync(thumbPath)) {
-      return res.sendFile(thumbPath);
+      return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
+    }
+
+    // Fallback for standard web images if downscaling failed for some reason (e.g. an
+    // unusual/corrupt file ffmpeg can't decode) — SVG is deliberately excluded here, it's an
+    // XML format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
+    // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
+    if (WEB_IMAGE_EXTS.includes(ext)) {
+      return res.sendFile(filePath);
     }
 
     res.status(404).json({ error: 'Thumbnail not available' });

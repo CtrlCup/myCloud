@@ -1652,7 +1652,7 @@ function renderFiles(files) {
     if (isThumb) item.classList.add('has-thumb');
     let iconHTML = `<i data-lucide="${iconName}" style="color: ${iconColor};"></i>`;
     if (isThumb) {
-      iconHTML = `<img src="${thumbUrl}" style="width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: var(--radius-md);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+      iconHTML = `<img src="${thumbUrl}" loading="lazy" decoding="async" style="width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: var(--radius-md);" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                   <i data-lucide="${iconName}" style="display: none; color: ${iconColor};"></i>`;
     }
 
@@ -2332,6 +2332,30 @@ let currentUploadQueue = [];
 let uploadActive = false;
 let uploadStartTime = 0;
 
+// Throttles for the two UI updates that used to fire on every single XHR progress tick / every
+// single completed file — during a large batch upload that meant hundreds of full grid rebuilds
+// (each re-fetching every already-uploaded file's thumbnail) plus many full upload-panel rebuilds
+// per second, which is what actually froze the tab. Both now coalesce to a fixed rate.
+let lastProgressUIUpdate = 0;
+const PROGRESS_UI_THROTTLE_MS = 200;
+
+let dashboardRefreshTimer = null;
+let pendingDashboardRefreshParent = undefined;
+const DASHBOARD_REFRESH_THROTTLE_MS = 1500;
+
+// Coalesces refreshDashboardAfterUpload() calls during a batch upload to at most once every
+// DASHBOARD_REFRESH_THROTTLE_MS, instead of once per completed file.
+function scheduleDashboardRefresh(targetParentId) {
+  pendingDashboardRefreshParent = targetParentId;
+  if (dashboardRefreshTimer) return;
+  dashboardRefreshTimer = setTimeout(() => {
+    dashboardRefreshTimer = null;
+    const parentId = pendingDashboardRefreshParent;
+    pendingDashboardRefreshParent = undefined;
+    refreshDashboardAfterUpload(parentId);
+  }, DASHBOARD_REFRESH_THROTTLE_MS);
+}
+
 function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, onCreatedXHR) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -2557,7 +2581,12 @@ function updateUploadUI() {
     }
   }
 
-  lucide.createIcons();
+  // Scoped to the upload widget instead of a full-document icon rescan — this function is
+  // called on every (throttled) upload-progress tick during a batch upload, so an unscoped
+  // scan here re-walks and re-renders every [data-lucide] icon in the entire app (sidebar,
+  // toolbar, file grid, ...) on every tick.
+  const uploadContainer = document.getElementById('upload-container');
+  lucide.createIcons({ el: uploadContainer || listContainer });
 }
 
 // Nach einem erfolgreichen Einzel-Upload (oder Abschluss der ganzen Warteschlange) die
@@ -2734,7 +2763,15 @@ async function processUploadQueue() {
         uploadParentId,
         (loaded, total) => {
           uploadItem.uploaded = loaded;
-          updateUploadUI();
+          // Native XHR progress events can fire dozens of times per second; each call rebuilds
+          // the whole upload-panel list, so this is throttled to a fixed rate. The 'done'
+          // callback below always calls updateUploadUI() itself, so the final 100% state still
+          // renders even if a tick right before completion gets skipped here.
+          const now = Date.now();
+          if (now - lastProgressUIUpdate >= PROGRESS_UI_THROTTLE_MS) {
+            lastProgressUIUpdate = now;
+            updateUploadUI();
+          }
         },
         (res) => {
           uploadItem.status = 'done';
@@ -2742,8 +2779,10 @@ async function processUploadQueue() {
           uploadItem.xhr = null;
           updateUploadUI();
           // Sofort anzeigen, statt auf den Abschluss der gesamten Warteschlange zu warten —
-          // bei mehreren Dateien tauchen sie so nach und nach im Dashboard auf.
-          refreshDashboardAfterUpload(uploadParentId);
+          // bei mehreren Dateien tauchen sie so nach und nach im Dashboard auf. Throttled: a
+          // large batch would otherwise trigger a full folder refetch + grid rebuild (incl.
+          // re-requesting every already-uploaded file's thumbnail) after every single file.
+          scheduleDashboardRefresh(uploadParentId);
         },
         (errMsg) => {
           if (uploadItem.status !== 'cancelled') {
@@ -2770,7 +2809,14 @@ async function processUploadQueue() {
   uploadActive = false;
 
   updateUploadUI();
-  // Fallback für z.B. neu angelegte Ordner-Segmente ohne eigenes 'done'-Callback.
+  // Fallback für z.B. neu angelegte Ordner-Segmente ohne eigenes 'done'-Callback. Runs
+  // immediately (not through scheduleDashboardRefresh) since the batch is over — cancel any
+  // still-pending throttled refresh so it doesn't redundantly fire again right after this one.
+  if (dashboardRefreshTimer) {
+    clearTimeout(dashboardRefreshTimer);
+    dashboardRefreshTimer = null;
+    pendingDashboardRefreshParent = undefined;
+  }
   refreshDashboardAfterUpload(currentFolderId);
   loadStorageSettings();
 
