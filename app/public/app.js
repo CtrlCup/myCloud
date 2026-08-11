@@ -204,10 +204,22 @@ function showFileConflictDialog(itemName, { isExactDuplicate = null, canReplace 
     applyAllContainer.style.display = showApplyAll ? 'flex' : 'none';
     applyAllCheckbox.checked = false;
 
+    // Restore the normal fade-in transition before opening — cleanup() below strips it for an
+    // instant close, and resets it right after, but this guards against that reset somehow
+    // being skipped (e.g. the promise never resolving) on a previous run.
+    overlay.style.transition = '';
     overlay.classList.add('active');
 
     const cleanup = (action) => {
+      // This dialog can fire once per duplicate in a batch — a slow fade would make clicking
+      // through several of them feel sluggish, and would leave the app (incl. the upload
+      // panel) hidden behind the fading backdrop for longer than necessary. Dropping the
+      // transition just for the close makes it disappear the instant a button is clicked,
+      // immediately revealing the dashboard and upload progress again.
+      overlay.style.transition = 'none';
       overlay.classList.remove('active');
+      void overlay.offsetWidth; // force reflow so transition:none is applied before it's cleared
+      overlay.style.transition = '';
       replaceBtn.onclick = null;
       keepBothBtn.onclick = null;
       skipBtn.onclick = null;

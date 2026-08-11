@@ -1393,10 +1393,13 @@
           <button type="button" class="btn" id="upload-conflict-keep-both-btn" style="justify-content: center;">Beide behalten</button>
           <button type="button" class="btn" id="upload-conflict-skip-btn" style="justify-content: center;">Überspringen</button>
         </div>
-        <label id="upload-conflict-apply-all-container" style="display: none; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin-top: 1rem;">
-          <input type="checkbox" id="upload-conflict-apply-all">
-          <span>Für alle weiteren Duplikate in diesem Upload anwenden</span>
-        </label>
+        <div id="upload-conflict-apply-all-container" style="display: none; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 1rem;">
+          <span style="font-size: 0.8rem; color: var(--color-text-muted);">Für alle weiteren Duplikate in diesem Upload anwenden</span>
+          <label class="switch" style="flex-shrink: 0;">
+            <input type="checkbox" id="upload-conflict-apply-all">
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
     </div>
   </div>
