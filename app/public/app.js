@@ -155,6 +155,73 @@ function showInputPrompt(title, label, defaultValue = '', placeholder = '') {
   });
 }
 
+// Asks how to resolve a naming conflict — a file or folder with this name already exists where
+// the caller is about to place one (upload, new file, new folder, rename, move). Shared by every
+// one of those flows so the prompt looks and behaves the same everywhere.
+//
+// `isExactDuplicate` (true/false/null) comes from a server-side SHA-256 comparison of the two
+// files' content where available (null = unknown, e.g. a folder is involved, or the file was too
+// large to hash client-side before asking) and tailors both the message and which action is
+// visually recommended: a byte-identical file gains nothing from being replaced or duplicated, so
+// "Überspringen" is highlighted; anything else defaults to "Ersetzen" (or, when replacing isn't
+// possible at all, "Beide behalten").
+//
+// `canReplace` hides the "Ersetzen" button entirely — replacing is never offered when a folder is
+// on either side of the conflict, since that would mean deleting an existing folder's whole
+// subtree (see the equivalent canReplace logic in server.js).
+//
+// `showApplyAll` shows the "für alle anwenden" checkbox, used by batch flows (upload queue, multi-
+// file move) so one choice can carry over to the rest of the batch instead of re-prompting per item.
+function showFileConflictDialog(itemName, { isExactDuplicate = null, canReplace = true, showApplyAll = false } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('upload-conflict-modal-overlay');
+    const messageEl = document.getElementById('upload-conflict-message');
+    const replaceBtn = document.getElementById('upload-conflict-replace-btn');
+    const keepBothBtn = document.getElementById('upload-conflict-keep-both-btn');
+    const skipBtn = document.getElementById('upload-conflict-skip-btn');
+    const closeBtn = document.getElementById('close-upload-conflict-btn');
+    const applyAllContainer = document.getElementById('upload-conflict-apply-all-container');
+    const applyAllCheckbox = document.getElementById('upload-conflict-apply-all');
+
+    if (isExactDuplicate === true) {
+      messageEl.textContent = `„${itemName}“ existiert bereits und ist inhaltlich exakt identisch (gleicher Hash) — ein erneutes Anlegen bringt keinen neuen Inhalt.`;
+    } else if (isExactDuplicate === false) {
+      messageEl.textContent = `„${itemName}“ existiert bereits, hat aber einen anderen Inhalt als das vorhandene Element. Was möchtest du tun?`;
+    } else {
+      messageEl.textContent = `„${itemName}“ existiert bereits in diesem Ordner. Was möchtest du tun?`;
+    }
+
+    replaceBtn.style.display = canReplace ? '' : 'none';
+    if (canReplace) {
+      replaceBtn.classList.toggle('btn-primary', isExactDuplicate !== true);
+      skipBtn.classList.toggle('btn-primary', isExactDuplicate === true);
+      keepBothBtn.classList.remove('btn-primary');
+    } else {
+      skipBtn.classList.toggle('btn-primary', isExactDuplicate === true);
+      keepBothBtn.classList.toggle('btn-primary', isExactDuplicate !== true);
+    }
+
+    applyAllContainer.style.display = showApplyAll ? 'flex' : 'none';
+    applyAllCheckbox.checked = false;
+
+    overlay.classList.add('active');
+
+    const cleanup = (action) => {
+      overlay.classList.remove('active');
+      replaceBtn.onclick = null;
+      keepBothBtn.onclick = null;
+      skipBtn.onclick = null;
+      closeBtn.onclick = null;
+      resolve({ action, applyToAll: applyAllCheckbox.checked });
+    };
+
+    replaceBtn.onclick = () => cleanup('replace');
+    keepBothBtn.onclick = () => cleanup('keep_both');
+    skipBtn.onclick = () => cleanup('skip');
+    closeBtn.onclick = () => cleanup('skip');
+  });
+}
+
 function showConfirmDialog(title, message) {
   return new Promise((resolve) => {
     const overlay = document.getElementById('custom-confirm-modal-overlay');
@@ -1842,23 +1909,16 @@ function renderFiles(files) {
         if (!raw) return;
         const ids = JSON.parse(raw);
         if (ids.includes(file.id)) return;
-        try {
-          const res = await fetch('/api/files/move-multiple', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ fileIds: ids, targetFolderId: file.id })
-          });
-          if (res.ok) {
-            showToast(`${ids.length} Element(e) verschoben!`);
-            clearSelection();
-            flyItemsIntoFolder(ids, item);
-            renderedFilesList = renderedFilesList.filter(f => !ids.includes(f.id));
-          } else {
-            const err = await res.json();
-            showToast(err.error || 'Fehler beim Verschieben.');
-          }
-        } catch {
-          showToast('Verbindungsfehler beim Verschieben.');
+        const moveResult = await moveFilesWithConflictHandling(ids, file.id);
+        if (moveResult && moveResult.movedIds.length > 0) {
+          showToast(moveResult.skippedIds.length > 0
+            ? `${moveResult.movedIds.length} Element(e) verschoben, ${moveResult.skippedIds.length} übersprungen.`
+            : `${moveResult.movedIds.length} Element(e) verschoben!`);
+          clearSelection();
+          flyItemsIntoFolder(moveResult.movedIds, item);
+          renderedFilesList = renderedFilesList.filter(f => !moveResult.movedIds.includes(f.id));
+        } else if (moveResult) {
+          showToast('Verschieben übersprungen.');
         }
       });
     }
@@ -2160,22 +2220,37 @@ async function createNewFolder() {
   const name = await showInputPrompt('Neuer Ordner', 'Bitte gib einen Namen für den neuen Ordner ein:', '', 'Ordnername');
   if (!name) return;
 
-  try {
-    const res = await fetch('/api/files/folder', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, parentId: currentFolderId }),
-    });
+  let onConflict;
+  while (true) {
+    try {
+      const res = await fetch('/api/files/folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, parentId: currentFolderId, onConflict }),
+      });
 
-    if (res.ok) {
-      showToast('Ordner erfolgreich erstellt.');
-      loadFiles(currentFolderId);
-    } else {
+      if (res.ok) {
+        showToast('Ordner erfolgreich erstellt.');
+        loadFiles(currentFolderId);
+        return;
+      }
+
       const err = await res.json();
+      if (res.status === 409) {
+        // Replacing an existing folder would delete its whole subtree — server never offers
+        // canReplace here, so this dialog only ever shows "Beide behalten" / "Überspringen".
+        const choice = await showFileConflictDialog(name, { canReplace: err.canReplace });
+        if (choice.action === 'skip') return;
+        onConflict = choice.action;
+        continue;
+      }
+
       showToast(err.error);
+      return;
+    } catch (err) {
+      showToast('Fehler beim Erstellen des Ordners.');
+      return;
     }
-  } catch (err) {
-    showToast('Fehler beim Erstellen des Ordners.');
   }
 }
 
@@ -2280,33 +2355,49 @@ async function createNewEmptyFile() {
     return;
   }
 
-  try {
-    const res = await fetch('/api/files/create-empty', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, type, parentId: currentFolderId }),
-    });
+  let onConflict;
+  while (true) {
+    try {
+      const res = await fetch('/api/files/create-empty', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, type, parentId: currentFolderId, onConflict }),
+      });
 
-    if (res.ok) {
-      showToast('Datei erfolgreich erstellt.');
-      const newFile = await res.json();
-      loadFiles(currentFolderId);
-      
-      const ext = newFile.name.split('.').pop().toLowerCase();
-      const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
-      const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
-      
-      if (codeExts.includes(ext) || type === 'codex' || type === 'txt') {
-        openCodeEditor(newFile.id, newFile.name);
-      } else if (officeExts.includes(ext)) {
-        openOfficeEditor(newFile.id, newFile.name);
+      if (res.ok) {
+        showToast('Datei erfolgreich erstellt.');
+        const newFile = await res.json();
+        loadFiles(currentFolderId);
+
+        const ext = newFile.name.split('.').pop().toLowerCase();
+        const codeExts = ['txt', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'xml', 'css', 'scss', 'less', 'py', 'json', 'yaml', 'yml', 'c', 'cpp', 'h', 'hpp', 'cs', 'go', 'rs', 'java', 'sh', 'bash', 'md', 'php', 'rb', 'sql'];
+        const officeExts = ['docx', 'xlsx', 'pptx', 'odt', 'ods', 'odp'];
+
+        if (codeExts.includes(ext) || type === 'codex' || type === 'txt') {
+          openCodeEditor(newFile.id, newFile.name);
+        } else if (officeExts.includes(ext)) {
+          openOfficeEditor(newFile.id, newFile.name);
+        }
+        return;
       }
-    } else {
+
       const err = await res.json();
+      if (res.status === 409) {
+        const choice = await showFileConflictDialog(name, {
+          isExactDuplicate: err.isExactDuplicate,
+          canReplace: err.canReplace
+        });
+        if (choice.action === 'skip') return;
+        onConflict = choice.action;
+        continue;
+      }
+
       showToast(err.error);
+      return;
+    } catch (err) {
+      showToast('Fehler beim Erstellen der Datei.');
+      return;
     }
-  } catch (err) {
-    showToast('Fehler beim Erstellen der Datei.');
   }
 }
 
@@ -2331,6 +2422,10 @@ if (folderUploadInput) {
 let currentUploadQueue = [];
 let uploadActive = false;
 let uploadStartTime = 0;
+// 'replace' | 'keep_both' | 'skip' | null — set when the user checks "für alle anwenden" in
+// showFileConflictDialog(), so later duplicates in the same batch reuse that choice instead
+// of re-prompting. Reset to null whenever a new batch starts (see uploadMultipleFiles()).
+let pendingConflictChoice = null;
 
 // Throttles for the two UI updates that used to fire on every single XHR progress tick / every
 // single completed file — during a large batch upload that meant hundreds of full grid rebuilds
@@ -2356,7 +2451,109 @@ function scheduleDashboardRefresh(targetParentId) {
   }, DASHBOARD_REFRESH_THROTTLE_MS);
 }
 
-function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, onCreatedXHR) {
+// Above this size, a file is not hashed client-side before asking about a naming conflict — the
+// browser would have to read the whole thing into memory at once (Web Crypto's subtle.digest has
+// no streaming/incremental API), which risks crashing the tab on a large upload. Below it, a
+// pre-check can tell the user immediately whether a colliding file is byte-identical, without
+// needing to upload anything first.
+const CLIENT_HASH_MAX_BYTES = 100 * 1024 * 1024; // 100MB
+
+// SHA-256 of a File's content, hex-encoded, computed entirely in the browser (Web Crypto). Used
+// only for the upload-conflict pre-check — never for anything security-sensitive. Returns null
+// for files too large to hash safely (see CLIENT_HASH_MAX_BYTES) or if hashing fails for any
+// reason; callers treat null as "unknown", not as an error.
+async function computeClientFileHash(file) {
+  if (!window.crypto || !window.crypto.subtle || file.size > CLIENT_HASH_MAX_BYTES) return null;
+  try {
+    const buffer = await file.arrayBuffer();
+    const digest = await window.crypto.subtle.digest('SHA-256', buffer);
+    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (err) {
+    console.error('Error hashing file client-side:', err);
+    return null;
+  }
+}
+
+// Cheap pre-flight for any create/upload flow: asks whether `name` would collide in `parentId`
+// before actually sending file content. `clientHash` (optional, see computeClientFileHash) lets
+// the server also report whether a colliding file is byte-identical. Returns null (rather than
+// throwing) on any request failure — callers fall back to letting the real write endpoint's own
+// conflict check catch it, so a failed pre-check never blocks the operation outright.
+async function checkNameConflict(parentId, name, isFolder, clientHash) {
+  try {
+    const params = new URLSearchParams({ name, isFolder: isFolder ? 'true' : 'false' });
+    if (parentId) params.set('parentId', parentId);
+    if (clientHash) params.set('hash', clientHash);
+    const res = await fetch(`/api/files/check-conflict?${params.toString()}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.error('Error pre-checking name conflict:', err);
+    return null;
+  }
+}
+
+// Moves fileIds into targetFolderId, walking the user through any naming conflicts the server
+// reports (see POST /api/files/move-multiple) via the shared conflict dialog. "Für alle
+// anwenden" applies to the rest of THIS batch's conflicts, same idea as the upload queue's
+// pendingConflictChoice. Returns the parsed response body (possibly after skipping some items —
+// check `.skipped`), or null if the request ultimately failed.
+async function moveFilesWithConflictHandling(fileIds, targetFolderId) {
+  let idsToSend = [...fileIds];
+  const resolutions = {};
+  let applyToAllChoice = null;
+  const skippedIds = [];
+
+  while (true) {
+    if (idsToSend.length === 0) return { success: true, moved: 0, skipped: skippedIds.length, skippedIds, movedIds: [] };
+
+    let res;
+    try {
+      res = await fetch('/api/files/move-multiple', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileIds: idsToSend, targetFolderId, resolutions })
+      });
+    } catch {
+      showToast('Verbindungsfehler beim Verschieben.');
+      return null;
+    }
+
+    if (res.status !== 409) {
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || 'Fehler beim Verschieben.');
+        return null;
+      }
+      const body = await res.json();
+      return { ...body, skippedIds, movedIds: idsToSend };
+    }
+
+    const { conflicts } = await res.json();
+    for (const conflict of conflicts) {
+      let action = applyToAllChoice;
+      if (!action) {
+        const choice = await showFileConflictDialog(conflict.name, {
+          isExactDuplicate: conflict.isExactDuplicate,
+          canReplace: conflict.canReplace,
+          showApplyAll: conflicts.length > 1
+        });
+        if (choice.applyToAll) applyToAllChoice = choice.action;
+        action = choice.action;
+      }
+      if (action === 'skip') {
+        idsToSend = idsToSend.filter(id => id !== conflict.fileId);
+        skippedIds.push(conflict.fileId);
+      } else {
+        resolutions[conflict.fileId] = action;
+      }
+    }
+    // Loop again with the chosen resolutions applied — the server reports success, or any
+    // further conflict it still finds (e.g. two moved items landing on the same new name).
+  }
+}
+
+function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, onCreatedXHR, conflictResolution) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     if (onCreatedXHR) {
@@ -2367,6 +2564,11 @@ function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, on
     if (parentId) {
       formData.append('parentId', parentId);
     }
+    // 'replace' or 'keep_both' — how a previously-resolved naming conflict should be applied on
+    // this (re)try. Left unset on the first attempt so the server can surface a fresh conflict.
+    if (conflictResolution) {
+      formData.append('onConflict', conflictResolution);
+    }
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
@@ -2375,17 +2577,18 @@ function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, on
     };
 
     xhr.onload = () => {
+      let response = {};
+      try { response = JSON.parse(xhr.responseText); } catch(e){}
+
       if (xhr.status >= 200 && xhr.status < 300) {
-        let response = {};
-        try { response = JSON.parse(xhr.responseText); } catch(e){}
         onDone(response);
         resolve(response);
+      } else if (xhr.status === 409) {
+        // A file with this name already exists in the target folder — let the caller ask the
+        // user how to proceed instead of treating it as a hard error.
+        resolve({ conflict: true, ...response });
       } else {
-        let errorMsg = 'Fehler beim Hochladen.';
-        try {
-          const err = JSON.parse(xhr.responseText);
-          errorMsg = err.error || errorMsg;
-        } catch(e){}
+        const errorMsg = response.error || 'Fehler beim Hochladen.';
         onError(errorMsg);
         reject(new Error(errorMsg));
       }
@@ -2429,6 +2632,10 @@ function updateUploadUI() {
     if (item.status === 'done') {
       totalUploaded += item.size;
       doneCount++;
+    } else if (item.status === 'skipped') {
+      // Counts toward the progress bar (it's a resolved item, not a pending one) but not
+      // toward doneCount — "fertig" should mean actually uploaded.
+      totalUploaded += item.size;
     } else if (item.status === 'uploading') {
       totalUploaded += item.uploaded;
     }
@@ -2455,6 +2662,9 @@ function updateUploadUI() {
     } else if (item.status === 'error') {
       statusText = item.error || 'Fehler';
       statusColor = '#ff5555';
+    } else if (item.status === 'skipped') {
+      statusText = 'Übersprungen';
+      statusColor = 'var(--color-text-muted)';
     }
 
     row.innerHTML = `
@@ -2678,6 +2888,7 @@ async function uploadMultipleFiles(filesList, targetFolderId = currentFolderId) 
   // Reset trigger state if we're starting a new batch
   if (!uploadActive) {
     currentUploadQueue = [];
+    pendingConflictChoice = null;
     if (circle && icon && text) {
       circle.style.border = '3px solid var(--color-border)';
       circle.style.borderTopColor = 'var(--color-primary)';
@@ -2758,44 +2969,108 @@ async function processUploadQueue() {
         }
       }
 
-      await uploadSingleFileWithXHR(
-        uploadItem.fileObj,
-        uploadParentId,
-        (loaded, total) => {
-          uploadItem.uploaded = loaded;
-          // Native XHR progress events can fire dozens of times per second; each call rebuilds
-          // the whole upload-panel list, so this is throttled to a fixed rate. The 'done'
-          // callback below always calls updateUploadUI() itself, so the final 100% state still
-          // renders even if a tick right before completion gets skipped here.
-          const now = Date.now();
-          if (now - lastProgressUIUpdate >= PROGRESS_UI_THROTTLE_MS) {
-            lastProgressUIUpdate = now;
-            updateUploadUI();
+      // A prior "für alle anwenden" skip decision applies to every remaining duplicate in this
+      // batch — honor it without even attempting the request (and thus without re-uploading
+      // the file's bytes just to throw them away).
+      if (pendingConflictChoice === 'skip') {
+        uploadItem.status = 'skipped';
+        updateUploadUI();
+      } else {
+        // 'replace' | 'keep_both' | null — null means no batch-wide choice has been made yet;
+        // this item still needs its own conflict check.
+        let conflictResolution = pendingConflictChoice;
+        const showApplyAll = () => currentUploadQueue.filter(item => item.status === 'pending').length > 0;
+
+        // Ask before spending any upload bandwidth: a name-only pre-check always runs, and for
+        // files small enough to hash client-side (see CLIENT_HASH_MAX_BYTES) it also compares
+        // content — so a byte-identical file can typically be skipped without ever transferring
+        // it. Large files still get prompted immediately on a name collision, just without
+        // knowing yet whether the content actually differs (isExactDuplicate: null).
+        if (conflictResolution === null) {
+          const clientHash = await computeClientFileHash(uploadItem.fileObj);
+          const precheck = await checkNameConflict(uploadParentId, uploadItem.fileObj.name, false, clientHash);
+          if (precheck && precheck.exists) {
+            const choice = await showFileConflictDialog(uploadItem.name, {
+              isExactDuplicate: precheck.isExactDuplicate,
+              canReplace: precheck.canReplace,
+              showApplyAll: showApplyAll()
+            });
+            if (choice.applyToAll) pendingConflictChoice = choice.action;
+            if (choice.action === 'skip') {
+              uploadItem.status = 'skipped';
+              uploadItem.xhr = null;
+              updateUploadUI();
+              conflictResolution = 'skip';
+            } else {
+              conflictResolution = choice.action;
+            }
           }
-        },
-        (res) => {
-          uploadItem.status = 'done';
-          uploadItem.uploaded = uploadItem.size;
-          uploadItem.xhr = null;
-          updateUploadUI();
-          // Sofort anzeigen, statt auf den Abschluss der gesamten Warteschlange zu warten —
-          // bei mehreren Dateien tauchen sie so nach und nach im Dashboard auf. Throttled: a
-          // large batch would otherwise trigger a full folder refetch + grid rebuild (incl.
-          // re-requesting every already-uploaded file's thumbnail) after every single file.
-          scheduleDashboardRefresh(uploadParentId);
-        },
-        (errMsg) => {
-          if (uploadItem.status !== 'cancelled') {
-            uploadItem.status = 'error';
-            uploadItem.error = errMsg;
-          }
-          uploadItem.xhr = null;
-          updateUploadUI();
-        },
-        (xhrRef) => {
-          uploadItem.xhr = xhrRef;
         }
-      );
+
+        // The server re-checks for a conflict on the real upload too — it not only handles
+        // races the pre-check could miss (another upload landing in between), it's also the
+        // only source of truth once bytes are actually involved (a large file the pre-check
+        // couldn't hash still gets an authoritative isExactDuplicate here). If one still comes
+        // back, ask again and retry with the user's choice.
+        while (conflictResolution !== 'skip') {
+          const result = await uploadSingleFileWithXHR(
+            uploadItem.fileObj,
+            uploadParentId,
+            (loaded, total) => {
+              uploadItem.uploaded = loaded;
+              // Native XHR progress events can fire dozens of times per second; each call rebuilds
+              // the whole upload-panel list, so this is throttled to a fixed rate. The 'done'
+              // callback below always calls updateUploadUI() itself, so the final 100% state still
+              // renders even if a tick right before completion gets skipped here.
+              const now = Date.now();
+              if (now - lastProgressUIUpdate >= PROGRESS_UI_THROTTLE_MS) {
+                lastProgressUIUpdate = now;
+                updateUploadUI();
+              }
+            },
+            (res) => {
+              uploadItem.status = 'done';
+              uploadItem.uploaded = uploadItem.size;
+              uploadItem.xhr = null;
+              updateUploadUI();
+              // Sofort anzeigen, statt auf den Abschluss der gesamten Warteschlange zu warten —
+              // bei mehreren Dateien tauchen sie so nach und nach im Dashboard auf. Throttled: a
+              // large batch would otherwise trigger a full folder refetch + grid rebuild (incl.
+              // re-requesting every already-uploaded file's thumbnail) after every single file.
+              scheduleDashboardRefresh(uploadParentId);
+            },
+            (errMsg) => {
+              if (uploadItem.status !== 'cancelled') {
+                uploadItem.status = 'error';
+                uploadItem.error = errMsg;
+              }
+              uploadItem.xhr = null;
+              updateUploadUI();
+            },
+            (xhrRef) => {
+              uploadItem.xhr = xhrRef;
+            },
+            conflictResolution
+          );
+
+          if (!result || !result.conflict) break;
+
+          const choice = await showFileConflictDialog(uploadItem.name, {
+            isExactDuplicate: result.isExactDuplicate,
+            canReplace: result.canReplace,
+            showApplyAll: showApplyAll()
+          });
+          if (choice.applyToAll) pendingConflictChoice = choice.action;
+
+          if (choice.action === 'skip') {
+            uploadItem.status = 'skipped';
+            uploadItem.xhr = null;
+            updateUploadUI();
+            break;
+          }
+          conflictResolution = choice.action;
+        }
+      }
     } catch (e) {
       if (uploadItem.status !== 'cancelled') {
         uploadItem.status = 'error';
@@ -2822,8 +3097,11 @@ async function processUploadQueue() {
 
   const errors = currentUploadQueue.filter(item => item.status === 'error');
   const done = currentUploadQueue.filter(item => item.status === 'done');
+  const skipped = currentUploadQueue.filter(item => item.status === 'skipped');
   if (errors.length > 0) {
-    showToast(`${done.length} von ${currentUploadQueue.filter(item => item.status !== 'cancelled').length} erfolgreich hochgeladen, ${errors.length} fehlgeschlagen.`);
+    showToast(`${done.length} von ${currentUploadQueue.filter(item => item.status !== 'cancelled').length} erfolgreich hochgeladen, ${errors.length} fehlgeschlagen${skipped.length > 0 ? `, ${skipped.length} übersprungen` : ''}.`);
+  } else if (skipped.length > 0) {
+    showToast(`${done.length} Datei(en) hochgeladen, ${skipped.length} übersprungen.`);
   } else if (done.length > 0) {
     showToast('Alle Datei-Uploads erfolgreich abgeschlossen!');
   }
@@ -3112,22 +3390,16 @@ document.getElementById('multi-share-btn').onclick = async () => {
 
     if (!createRes.ok) {
       const err = await createRes.json();
-      showToast(err.error || 'Fehler beim Erstellen des Ordners.');
+      showToast(createRes.status === 409
+        ? `Ein Ordner namens „${folderName.trim()}“ existiert bereits — bitte einen anderen Namen wählen.`
+        : (err.error || 'Fehler beim Erstellen des Ordners.'));
       return;
     }
 
     const targetFolder = await createRes.json();
 
-    const moveRes = await fetch('/api/files/move-multiple', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        fileIds: selectedFileIds,
-        targetFolderId: targetFolder.id
-      })
-    });
-
-    if (!moveRes.ok) {
+    const moveResult = await moveFilesWithConflictHandling(selectedFileIds, targetFolder.id);
+    if (!moveResult) {
       showToast('Fehler beim Verschieben der Dateien in den Ordner.');
       return;
     }
@@ -3235,24 +3507,15 @@ document.getElementById('cancel-move-to-modal-btn').onclick = closeMoveToModal;
 
 document.getElementById('confirm-move-to-btn').onclick = async () => {
   if (selectedFileIds.length === 0) return;
-  try {
-    const res = await fetch('/api/files/move-multiple', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileIds: selectedFileIds, targetFolderId: moveToPickerFolderId })
-    });
-    if (res.ok) {
-      showToast(`${selectedFileIds.length} Element(e) verschoben!`);
-      closeMoveToModal();
-      clearSelection();
-      await loadFiles(currentFolderId);
-    } else {
-      const err = await res.json();
-      showToast(err.error || 'Fehler beim Verschieben.');
-    }
-  } catch {
-    showToast('Verbindungsfehler beim Verschieben.');
-  }
+  const moveResult = await moveFilesWithConflictHandling(selectedFileIds, moveToPickerFolderId);
+  if (!moveResult) return;
+
+  showToast(moveResult.skippedIds.length > 0
+    ? `${moveResult.movedIds.length} Element(e) verschoben, ${moveResult.skippedIds.length} übersprungen.`
+    : `${moveResult.movedIds.length} Element(e) verschoben!`);
+  closeMoveToModal();
+  clearSelection();
+  await loadFiles(currentFolderId);
 };
 
 // Helper to recursively traverse DirectoryEntry/FileEntry objects and collect all files with relative paths
@@ -5950,12 +6213,21 @@ if (totpForm) {
 async function triggerPasteAction() {
   if (clipboardFileIds.length === 0 || !clipboardAction) return;
 
-  const url = clipboardAction === 'cut' 
-    ? '/api/files/move-multiple' 
-    : '/api/files/copy-multiple';
+  if (clipboardAction === 'cut') {
+    const moveResult = await moveFilesWithConflictHandling(clipboardFileIds, currentFolderId);
+    if (!moveResult) return;
+    showToast(moveResult.skippedIds.length > 0
+      ? `${moveResult.movedIds.length} Element(e) eingefügt, ${moveResult.skippedIds.length} übersprungen.`
+      : 'Elemente eingefügt (verschoben)!');
+    clipboardFileIds = [];
+    clipboardAction = null;
+    clearSelection();
+    loadFiles(currentFolderId);
+    return;
+  }
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch('/api/files/copy-multiple', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -5965,11 +6237,7 @@ async function triggerPasteAction() {
     });
 
     if (res.ok) {
-      showToast(clipboardAction === 'cut' ? 'Elemente eingefügt (verschoben)!' : 'Elemente dupliziert!');
-      if (clipboardAction === 'cut') {
-        clipboardFileIds = [];
-        clipboardAction = null;
-      }
+      showToast('Elemente dupliziert!');
       clearSelection();
       loadFiles(currentFolderId);
     } else {
@@ -6824,13 +7092,31 @@ function startEditorTitleRename(fileId) {
     }
 
     try {
-      const r = await fetch(`/api/files/${fileId}/rename`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName }),
-      });
-      const data = await r.json();
-      if (r.ok) {
+      let onConflict;
+      let data;
+      let r;
+      while (true) {
+        r = await fetch(`/api/files/${fileId}/rename`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName, onConflict }),
+        });
+        data = await r.json();
+        if (r.status === 409) {
+          const choice = await showFileConflictDialog(newName, {
+            isExactDuplicate: data.isExactDuplicate,
+            canReplace: data.canReplace
+          });
+          if (choice.action === 'skip') { r = null; break; }
+          onConflict = choice.action;
+          continue;
+        }
+        break;
+      }
+
+      if (!r) {
+        titleEl.textContent = originalName;
+      } else if (r.ok) {
         titleEl.textContent = data.name;
         currentEditorLanguage = getMonacoLanguage(data.name);
         setEditorLanguageLabel(currentEditorLanguage);
@@ -7128,14 +7414,32 @@ function startViewerRename(prefix, fileId) {
     }
 
     try {
-      const r = await fetch(`/api/files/${fileId}/rename`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName }),
-      });
-      const data = await r.json();
+      let onConflict;
+      let data;
+      let r;
+      while (true) {
+        r = await fetch(`/api/files/${fileId}/rename`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName, onConflict }),
+        });
+        data = await r.json();
+        if (r.status === 409) {
+          const choice = await showFileConflictDialog(newName, {
+            isExactDuplicate: data.isExactDuplicate,
+            canReplace: data.canReplace
+          });
+          if (choice.action === 'skip') { r = null; break; }
+          onConflict = choice.action;
+          continue;
+        }
+        break;
+      }
+
       const stillCurrent = sessionToken === viewerSessionToken;
-      if (r.ok) {
+      if (!r) {
+        if (stillCurrent) nameEl.textContent = originalName;
+      } else if (r.ok) {
         const listEntry = viewerMediaList.find(f => f.id === fileId);
         if (listEntry) listEntry.name = data.name;
         if (stillCurrent) nameEl.textContent = data.name;

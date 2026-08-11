@@ -1379,6 +1379,28 @@
     </div>
   </div>
 
+  <!-- UPLOAD CONFLICT MODAL (Ersetzen / Überspringen / Beide behalten) -->
+  <div class="modal-overlay" id="upload-conflict-modal-overlay">
+    <div class="card modal" style="max-width: 420px; width: 90%;">
+      <div class="modal-header">
+        <h3 class="modal-title">Datei existiert bereits</h3>
+        <button class="close-btn" id="close-upload-conflict-btn" type="button">&times;</button>
+      </div>
+      <div style="margin-top: 1rem;">
+        <p id="upload-conflict-message" style="font-size: 0.95rem; color: var(--color-text-muted); line-height: 1.5; margin-bottom: 1rem;"></p>
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <button type="button" class="btn" id="upload-conflict-replace-btn" style="justify-content: center;">Ersetzen</button>
+          <button type="button" class="btn" id="upload-conflict-keep-both-btn" style="justify-content: center;">Beide behalten</button>
+          <button type="button" class="btn" id="upload-conflict-skip-btn" style="justify-content: center;">Überspringen</button>
+        </div>
+        <label id="upload-conflict-apply-all-container" style="display: none; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin-top: 1rem;">
+          <input type="checkbox" id="upload-conflict-apply-all">
+          <span>Für alle weiteren Duplikate in diesem Upload anwenden</span>
+        </label>
+      </div>
+    </div>
+  </div>
+
   <!-- INPUT MODAL (Für Ordner- und Dateierstellung im einheitlichen Stil) -->
   <div class="modal-overlay" id="input-modal-overlay">
     <div class="card modal" style="max-width: 400px;">

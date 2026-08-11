@@ -1353,6 +1353,10 @@ header {
    (z-index 10000) and share modal (10010) — they can be triggered from within either. */
 #custom-confirm-modal-overlay { z-index: 10030; }
 
+/* The duplicate-file prompt can fire mid-upload while the upload panel (z-index 1100) is open —
+   it needs to sit above that and every other overlay, same as the confirm dialog. */
+#upload-conflict-modal-overlay { z-index: 10030; }
+
 /* ─── Modal (Glass Overlay) ─── */
 .modal-overlay {
   position: fixed;

@@ -68,6 +68,75 @@ function relocateUploadToOwnerDir(ownerId, filenameAtRoot) {
   return relativePath;
 }
 
+// SHA-256 of a file's content, hex-encoded. Streamed rather than read into memory at once since
+// this can run against arbitrarily large uploads. Only called when a name collision is found
+// (see /api/files/upload) — hashing every upload unconditionally would double the disk I/O for
+// the common case where no conflict exists.
+function computeFileHash(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
+}
+
+// Looks up a non-deleted file OR folder with this exact name owned by the user in this parent —
+// the shared "does a naming conflict exist" query behind every operation that places an item
+// into a folder (upload, create-empty-file, create-folder, rename, move). `excludeId` lets
+// rename/move ignore the item's own row (renaming something to its current name, or moving a
+// selection that happens to contain it, is never a conflict with itself).
+async function findNameConflict(userId, parentId, name, excludeId) {
+  const params = [userId, name, parentId];
+  let excludeClause = '';
+  if (excludeId) {
+    params.push(excludeId);
+    excludeClause = 'AND id != $4';
+  }
+  const res = await pool.query(
+    `SELECT id, path, size, is_folder, content_hash FROM files WHERE owner_id = $1 AND deleted_at IS NULL
+     AND name = $2 AND (parent_id = $3 OR (parent_id IS NULL AND $3 IS NULL)) ${excludeClause}`,
+    params
+  );
+  return res.rows[0] || null;
+}
+
+// Returns an existing file row's content hash, computing (and caching back onto the row) from
+// disk first if it was never hashed before — older rows, or ones that simply never hit a
+// conflict check until now. Folders have no content to hash — never call this for one.
+async function resolveExistingFileHash(existing) {
+  if (existing.content_hash) return existing.content_hash;
+  const physicalPath = path.join(UPLOADS_DIR, existing.path);
+  if (!fs.existsSync(physicalPath)) return null;
+  const hash = await computeFileHash(physicalPath);
+  pool.query('UPDATE files SET content_hash = $1 WHERE id = $2', [hash, existing.id]).catch((err) => {
+    console.error('Error backfilling content_hash:', err);
+  });
+  return hash;
+}
+
+// Used when a naming conflict is resolved as "keep both" — appends " (1)", " (2)", ... (before
+// the extension, for files) until a name is found that doesn't collide with an existing
+// (non-deleted) file/folder owned by the same user in the same parent.
+async function generateUniqueName(userId, parentId, originalName, isFolder) {
+  const dotIndex = !isFolder ? originalName.lastIndexOf('.') : -1;
+  const base = dotIndex > 0 ? originalName.slice(0, dotIndex) : originalName;
+  const ext = dotIndex > 0 ? originalName.slice(dotIndex) : '';
+  let candidate = originalName;
+  let counter = 1;
+  while (true) {
+    const res = await pool.query(
+      `SELECT 1 FROM files WHERE owner_id = $1 AND is_folder = $2 AND deleted_at IS NULL
+       AND name = $3 AND (parent_id = $4 OR (parent_id IS NULL AND $4 IS NULL))`,
+      [userId, isFolder, candidate, parentId]
+    );
+    if (res.rows.length === 0) return candidate;
+    candidate = `${base} (${counter})${ext}`;
+    counter++;
+  }
+}
+
 // Admin-controlled settings (SEO title/description) get reflected into HTML served to every
 // visitor, including unauthenticated ones — escape before injecting so a compromised admin
 // account (or a stray "<" in the description) can't inject markup/script into the page shell.
@@ -1589,7 +1658,7 @@ app.get('/api/files/list', requireAuth, async (req, res) => {
 
 // Create new folder
 app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), async (req, res) => {
-  const { name, parentId } = req.body;
+  const { name, parentId, onConflict } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId ? parseInt(parentId) : null;
 
@@ -1603,9 +1672,20 @@ app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), a
       if (!isOwner) return res.status(403).json({ error: 'Access denied' });
     }
 
+    const existing = await findNameConflict(userId, parsedParentId, name);
+    // Replacing an existing folder would mean deleting its entire subtree — never offered here,
+    // only "keep both" (auto-suffixed name) or leaving the conflict for the client to cancel.
+    if (existing && !onConflict) {
+      return res.status(409).json({ error: 'duplicate', existingId: existing.id, existingIsFolder: existing.is_folder, canReplace: false });
+    }
+
+    const finalName = (existing && onConflict === 'keep_both')
+      ? await generateUniqueName(userId, parsedParentId, name, true)
+      : name;
+
     const result = await pool.query(
       'INSERT INTO files (name, path, is_folder, parent_id, owner_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [name, 'folder', true, parsedParentId, userId]
+      [finalName, 'folder', true, parsedParentId, userId]
     );
 
     res.status(201).json(result.rows[0]);
@@ -1616,12 +1696,32 @@ app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), a
 });
 
 // Upload file
+// Fire-and-forget text extraction (incl. OCR for scanned PDFs/images), shared by the "new file"
+// and "replace existing file" paths below. Runs after the response — for large batch uploads it
+// can take up to ~30s per file, and uploads are processed one at a time on the client, so doing
+// this beforehand serialized the whole batch behind it. A stale/failed extraction here just
+// leaves content NULL, same as any pre-existing file — indexExistingFiles() picks those up as a
+// backfill on the next server start.
+function scheduleTextExtraction(physicalPath, mimeType, originalName, fileId) {
+  extractTextContent(physicalPath, mimeType, originalName)
+    .then((textContent) => {
+      if (textContent === null) return;
+      return pool.query('UPDATE files SET content = $1 WHERE id = $2', [textContent, fileId]);
+    })
+    .catch((err) => console.error('Error indexing uploaded file:', originalName, err));
+}
+
 app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
 
   const parentId = req.body.parentId && req.body.parentId !== 'null' ? parseInt(req.body.parentId) : null;
+  // How to proceed when a file of the same name already exists in the target folder:
+  // undefined = ask (the client hasn't decided yet), 'replace' = overwrite it in place,
+  // 'keep_both' = upload alongside it under a "(1)", "(2)", ... name. ('skip' never reaches
+  // here — the client simply doesn't send the request for a skipped file.)
+  const onConflict = req.body.onConflict;
   const userId = req.session.userId;
   // Tracks wherever the physical file currently is, so error-path cleanup below always unlinks
   // the right place whether or not relocateUploadToOwnerDir() has run yet.
@@ -1636,15 +1736,79 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
       }
     }
 
-    const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
-    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
+    const existing = await findNameConflict(userId, parentId, req.file.originalname);
+    // An upload is always a file — replacing only makes sense when the existing item is one too.
+    // Colliding with an existing FOLDER of the same name can only be resolved as skip/keep-both.
+    const canReplace = !!existing && !existing.is_folder;
+
+    // Only hash when a name collision actually exists — hashing every upload unconditionally
+    // would add a full extra read of every file's content to the common (non-conflicting) case.
+    let newFileHash = null;
+    let isExactDuplicate = false;
+    if (canReplace) {
+      newFileHash = await computeFileHash(currentPhysicalPath);
+      const existingHash = await resolveExistingFileHash(existing);
+      isExactDuplicate = !!existingHash && existingHash === newFileHash;
+    }
+
+    // Without an explicit choice from the client, never silently create a second file with the
+    // same name — surface the conflict so the UI can ask (replace / skip / keep both) before any
+    // row lands in the DB. isExactDuplicate lets the client tailor that prompt: recommend
+    // "skip" for a byte-identical file, "replace" for a same-named file with different content.
+    if (existing && !onConflict) {
+      fs.unlinkSync(currentPhysicalPath);
+      return res.status(409).json({ error: 'duplicate', existingId: existing.id, name: req.file.originalname, isExactDuplicate, canReplace });
+    }
+    // Defensive: the UI never offers "Ersetzen" when the collision is with a folder, but reject
+    // it explicitly rather than silently falling through to "create a second same-named item".
+    if (existing && onConflict === 'replace' && !canReplace) {
+      fs.unlinkSync(currentPhysicalPath);
+      return res.status(400).json({ error: 'Ein Ordner mit diesem Namen kann nicht durch eine Datei ersetzt werden.' });
+    }
 
     const safeMimeType = getSafeMimeType(req.file.originalname);
 
+    if (existing && onConflict === 'replace' && canReplace) {
+      const oldPhysicalPath = path.join(UPLOADS_DIR, existing.path);
+      const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
+      currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
+
+      // Only the net size increase counts against quota — usedBytes inside the lock still
+      // includes this file's OLD size (its row hasn't been updated yet), same reasoning as
+      // PUT /api/files/:id/binary-content.
+      const netAdditionalBytes = req.file.size - (existing.size || 0);
+      const doReplace = (client) => client.query(
+        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4 WHERE id = $5 RETURNING *`,
+        [relativePath, safeMimeType, req.file.size, newFileHash, existing.id]
+      );
+
+      const quotaResult = netAdditionalBytes > 0
+        ? await withStorageQuotaLock(userId, netAdditionalBytes, doReplace)
+        : { ok: true, data: await doReplace(pool) };
+      if (!quotaResult.ok) {
+        fs.unlinkSync(currentPhysicalPath);
+        return res.status(413).json({ error: quotaResult.error });
+      }
+
+      if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+
+      const updatedFile = quotaResult.data.rows[0];
+      res.status(200).json(updatedFile);
+      scheduleTextExtraction(currentPhysicalPath, safeMimeType, req.file.originalname, updatedFile.id);
+      return;
+    }
+
+    const finalName = (existing && onConflict === 'keep_both')
+      ? await generateUniqueName(userId, parentId, req.file.originalname, false)
+      : req.file.originalname;
+
+    const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
+    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
+
     const quotaResult = await withStorageQuotaLock(userId, req.file.size, (client) => client.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL) RETURNING *`,
-      [req.file.originalname, relativePath, safeMimeType, req.file.size, false, parentId, userId]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, content_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8) RETURNING *`,
+      [finalName, relativePath, safeMimeType, req.file.size, false, parentId, userId, newFileHash]
     ));
     if (!quotaResult.ok) {
       fs.unlinkSync(currentPhysicalPath);
@@ -1653,18 +1817,7 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
 
     const insertedFile = quotaResult.data.rows[0];
     res.status(201).json(insertedFile);
-
-    // Text extraction (incl. OCR for scanned PDFs/images) runs after the response — for large
-    // batch uploads it can take up to ~30s per file, and uploads are processed one at a time on
-    // the client, so doing this beforehand serialized the whole batch behind it. A stale/failed
-    // extraction here just leaves content NULL, same as any pre-existing file — indexExistingFiles()
-    // picks those up as a backfill on the next server start.
-    extractTextContent(currentPhysicalPath, safeMimeType, req.file.originalname)
-      .then((textContent) => {
-        if (textContent === null) return;
-        return pool.query('UPDATE files SET content = $1 WHERE id = $2', [textContent, insertedFile.id]);
-      })
-      .catch((err) => console.error('Error indexing uploaded file:', req.file.originalname, err));
+    scheduleTextExtraction(currentPhysicalPath, safeMimeType, finalName, insertedFile.id);
     return;
   } catch (err) {
     console.error('Error uploading file:', err);
@@ -1672,6 +1825,44 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
     if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
       fs.unlinkSync(currentPhysicalPath);
     }
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Cheap pre-flight for any operation about to place an item into a folder (upload, new file, new
+// folder, rename, move) — lets the client ask "would this collide?" using only a name (and,
+// optionally, a client-computed hash for files small enough to read into browser memory safely)
+// instead of always having to send the full file first just to find out. A "no" here is not a
+// hard guarantee (another upload can land in between), so the real write endpoints re-check and
+// still return 409 on an actual conflict — this only avoids the common-case round trip.
+app.get('/api/files/check-conflict', requireAuth, async (req, res) => {
+  const userId = req.session.userId;
+  const parentId = req.query.parentId && req.query.parentId !== 'null' ? parseInt(req.query.parentId) : null;
+  const name = req.query.name;
+  const isFolder = req.query.isFolder === 'true';
+  const clientHash = req.query.hash || null;
+
+  if (!name) return res.status(400).json({ error: 'name is required' });
+
+  try {
+    if (parentId !== null) {
+      const isOwner = await verifyFileOwner(parentId, userId);
+      if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const existing = await findNameConflict(userId, parentId, name);
+    if (!existing) return res.json({ exists: false });
+
+    const canReplace = !isFolder && !existing.is_folder;
+    let isExactDuplicate = null; // null = unknown (folder involved, or no client hash to compare)
+    if (canReplace && clientHash) {
+      const existingHash = await resolveExistingFileHash(existing);
+      isExactDuplicate = !!existingHash && existingHash === clientHash;
+    }
+
+    res.json({ exists: true, existingId: existing.id, existingIsFolder: existing.is_folder, canReplace, isExactDuplicate });
+  } catch (err) {
+    console.error('Error pre-checking name conflict:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -1909,19 +2100,53 @@ app.put('/api/files/:id/rename', requireAuth, requirePermission('rename'), async
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
   const newName = (req.body.name || '').trim();
+  const onConflict = req.body.onConflict;
 
   if (!newName) return res.status(400).json({ error: 'Name darf nicht leer sein.' });
   if (newName.length > 255) return res.status(400).json({ error: 'Name ist zu lang.' });
   if (newName.includes('/') || newName.includes('\\')) return res.status(400).json({ error: 'Name darf keine Schrägstriche enthalten.' });
 
   try {
-    const isOwner = await verifyFileOwner(fileId, userId);
-    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+    const sourceRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    if (sourceRes.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const source = sourceRes.rows[0];
+    if (source.owner_id !== userId) return res.status(403).json({ error: 'Access denied' });
 
-    const newMimeType = getSafeMimeType(newName);
+    // Renaming to its own current name is never a conflict with itself.
+    const existing = newName !== source.name
+      ? await findNameConflict(userId, source.parent_id, newName, fileId)
+      : null;
+    // Replacing an existing folder would delete its entire subtree — never offered; and a
+    // renamed folder can't "replace" an existing file either. Only file-onto-file applies.
+    const canReplace = !!existing && !existing.is_folder && !source.is_folder;
+    let isExactDuplicate = false;
+    if (canReplace) {
+      const sourceHash = await resolveExistingFileHash(source);
+      const existingHash = await resolveExistingFileHash(existing);
+      isExactDuplicate = !!sourceHash && !!existingHash && sourceHash === existingHash;
+    }
+
+    if (existing && !onConflict) {
+      return res.status(409).json({ error: 'duplicate', existingId: existing.id, isExactDuplicate, canReplace });
+    }
+    if (existing && onConflict === 'replace' && !canReplace) {
+      return res.status(400).json({ error: 'Dieses Element kann das vorhandene Element mit diesem Namen nicht ersetzen.' });
+    }
+
+    if (existing && onConflict === 'replace' && canReplace) {
+      const targetPhysicalPath = path.join(UPLOADS_DIR, existing.path);
+      await pool.query('DELETE FROM files WHERE id = $1', [existing.id]);
+      if (fs.existsSync(targetPhysicalPath)) fs.unlinkSync(targetPhysicalPath);
+    }
+
+    const resolvedName = (existing && onConflict === 'keep_both')
+      ? await generateUniqueName(userId, source.parent_id, newName, source.is_folder)
+      : newName;
+
+    const newMimeType = getSafeMimeType(resolvedName);
     const result = await pool.query(
       'UPDATE files SET name = $1, mime_type = CASE WHEN is_folder = false THEN $2 ELSE mime_type END WHERE id = $3 RETURNING id, name',
-      [newName, newMimeType, fileId]
+      [resolvedName, newMimeType, fileId]
     );
     res.json({ success: true, name: result.rows[0].name });
   } catch (err) {
@@ -1932,7 +2157,7 @@ app.put('/api/files/:id/rename', requireAuth, requirePermission('rename'), async
 
 // Move multiple files/folders to a target folder
 app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), async (req, res) => {
-  const { fileIds, targetFolderId } = req.body;
+  const { fileIds, targetFolderId, resolutions } = req.body;
   const userId = req.session.userId;
 
   if (!Array.isArray(fileIds) || fileIds.length === 0) {
@@ -1960,13 +2185,73 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
       }
     }
 
-    // Update parent_id for all these files belonging to the user
-    await pool.query(
-      'UPDATE files SET parent_id = $1 WHERE id = ANY($2) AND owner_id = $3',
-      [targetFolderId, fileIds, userId]
-    );
+    // `resolutions` (optional): { [fileId]: 'replace' | 'keep_both' } — how the caller already
+    // decided to handle a conflict reported by a previous call. Items with no entry here that
+    // still collide are reported back as fresh conflicts instead of silently duplicating or
+    // silently not moving.
+    const resolutionMap = resolutions && typeof resolutions === 'object' ? resolutions : {};
 
-    res.json({ success: true });
+    const itemsRes = await pool.query(
+      'SELECT id, name, is_folder, path, size, content_hash FROM files WHERE id = ANY($1) AND owner_id = $2',
+      [fileIds, userId]
+    );
+    const items = itemsRes.rows;
+
+    const conflictByItemId = {};
+    const freshConflicts = [];
+    for (const item of items) {
+      const existing = await findNameConflict(userId, targetFolderId, item.name, item.id);
+      if (!existing) continue;
+      // Replacing an existing folder would delete its entire subtree, and a moved folder can't
+      // "replace" an existing file either — only file-onto-file applies.
+      const canReplace = !item.is_folder && !existing.is_folder;
+      let isExactDuplicate = false;
+      if (canReplace) {
+        const sourceHash = await resolveExistingFileHash(item);
+        const existingHash = await resolveExistingFileHash(existing);
+        isExactDuplicate = !!sourceHash && !!existingHash && sourceHash === existingHash;
+      }
+      conflictByItemId[item.id] = { existing, canReplace, isExactDuplicate };
+      if (!resolutionMap[item.id]) {
+        freshConflicts.push({ fileId: item.id, name: item.name, isFolder: item.is_folder, existingId: existing.id, canReplace, isExactDuplicate });
+      }
+    }
+
+    if (freshConflicts.length > 0) {
+      return res.status(409).json({ error: 'duplicate', conflicts: freshConflicts });
+    }
+
+    // Apply each item's resolution (if it had a conflict) before moving it.
+    const idsToMove = [];
+    for (const item of items) {
+      const conflict = conflictByItemId[item.id];
+      if (!conflict) {
+        idsToMove.push(item.id);
+        continue;
+      }
+      const resolution = resolutionMap[item.id];
+      if (resolution === 'replace' && conflict.canReplace) {
+        const oldTargetPhysicalPath = path.join(UPLOADS_DIR, conflict.existing.path);
+        await pool.query('DELETE FROM files WHERE id = $1', [conflict.existing.id]);
+        if (fs.existsSync(oldTargetPhysicalPath)) fs.unlinkSync(oldTargetPhysicalPath);
+        idsToMove.push(item.id);
+      } else if (resolution === 'keep_both') {
+        const uniqueName = await generateUniqueName(userId, targetFolderId, item.name, item.is_folder);
+        await pool.query('UPDATE files SET name = $1 WHERE id = $2', [uniqueName, item.id]);
+        idsToMove.push(item.id);
+      }
+      // Any other/missing resolution: don't move this one rather than risk silently duplicating
+      // or overwriting something the caller never actually confirmed.
+    }
+
+    if (idsToMove.length > 0) {
+      await pool.query(
+        'UPDATE files SET parent_id = $1 WHERE id = ANY($2) AND owner_id = $3',
+        [targetFolderId, idsToMove, userId]
+      );
+    }
+
+    res.json({ success: true, moved: idsToMove.length, skipped: items.length - idsToMove.length });
   } catch (err) {
     console.error('Error moving multiple files:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -2244,7 +2529,7 @@ app.get('/api/files/download-zip-multiple', requireAuth, requirePermission('down
 
 // Create new empty file
 app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), async (req, res) => {
-  const { name, parentId, type } = req.body;
+  const { name, parentId, type, onConflict } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId ? parseInt(parentId) : null;
 
@@ -2330,11 +2615,46 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     } else {
       fs.writeFileSync(physicalPath, '');
     }
+    // Content is tiny (empty, or a small office template) — always hashing it here, unlike the
+    // upload route's "only hash on an actual collision" rule, is cheap enough to just always do.
+    const newFileHash = await computeFileHash(physicalPath);
+
+    const existing = await findNameConflict(userId, parsedParentId, finalName);
+    // A new file is always a file — replacing only makes sense when the existing item is one too.
+    const canReplace = !!existing && !existing.is_folder;
+    let isExactDuplicate = false;
+    if (canReplace) {
+      const existingHash = await resolveExistingFileHash(existing);
+      isExactDuplicate = !!existingHash && existingHash === newFileHash;
+    }
+
+    if (existing && !onConflict) {
+      fs.unlinkSync(physicalPath);
+      return res.status(409).json({ error: 'duplicate', existingId: existing.id, isExactDuplicate, canReplace });
+    }
+    if (existing && onConflict === 'replace' && !canReplace) {
+      fs.unlinkSync(physicalPath);
+      return res.status(400).json({ error: 'Ein Ordner mit diesem Namen kann nicht durch eine Datei ersetzt werden.' });
+    }
+
+    if (existing && onConflict === 'replace' && canReplace) {
+      const oldPhysicalPath = path.join(UPLOADS_DIR, existing.path);
+      const result = await pool.query(
+        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4 WHERE id = $5 RETURNING *`,
+        [relativePath, mimeType, fileSize, newFileHash, existing.id]
+      );
+      if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+      return res.status(200).json(result.rows[0]);
+    }
+
+    const resolvedName = (existing && onConflict === 'keep_both')
+      ? await generateUniqueName(userId, parsedParentId, finalName, false)
+      : finalName;
 
     const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [finalName, relativePath, mimeType, fileSize, false, parsedParentId, userId]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [resolvedName, relativePath, mimeType, fileSize, false, parsedParentId, userId, newFileHash]
     );
 
     res.status(201).json(result.rows[0]);

@@ -189,6 +189,11 @@ async function initDb() {
     // immediately. A background interval hard-deletes anything past the configured
     // trash_retention_days setting.
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP');
+    // SHA-256 of the file's on-disk content, hex-encoded. Populated lazily — only computed when
+    // a file actually becomes relevant to an upload-conflict check (see computeFileHash() in
+    // server.js) rather than backfilled for every existing row up front — so this stays NULL for
+    // most files until then, which is expected, not a bug.
+    await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at) WHERE deleted_at IS NOT NULL');
     // The listing query filters owner_id + parent_id + deleted_at IS NULL together on every
     // folder navigation; the single-column indexes above don't serve that combination directly.
