@@ -2652,6 +2652,12 @@ function updateUploadUI() {
       totalUploaded += item.uploaded;
     }
 
+    // Finished items (done/skipped) drop out of the visible list once resolved — only active
+    // (pending/uploading) and failed items stay shown, so a big batch doesn't leave hundreds of
+    // "Hochgeladen" rows piled up above the ones that still need attention. The aggregate totals
+    // above (and the "X von Y fertig" summary below) still count them; only this row is skipped.
+    if (item.status === 'done' || item.status === 'skipped') return;
+
     // Create item row
     const row = document.createElement('div');
     row.style.display = 'flex';

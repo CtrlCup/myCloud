@@ -2041,18 +2041,34 @@ async function hardDeleteTrashItem(file, userId) {
 }
 
 // Soft-delete: stamps the file/folder and its entire subtree with the same deleted_at, so it
-// disappears from normal listings/search but can still be restored. One recursive-CTE UPDATE
-// instead of a per-node round-trip walk — same end result, one query instead of N.
+// disappears from normal listings/search but can still be restored. Also revokes any share
+// links pointing at the item or anything inside it — a share should stop working the moment
+// its target is deleted, not keep serving content the owner just removed (unlike a hard
+// delete, there's no files.id FK cascade to rely on here, since the row itself isn't removed).
+// Restoring from trash does not restore the share; it has to be re-shared explicitly.
 async function moveToTrashRecursive(fileId, userId, deletedAt) {
-  await pool.query(
-    `WITH RECURSIVE subtree AS (
-       SELECT id FROM files WHERE id = $1 AND owner_id = $2
-       UNION ALL
-       SELECT f.id FROM files f JOIN subtree s ON f.parent_id = s.id WHERE f.owner_id = $2
-     )
-     UPDATE files SET deleted_at = $3 WHERE id IN (SELECT id FROM subtree)`,
-    [fileId, userId, deletedAt]
-  );
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const subtreeRes = await client.query(
+      `WITH RECURSIVE subtree AS (
+         SELECT id FROM files WHERE id = $1 AND owner_id = $2
+         UNION ALL
+         SELECT f.id FROM files f JOIN subtree s ON f.parent_id = s.id WHERE f.owner_id = $2
+       )
+       SELECT id FROM subtree`,
+      [fileId, userId]
+    );
+    const subtreeIds = subtreeRes.rows.map(row => row.id);
+    await client.query('UPDATE files SET deleted_at = $2 WHERE id = ANY($1)', [subtreeIds, deletedAt]);
+    await client.query('DELETE FROM shares WHERE file_id = ANY($1)', [subtreeIds]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Restore: clears deleted_at on the item and its whole subtree.
