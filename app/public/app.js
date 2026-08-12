@@ -1698,6 +1698,13 @@ function renderFiles(files) {
     item.setAttribute('data-id', file.id);
     item.style.setProperty('--fi', _fi);
     item.classList.add('file-item-enter');
+    // Drop the class once the one-time staggered entrance animation finishes — leaving it on
+    // the element means any *later* classList change (e.g. toggling .selected on click) makes
+    // Chromium restart the fileItemIn keyframe animation from scratch. With animation-delay
+    // tied to --fi and fill-mode "both" holding opacity at 0 for that whole delay, a tile far
+    // down the grid would then flash invisible for up to its full delay+duration again — this
+    // is what made a file "disappear for ~1s" after being deselected (see GitHub issue #17).
+    item.addEventListener('animationend', () => item.classList.remove('file-item-enter'), { once: true });
     if (selectedFileIds.includes(file.id)) {
       item.classList.add('selected');
     }
