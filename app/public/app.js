@@ -7696,7 +7696,14 @@ function resetCustomVideoControls() {
   document.getElementById('video-progress-handle').style.left = '0%';
   document.getElementById('video-progress-buffered').style.width = '0%';
   document.getElementById('video-time-display').textContent = '0:00 / 0:00';
-  document.getElementById('video-play-btn').innerHTML = '<i data-lucide="pause"></i>';
+  // Reflects reality (nothing is playing yet — the new src hasn't even started loading) instead
+  // of pre-emptively claiming "playing" just because <video autoplay> will *eventually* start:
+  // the play/pause icon used to flip to "pause" here immediately, showing "click to pause" while
+  // the video was still buffering at 0:00/0:00. The player's own onplay/onpause handlers (see
+  // wireCustomVideoControls) take over correctly once playback actually starts.
+  document.getElementById('video-play-btn').innerHTML = '<i data-lucide="play"></i>';
+  const spinner = document.getElementById('video-loading-spinner');
+  if (spinner) spinner.classList.add('active');
   lucide.createIcons();
 }
 
@@ -7718,6 +7725,8 @@ function wireCustomVideoControls() {
   const timeDisplay = document.getElementById('video-time-display');
   const stage = document.getElementById('video-viewer-stage');
 
+  const spinner = document.getElementById('video-loading-spinner');
+
   playBtn.onclick = () => { if (player.paused) player.play(); else player.pause(); };
   player.onplay = () => {
     playBtn.innerHTML = '<i data-lucide="pause"></i>';
@@ -7733,7 +7742,18 @@ function wireCustomVideoControls() {
     if (player._playbackHUDAllowed) {
       showVideoHUD('pause', 'Pause');
     }
+    if (spinner) spinner.classList.remove('active');
   };
+
+  // Buffering feedback: 'waiting' fires whenever playback stalls for lack of data (the initial
+  // load, a seek into an unbuffered range, or a mid-playback stall on a slow connection) —
+  // 'playing' fires once it actually resumes, not just at the very start. Covers the same gap
+  // resetCustomVideoControls() handles for the moment openVideoViewer() is called, but for
+  // everything that happens afterwards too.
+  if (spinner) {
+    player.onwaiting = () => spinner.classList.add('active');
+    player.onplaying = () => spinner.classList.remove('active');
+  }
 
   player.ontimeupdate = () => {
     if (!player.duration) return;

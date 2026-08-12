@@ -317,6 +317,37 @@ body {
   letter-spacing: 0.5px;
 }
 
+/* Shown while the video is buffering (initial load, or a mid-playback stall) instead of leaving
+   the play/pause button sitting on a stale "playing" state with no visible feedback — see the
+   player's 'waiting'/'playing' listeners in wireCustomVideoControls(). */
+.video-loading-spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 999;
+}
+
+.video-loading-spinner.active {
+  opacity: 1;
+}
+
+.video-loading-spinner .spinner-ring {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #ffffff;
+  animation: video-spinner-spin 0.8s linear infinite;
+}
+
+@keyframes video-spinner-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ─── Custom video player controls (replaces native <video controls>) ─── */
 .video-controls-bar {
   position: absolute;

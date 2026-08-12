@@ -1747,6 +1747,47 @@ function scheduleTextExtraction(physicalPath, mimeType, originalName, fileId) {
     .catch((err) => console.error('Error indexing uploaded file:', originalName, err));
 }
 
+// MP4/MOV/M4V files straight off a camera (GoPro, phones, camcorders) almost always have their
+// "moov" atom — the index a player needs before it can decode anything at all — written at the
+// END of the file, appended only once recording stops. A browser's <video> tag then has to fetch
+// most or all of the file before playback can start, no matter how good its Range-request
+// support is: exactly the "has to fully buffer first" symptom, unlike e.g. YouTube, where
+// uploads are always reprocessed server-side before anyone can stream them. Rewriting the
+// container losslessly — no re-encode, just moving that index to the front, what
+// "-movflags +faststart" does — is what makes progressive "starts after the first chunk"
+// playback possible. Runs after the upload response, fire-and-forget, same reasoning as
+// scheduleTextExtraction: can take a while on a large file and must never block the response.
+const FASTSTART_EXTS = ['mp4', 'm4v', 'mov'];
+function scheduleFaststartRemux(physicalPath, originalName, fileId) {
+  const ext = path.extname(originalName || '').slice(1).toLowerCase();
+  if (!FASTSTART_EXTS.includes(ext)) return;
+
+  const tempPath = `${physicalPath}.faststart.mp4`;
+  const { exec } = require('child_process');
+  const cmd = `ffmpeg -y -i "${physicalPath}" -c copy -movflags +faststart -f mp4 "${tempPath}"`;
+  exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, async (err) => {
+    try {
+      if (err || !fs.existsSync(tempPath) || fs.statSync(tempPath).size === 0) {
+        console.error(`Faststart remux failed for "${originalName}" (file ${fileId}):`, err);
+        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+        return;
+      }
+      const newSize = fs.statSync(tempPath).size;
+      fs.renameSync(tempPath, physicalPath);
+      // The container bytes changed (even though the video content itself didn't) — the hash
+      // computed at upload time is now stale, and size can shift by a few KB (the moved atom).
+      const newHash = await computeFileHash(physicalPath);
+      await pool.query('UPDATE files SET size = $1, content_hash = $2 WHERE id = $3', [newSize, newHash, fileId]);
+      console.log(`Faststart remux OK for "${originalName}" (file ${fileId}, ${newSize} bytes)`);
+    } catch (postErr) {
+      console.error(`Error finalizing faststart remux for "${originalName}" (file ${fileId}):`, postErr);
+      if (fs.existsSync(tempPath)) {
+        try { fs.unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
+      }
+    }
+  });
+}
+
 app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
@@ -1838,6 +1879,7 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
       const updatedFile = quotaResult.data.rows[0];
       res.status(200).json(updatedFile);
       scheduleTextExtraction(currentPhysicalPath, safeMimeType, req.file.originalname, updatedFile.id);
+      scheduleFaststartRemux(currentPhysicalPath, req.file.originalname, updatedFile.id);
       return;
     }
 
@@ -1861,6 +1903,7 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
     const insertedFile = quotaResult.data.rows[0];
     res.status(201).json(insertedFile);
     scheduleTextExtraction(currentPhysicalPath, safeMimeType, finalName, insertedFile.id);
+    scheduleFaststartRemux(currentPhysicalPath, finalName, insertedFile.id);
     return;
   } catch (err) {
     console.error(`Error uploading file "${req.file.originalname}" (${req.file.size} bytes, user ${userId}):`, err);
@@ -4686,7 +4729,10 @@ app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilen
       return res.status(413).json({ error: quotaResult.error });
     }
 
-    res.status(201).json(quotaResult.data.rows[0]);
+    const insertedFile = quotaResult.data.rows[0];
+    res.status(201).json(insertedFile);
+    scheduleFaststartRemux(currentPhysicalPath, req.file.originalname, insertedFile.id);
+    return;
   } catch (err) {
     console.error('Public upload error:', err);
     if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
