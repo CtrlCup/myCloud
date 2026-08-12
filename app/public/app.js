@@ -2685,6 +2685,134 @@ function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, on
   });
 }
 
+// Files at or above this size upload in fixed-size chunks over several sequential requests
+// instead of one giant multipart POST — a CDN/reverse-proxy in front of a slow upload link can
+// (and did — see GitHub issue #19) time out a single request that runs for minutes, long
+// before the file itself is anywhere near the server's own size limit. Keeping every individual
+// request short and bounded avoids that regardless of the overall file size or the uploader's
+// connection speed.
+const CHUNKED_UPLOAD_THRESHOLD_BYTES = 50 * 1024 * 1024; // 50MB
+const UPLOAD_CHUNK_RETRY_LIMIT = 3;
+
+// Picks the chunked or single-shot strategy by file size; both share the exact same
+// callback/return contract, so every existing caller of uploadSingleFileWithXHR can call this
+// instead without changing anything else about how it handles progress/done/error/conflict.
+function uploadSingleFile(file, parentId, onProgress, onDone, onError, onCreatedXHR, conflictResolution) {
+  if (file.size >= CHUNKED_UPLOAD_THRESHOLD_BYTES) {
+    return uploadSingleFileChunked(file, parentId, onProgress, onDone, onError, onCreatedXHR, conflictResolution, {
+      init: '/api/files/upload/chunked/init',
+      chunk: (uploadId) => `/api/uploads/chunked/${uploadId}`,
+      complete: (uploadId) => `/api/uploads/chunked/${uploadId}/complete`,
+      abort: (uploadId) => `/api/uploads/chunked/${uploadId}`,
+    });
+  }
+  return uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, onCreatedXHR, conflictResolution);
+}
+
+// Same callback contract as uploadSingleFileWithXHR (progress/done/error/onCreatedXHR) and the
+// same resolve shape (the finalize response body, or { conflict: true, ... } on a 409) — splits
+// the file into fixed-size chunks, uploads each as its own short request (retrying a failed one
+// a few times before giving up), then asks the server to assemble and finalize them. A
+// conflict-resolution retry (like the single-shot path) simply re-runs this from scratch —
+// resuming an existing session instead would save re-uploading, but isn't needed to fix the
+// underlying timeout problem and keeps this change smaller.
+function uploadSingleFileChunked(file, parentId, onProgress, onDone, onError, onCreatedXHR, conflictResolution, endpoints) {
+  return new Promise((resolve, reject) => {
+    let aborted = false;
+    let currentXhr = null;
+    let currentUploadId = null;
+    if (onCreatedXHR) {
+      onCreatedXHR({
+        abort: () => {
+          aborted = true;
+          if (currentXhr) currentXhr.abort();
+          if (currentUploadId) {
+            const xhr = new XMLHttpRequest();
+            xhr.open('DELETE', endpoints.abort(currentUploadId));
+            xhr.send();
+          }
+        }
+      });
+    }
+
+    const xhrRequest = (method, url, body, contentType, onXhrProgress) => new Promise((res, rej) => {
+      const xhr = new XMLHttpRequest();
+      currentXhr = xhr;
+      xhr.open(method, url);
+      if (contentType) xhr.setRequestHeader('Content-Type', contentType);
+      if (onXhrProgress) xhr.upload.onprogress = onXhrProgress;
+      xhr.onload = () => {
+        let parsed = {};
+        try { parsed = JSON.parse(xhr.responseText); } catch (e) {}
+        res({ status: xhr.status, body: parsed });
+      };
+      xhr.onabort = () => rej(new Error('Upload abgebrochen.'));
+      xhr.onerror = () => rej(new Error('Netzwerkfehler.'));
+      xhr.send(body);
+    });
+
+    (async () => {
+      try {
+        const initRes = await xhrRequest('POST', endpoints.init, JSON.stringify({
+          name: file.name, size: file.size, parentId
+        }), 'application/json');
+        if (aborted) return reject(new Error('Upload abgebrochen.'));
+        if (initRes.status < 200 || initRes.status >= 300) {
+          throw new Error(initRes.body.error || `Fehler beim Hochladen (Status ${initRes.status}).`);
+        }
+        const { uploadId, chunkSize, totalChunks } = initRes.body;
+        currentUploadId = uploadId;
+
+        let uploaded = 0;
+        for (let i = 0; i < totalChunks; i++) {
+          if (aborted) return reject(new Error('Upload abgebrochen.'));
+          const start = i * chunkSize;
+          const end = Math.min(start + chunkSize, file.size);
+          const blob = file.slice(start, end);
+          const chunkStartUploaded = uploaded;
+
+          let attempt = 0;
+          while (true) {
+            try {
+              const chunkRes = await xhrRequest('PUT', `${endpoints.chunk(uploadId)}/${i}`, blob, 'application/octet-stream', (event) => {
+                if (event.lengthComputable) onProgress(chunkStartUploaded + event.loaded, file.size);
+              });
+              if (chunkRes.status < 200 || chunkRes.status >= 300) {
+                throw new Error(chunkRes.body.error || `Fehler beim Hochladen (Status ${chunkRes.status}).`);
+              }
+              break;
+            } catch (err) {
+              if (aborted) throw err;
+              attempt++;
+              if (attempt > UPLOAD_CHUNK_RETRY_LIMIT) throw err;
+            }
+          }
+          uploaded = end;
+          onProgress(uploaded, file.size);
+        }
+
+        const completeRes = await xhrRequest('POST', endpoints.complete(uploadId), JSON.stringify({
+          onConflict: conflictResolution
+        }), 'application/json');
+
+        if (completeRes.status === 409) {
+          resolve({ conflict: true, ...completeRes.body });
+          return;
+        }
+        if (completeRes.status < 200 || completeRes.status >= 300) {
+          throw new Error(completeRes.body.error || `Fehler beim Hochladen (Status ${completeRes.status}).`);
+        }
+
+        onDone(completeRes.body);
+        resolve(completeRes.body);
+      } catch (err) {
+        if (!aborted) onError(err.message || 'Fehler beim Hochladen.');
+        reject(err);
+      }
+    })();
+  });
+}
+
 function formatTime(sec) {
   if (sec === Infinity || isNaN(sec) || sec < 0) return '--';
   if (sec < 60) return `${sec}s`;
@@ -3095,7 +3223,7 @@ async function processUploadQueue() {
         // couldn't hash still gets an authoritative isExactDuplicate here). If one still comes
         // back, ask again and retry with the user's choice.
         while (conflictResolution !== 'skip') {
-          const result = await uploadSingleFileWithXHR(
+          const result = await uploadSingleFile(
             uploadItem.fileObj,
             uploadParentId,
             (loaded, total) => {

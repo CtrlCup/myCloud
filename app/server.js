@@ -187,6 +187,89 @@ function uploadArray(fieldName, maxCount) {
   return (req, res, next) => multer({ storage, limits: { fileSize: maxUploadSizeBytes } }).array(fieldName, maxCount)(req, res, next);
 }
 
+// ─── Chunked uploads ───
+// A single multipart request for a multi-GB file can run for minutes on a slow connection —
+// long enough that a CDN/reverse-proxy in front of the app (e.g. Cloudflare) may cut the
+// connection with its own edge-side timeout before the request ever reaches here, regardless
+// of multer's own size limit (see GitHub issue #19: large GoPro clips failing with a 408,
+// with zero trace in this app's or Caddy's logs — the request never arrived). Chunked upload
+// splits a large file into small fixed-size pieces, each its own short-lived request, so no
+// single request runs long enough to hit that kind of timeout no matter how large the file or
+// how slow the uploader's connection is.
+const CHUNK_UPLOAD_DIR = path.join(UPLOADS_DIR, 'tmp-chunked');
+if (!fs.existsSync(CHUNK_UPLOAD_DIR)) fs.mkdirSync(CHUNK_UPLOAD_DIR, { recursive: true });
+
+const CHUNK_SIZE_BYTES = 8 * 1024 * 1024; // 8MB per request
+// Sessions are in-memory only: a chunked upload still mid-flight when the process restarts has
+// to be restarted from scratch by the client, same as any other interrupted upload today — so
+// this doesn't need to survive a restart, which avoids a DB migration and the housekeeping a
+// persisted table would need. uploadId itself (a random UUID, handed only to the client that
+// called init) is the sole credential for the chunk/complete/abort calls below, the same trust
+// model already used for share slugs elsewhere in this file.
+const chunkedUploadSessions = new Map();
+const CHUNK_SESSION_MAX_AGE_MS = 4 * 60 * 60 * 1000; // 4h — sweeps up abandoned sessions
+
+// Creates a new chunked-upload session and its temp chunk directory. `finalize` is an
+// `async ({ filenameAtRoot, fileSize, onConflict }) => { status, body }` closure supplied by
+// the caller — it captures whatever auth/permission/quota logic applies
+// to *this* upload context (authenticated dashboard vs. a public share), so the generic
+// chunk/complete routes below don't need to know the difference.
+function createChunkedUploadSession({ originalName, totalSize, finalize }) {
+  const uploadId = crypto.randomUUID();
+  const dir = path.join(CHUNK_UPLOAD_DIR, uploadId);
+  fs.mkdirSync(dir, { recursive: true });
+  const totalChunks = Math.max(1, Math.ceil(totalSize / CHUNK_SIZE_BYTES));
+  chunkedUploadSessions.set(uploadId, {
+    originalName, totalSize, totalChunks, dir, finalize,
+    createdAt: Date.now(),
+  });
+  return { uploadId, chunkSize: CHUNK_SIZE_BYTES, totalChunks };
+}
+
+function deleteChunkedUploadSession(uploadId) {
+  const session = chunkedUploadSessions.get(uploadId);
+  if (!session) return;
+  chunkedUploadSessions.delete(uploadId);
+  fs.rm(session.dir, { recursive: true, force: true }, () => {});
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - CHUNK_SESSION_MAX_AGE_MS;
+  for (const [uploadId, session] of chunkedUploadSessions) {
+    if (session.createdAt < cutoff) deleteChunkedUploadSession(uploadId);
+  }
+}, 30 * 60 * 1000);
+
+// Concatenates every received chunk (in received order, 0..totalChunks-1) into one new
+// physical file directly in UPLOADS_DIR, named the same way a single-shot multer upload
+// would be — the rest of the upload-finalizing code downstream never needs to know a file
+// arrived in pieces.
+async function assembleChunkedUpload(session) {
+  const filenameAtRoot = crypto.randomUUID() + safeFileExtension(session.originalName);
+  const outPath = path.join(UPLOADS_DIR, filenameAtRoot);
+  const out = fs.createWriteStream(outPath);
+  try {
+    for (let i = 0; i < session.totalChunks; i++) {
+      const chunkPath = path.join(session.dir, String(i));
+      await new Promise((resolve, reject) => {
+        const inStream = fs.createReadStream(chunkPath);
+        inStream.on('error', reject);
+        inStream.pipe(out, { end: false });
+        inStream.on('end', resolve);
+      });
+    }
+  } catch (err) {
+    out.end();
+    throw err;
+  }
+  await new Promise((resolve, reject) => {
+    out.on('finish', resolve);
+    out.on('error', reject);
+    out.end();
+  });
+  return { filenameAtRoot, fileSize: fs.statSync(outPath).size };
+}
+
 // Browsers send multipart filenames as raw UTF-8 bytes, but multer's underlying parser (busboy)
 // decodes multipart header fields as latin1 per the multipart spec. Re-decoding the mangled
 // string as latin1 -> utf8 undoes that mojibake (e.g. "PrÃ¤sentation" -> "Präsentation").
@@ -1814,39 +1897,23 @@ function scheduleFaststartRemux(physicalPath, originalName, fileId) {
     .catch((err) => console.error(`Faststart remux failed for "${originalName}" (file ${fileId}):`, err));
 }
 
-app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
-
-  const parentId = req.body.parentId && req.body.parentId !== 'null' ? parseInt(req.body.parentId) : null;
-  // How to proceed when a file of the same name already exists in the target folder:
-  // undefined = ask (the client hasn't decided yet), 'replace' = overwrite it in place,
-  // 'keep_both' = upload alongside it under a "(1)", "(2)", ... name. ('skip' never reaches
-  // here — the client simply doesn't send the request for a skipped file.)
-  const onConflict = req.body.onConflict;
-  const userId = req.session.userId;
-  // Tracks wherever the physical file currently is, so error-path cleanup below always unlinks
-  // the right place whether or not relocateUploadToOwnerDir() has run yet.
-  let currentPhysicalPath = req.file.path;
-
-  // A file that "just won't upload, no matter how often you retry" is otherwise near-impossible
-  // to reconstruct after the fact — the client only ever shows a generic message. This marks
-  // that the request actually reached the app (ruling out a proxy/CDN-level rejection upstream,
-  // which would leave no trace here at all) and gives a timestamp + size to correlate against
-  // whatever error (if any) follows below.
-  console.log(`Upload received: "${req.file.originalname}" (${req.file.size} bytes) from user ${userId}`);
-
+// Shared by the single-shot dashboard upload route and the chunked-upload complete route
+// below — everything that happens once a file's bytes are fully on disk at `filenameAtRoot`
+// (conflict check, quota, DB row, physical relocation into the owner's folder, and scheduling
+// the post-response text extraction / faststart remux). Never touches `req`/`res` itself so
+// both callers can wrap the returned { status, body } in whatever response shape they need.
+async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, originalName, fileSize, onConflict }) {
+  let currentPhysicalPath = path.join(UPLOADS_DIR, filenameAtRoot);
   try {
     if (parentId !== null) {
       const isOwner = await verifyFileOwner(parentId, userId);
       if (!isOwner) {
-        fs.unlinkSync(currentPhysicalPath); // Delete file if unauthorized
-        return res.status(403).json({ error: 'Access denied' });
+        fs.unlinkSync(currentPhysicalPath);
+        return { status: 403, body: { error: 'Access denied' } };
       }
     }
 
-    const existing = await findNameConflict(userId, parentId, req.file.originalname);
+    const existing = await findNameConflict(userId, parentId, originalName);
     // An upload is always a file — replacing only makes sense when the existing item is one too.
     // Colliding with an existing FOLDER of the same name can only be resolved as skip/keep-both.
     const canReplace = !!existing && !existing.is_folder;
@@ -1867,29 +1934,29 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
     // "skip" for a byte-identical file, "replace" for a same-named file with different content.
     if (existing && !onConflict) {
       fs.unlinkSync(currentPhysicalPath);
-      return res.status(409).json({ error: 'duplicate', existingId: existing.id, name: req.file.originalname, isExactDuplicate, canReplace });
+      return { status: 409, body: { error: 'duplicate', existingId: existing.id, name: originalName, isExactDuplicate, canReplace } };
     }
     // Defensive: the UI never offers "Ersetzen" when the collision is with a folder, but reject
     // it explicitly rather than silently falling through to "create a second same-named item".
     if (existing && onConflict === 'replace' && !canReplace) {
       fs.unlinkSync(currentPhysicalPath);
-      return res.status(400).json({ error: 'Ein Ordner mit diesem Namen kann nicht durch eine Datei ersetzt werden.' });
+      return { status: 400, body: { error: 'Ein Ordner mit diesem Namen kann nicht durch eine Datei ersetzt werden.' } };
     }
 
-    const safeMimeType = getSafeMimeType(req.file.originalname);
+    const safeMimeType = getSafeMimeType(originalName);
 
     if (existing && onConflict === 'replace' && canReplace) {
       const oldPhysicalPath = path.join(UPLOADS_DIR, existing.path);
-      const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
+      const relativePath = relocateUploadToOwnerDir(userId, filenameAtRoot);
       currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
 
       // Only the net size increase counts against quota — usedBytes inside the lock still
       // includes this file's OLD size (its row hasn't been updated yet), same reasoning as
       // PUT /api/files/:id/binary-content.
-      const netAdditionalBytes = req.file.size - (existing.size || 0);
+      const netAdditionalBytes = fileSize - (existing.size || 0);
       const doReplace = (client) => client.query(
         `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4 WHERE id = $5 RETURNING *`,
-        [relativePath, safeMimeType, req.file.size, newFileHash, existing.id]
+        [relativePath, safeMimeType, fileSize, newFileHash, existing.id]
       );
 
       const quotaResult = netAdditionalBytes > 0
@@ -1897,48 +1964,157 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
         : { ok: true, data: await doReplace(pool) };
       if (!quotaResult.ok) {
         fs.unlinkSync(currentPhysicalPath);
-        return res.status(413).json({ error: quotaResult.error });
+        return { status: 413, body: { error: quotaResult.error } };
       }
 
       if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
 
       const updatedFile = quotaResult.data.rows[0];
-      res.status(200).json(updatedFile);
-      scheduleTextExtraction(currentPhysicalPath, safeMimeType, req.file.originalname, updatedFile.id);
-      scheduleFaststartRemux(currentPhysicalPath, req.file.originalname, updatedFile.id);
-      return;
+      scheduleTextExtraction(currentPhysicalPath, safeMimeType, originalName, updatedFile.id);
+      scheduleFaststartRemux(currentPhysicalPath, originalName, updatedFile.id);
+      return { status: 200, body: updatedFile };
     }
 
     const finalName = (existing && onConflict === 'keep_both')
-      ? await generateUniqueName(userId, parentId, req.file.originalname, false)
-      : req.file.originalname;
+      ? await generateUniqueName(userId, parentId, originalName, false)
+      : originalName;
 
-    const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
+    const relativePath = relocateUploadToOwnerDir(userId, filenameAtRoot);
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
 
-    const quotaResult = await withStorageQuotaLock(userId, req.file.size, (client) => client.query(
+    const quotaResult = await withStorageQuotaLock(userId, fileSize, (client) => client.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, content_hash)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8) RETURNING *`,
-      [finalName, relativePath, safeMimeType, req.file.size, false, parentId, userId, newFileHash]
+      [finalName, relativePath, safeMimeType, fileSize, false, parentId, userId, newFileHash]
     ));
     if (!quotaResult.ok) {
       fs.unlinkSync(currentPhysicalPath);
-      return res.status(413).json({ error: quotaResult.error });
+      return { status: 413, body: { error: quotaResult.error } };
     }
 
     const insertedFile = quotaResult.data.rows[0];
-    res.status(201).json(insertedFile);
     scheduleTextExtraction(currentPhysicalPath, safeMimeType, finalName, insertedFile.id);
     scheduleFaststartRemux(currentPhysicalPath, finalName, insertedFile.id);
-    return;
+    return { status: 201, body: insertedFile };
   } catch (err) {
-    console.error(`Error uploading file "${req.file.originalname}" (${req.file.size} bytes, user ${userId}):`, err);
-    // Cleanup file
+    console.error(`Error finalizing upload "${originalName}" (${fileSize} bytes, user ${userId}):`, err);
     if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
       fs.unlinkSync(currentPhysicalPath);
     }
-    res.status(500).json({ error: 'Internal server error' });
+    return { status: 500, body: { error: 'Internal server error' } };
   }
+}
+
+app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+
+  const parentId = req.body.parentId && req.body.parentId !== 'null' ? parseInt(req.body.parentId) : null;
+  // How to proceed when a file of the same name already exists in the target folder:
+  // undefined = ask (the client hasn't decided yet), 'replace' = overwrite it in place,
+  // 'keep_both' = upload alongside it under a "(1)", "(2)", ... name. ('skip' never reaches
+  // here — the client simply doesn't send the request for a skipped file.)
+  const onConflict = req.body.onConflict;
+  const userId = req.session.userId;
+
+  // A file that "just won't upload, no matter how often you retry" is otherwise near-impossible
+  // to reconstruct after the fact — the client only ever shows a generic message. This marks
+  // that the request actually reached the app (ruling out a proxy/CDN-level rejection upstream,
+  // which would leave no trace here at all) and gives a timestamp + size to correlate against
+  // whatever error (if any) follows below.
+  console.log(`Upload received: "${req.file.originalname}" (${req.file.size} bytes) from user ${userId}`);
+
+  const result = await finalizeUploadedFile({
+    userId, parentId, filenameAtRoot: req.file.filename,
+    originalName: req.file.originalname, fileSize: req.file.size, onConflict,
+  });
+  res.status(result.status).json(result.body);
+});
+
+// Chunked upload — dashboard: step 1/3, start a session. Body: { name, size, parentId }.
+app.post('/api/files/upload/chunked/init', requireAuth, requirePermission('upload'), async (req, res) => {
+  const userId = req.session.userId;
+  const parentId = req.body.parentId !== undefined && req.body.parentId !== null ? parseInt(req.body.parentId) : null;
+  const originalName = String(req.body.name || '');
+  const totalSize = parseInt(req.body.size);
+
+  if (!originalName || !Number.isFinite(totalSize) || totalSize <= 0) {
+    return res.status(400).json({ error: 'name und size sind erforderlich.' });
+  }
+  if (totalSize > maxUploadSizeBytes) {
+    return res.status(413).json({ error: `Datei überschreitet das Upload-Limit von ${Math.floor(maxUploadSizeBytes / (1024 * 1024))} MB.` });
+  }
+  if (parentId !== null) {
+    const isOwner = await verifyFileOwner(parentId, userId);
+    if (!isOwner) return res.status(403).json({ error: 'Access denied' });
+  }
+
+  const session = createChunkedUploadSession({
+    originalName, totalSize,
+    finalize: ({ filenameAtRoot, fileSize, onConflict }) => finalizeUploadedFile({
+      userId, parentId, filenameAtRoot, originalName, fileSize, onConflict,
+    }),
+  });
+  res.json(session);
+});
+
+// Chunked upload: step 2/3, upload one chunk. Raw binary body, chunk index in the URL. Generic
+// across upload contexts (dashboard/public share) — the uploadId (an unguessable UUID handed
+// only to whoever called init) is the only credential needed here.
+app.put('/api/uploads/chunked/:uploadId/:index',
+  express.raw({ limit: CHUNK_SIZE_BYTES + (1024 * 1024), type: '*/*' }),
+  (req, res) => {
+    const session = chunkedUploadSessions.get(req.params.uploadId);
+    if (!session) return res.status(404).json({ error: 'Upload-Session nicht gefunden oder abgelaufen.' });
+
+    const index = parseInt(req.params.index);
+    if (!Number.isInteger(index) || index < 0 || index >= session.totalChunks) {
+      return res.status(400).json({ error: 'Ungültiger Chunk-Index.' });
+    }
+    // Every chunk but the last must be exactly CHUNK_SIZE_BYTES, the last whatever remains —
+    // rejecting anything else closes off padding each chunk up toward express.raw's overhead
+    // margin to inflate the assembled file past the size declared (and quota/limit-checked) at
+    // init time.
+    const isLast = index === session.totalChunks - 1;
+    const expectedSize = isLast ? session.totalSize - index * CHUNK_SIZE_BYTES : CHUNK_SIZE_BYTES;
+    if (!Buffer.isBuffer(req.body) || req.body.length !== expectedSize) {
+      return res.status(400).json({ error: 'Unerwartete Chunk-Größe.' });
+    }
+
+    fs.writeFile(path.join(session.dir, String(index)), req.body, (err) => {
+      if (err) {
+        console.error('Error writing upload chunk:', err);
+        return res.status(500).json({ error: 'Internal server error' });
+      }
+      res.json({ received: index });
+    });
+  }
+);
+
+// Chunked upload: step 3/3, assemble the received chunks and hand them to the same
+// finalize logic a single-shot upload uses. Body: { onConflict }.
+app.post('/api/uploads/chunked/:uploadId/complete', async (req, res) => {
+  const session = chunkedUploadSessions.get(req.params.uploadId);
+  if (!session) return res.status(404).json({ error: 'Upload-Session nicht gefunden oder abgelaufen.' });
+
+  try {
+    const { filenameAtRoot, fileSize } = await assembleChunkedUpload(session);
+    const result = await session.finalize({ filenameAtRoot, fileSize, onConflict: req.body.onConflict });
+    res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error('Error assembling chunked upload:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    deleteChunkedUploadSession(req.params.uploadId);
+  }
+});
+
+// Chunked upload: lets the client abandon a session it started (user cancelled, or picked
+// "skip" on a naming conflict) so its temp chunks don't sit around until the sweep interval.
+app.delete('/api/uploads/chunked/:uploadId', (req, res) => {
+  deleteChunkedUploadSession(req.params.uploadId);
+  res.json({ success: true });
 });
 
 // Cheap pre-flight for any operation about to place an item into a folder (upload, new file, new
@@ -4682,6 +4858,40 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 });
 
 // Public Share Upload - Allow uploads to shared folder if write permission exists
+// Shared by the single-shot public-share upload route and its chunked-upload complete route
+// below. No naming-conflict handling here (unlike the authenticated finalizeUploadedFile) — a
+// public share upload never has an onConflict round-trip with an anonymous visitor, it just
+// always lands under the target folder, same as before this was extracted.
+async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtRoot, originalName, fileSize }) {
+  let currentPhysicalPath = path.join(UPLOADS_DIR, filenameAtRoot);
+  try {
+    // No uploader account on a public share — the new file is organized/charged under the
+    // share's owner (whoever created it), same as the binary-content route above.
+    const relativePath = relocateUploadToOwnerDir(ownerId, filenameAtRoot);
+    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
+
+    const quotaResult = await withStorageQuotaLock(ownerId, fileSize, (client) => client.query(
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [originalName, relativePath, getSafeMimeType(originalName), fileSize, false, targetFolderId, ownerId]
+    ));
+    if (!quotaResult.ok) {
+      fs.unlinkSync(currentPhysicalPath);
+      return { status: 413, body: { error: quotaResult.error } };
+    }
+
+    const insertedFile = quotaResult.data.rows[0];
+    scheduleFaststartRemux(currentPhysicalPath, originalName, insertedFile.id);
+    return { status: 201, body: insertedFile };
+  } catch (err) {
+    console.error('Public upload error:', err);
+    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
+      fs.unlinkSync(currentPhysicalPath);
+    }
+    return { status: 500, body: { error: 'Internal server error.' } };
+  }
+}
+
 app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
   const { slug } = req.params;
   const parentId = req.body.parentId ? parseInt(req.body.parentId) : null;
@@ -4722,48 +4932,58 @@ app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilen
     const baseFile = baseFileRes.rows[0];
 
     let targetFolderId = parentId !== null ? parentId : baseFile.id;
-    let checkId = targetFolderId;
-    let isValid = false;
-
-    while (checkId !== null) {
-      if (checkId === baseFile.id) {
-        isValid = true;
-        break;
-      }
-      const checkRes = await pool.query('SELECT parent_id FROM files WHERE id = $1', [checkId]);
-      if (checkRes.rows.length === 0) break;
-      checkId = checkRes.rows[0].parent_id;
-    }
-
-    if (!isValid) {
+    if (!await isDescendantOf(targetFolderId, baseFile.id)) {
       fs.unlinkSync(currentPhysicalPath);
       return res.status(403).json({ error: 'Access denied.' });
     }
 
-    // No uploader account on a public share — the new file is organized/charged under the
-    // share's owner (whoever created it), same as the binary-content route above.
-    const relativePath = relocateUploadToOwnerDir(baseFile.owner_id, req.file.filename);
-    currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
-
-    const quotaResult = await withStorageQuotaLock(baseFile.owner_id, req.file.size, (client) => client.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [req.file.originalname, relativePath, getSafeMimeType(req.file.originalname), req.file.size, false, targetFolderId, baseFile.owner_id]
-    ));
-    if (!quotaResult.ok) {
-      fs.unlinkSync(currentPhysicalPath);
-      return res.status(413).json({ error: quotaResult.error });
-    }
-
-    const insertedFile = quotaResult.data.rows[0];
-    res.status(201).json(insertedFile);
-    scheduleFaststartRemux(currentPhysicalPath, req.file.originalname, insertedFile.id);
-    return;
+    const result = await finalizePublicUploadedFile({
+      ownerId: baseFile.owner_id, targetFolderId, filenameAtRoot: req.file.filename,
+      originalName: req.file.originalname, fileSize: req.file.size,
+    });
+    res.status(result.status).json(result.body);
   } catch (err) {
     console.error('Public upload error:', err);
     if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
       fs.unlinkSync(currentPhysicalPath);
     }
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Chunked upload — public share: step 1/3, start a session. Body: { name, size, parentId }.
+app.post('/api/public/shares/:slug/upload/chunked/init', async (req, res) => {
+  const { slug } = req.params;
+  const originalName = String(req.body.name || '');
+  const totalSize = parseInt(req.body.size);
+  const parentId = req.body.parentId ? parseInt(req.body.parentId) : null;
+
+  if (!originalName || !Number.isFinite(totalSize) || totalSize <= 0) {
+    return res.status(400).json({ error: 'name und size sind erforderlich.' });
+  }
+  if (totalSize > maxUploadSizeBytes) {
+    return res.status(413).json({ error: `Datei überschreitet das Upload-Limit von ${Math.floor(maxUploadSizeBytes / (1024 * 1024))} MB.` });
+  }
+
+  try {
+    const access = await verifyPublicWriteAccess(slug, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const { baseFile } = access;
+
+    const targetFolderId = parentId !== null ? parentId : baseFile.id;
+    if (!await isDescendantOf(targetFolderId, baseFile.id)) {
+      return res.status(403).json({ error: 'Access denied.' });
+    }
+
+    const session = createChunkedUploadSession({
+      originalName, totalSize,
+      finalize: ({ filenameAtRoot, fileSize }) => finalizePublicUploadedFile({
+        ownerId: baseFile.owner_id, targetFolderId, filenameAtRoot, originalName, fileSize,
+      }),
+    });
+    res.json(session);
+  } catch (err) {
+    console.error('Public chunked-upload init error:', err);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });

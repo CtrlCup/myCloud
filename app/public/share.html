@@ -1420,18 +1420,85 @@
       lucide.createIcons({ el: grid });
     }
 
+    // Files at or above this size upload in fixed-size chunks over several sequential requests
+    // instead of one giant multipart POST — a CDN/reverse-proxy in front of a slow upload link
+    // can (and did — see GitHub issue #19) time out a single request that runs for minutes,
+    // long before the file itself is anywhere near the server's own size limit.
+    const CHUNKED_UPLOAD_THRESHOLD_BYTES = 50 * 1024 * 1024; // 50MB
+    const UPLOAD_CHUNK_SIZE_HINT = 8 * 1024 * 1024; // matches the server default, only used if init fails to report one
+    const UPLOAD_CHUNK_RETRY_LIMIT = 3;
+
     // Uploads one file into a specific target folder (falls back to the currently browsed
-    // folder when none given) via the single-file public upload endpoint.
+    // folder when none given) via the single-file public upload endpoint, or in chunks for
+    // large files (see CHUNKED_UPLOAD_THRESHOLD_BYTES above).
     async function uploadOneFile(file, targetParentId) {
+      const pid = targetParentId !== undefined ? targetParentId : currentFolderId;
+      if (file.size >= CHUNKED_UPLOAD_THRESHOLD_BYTES) {
+        return uploadOneFileChunked(file, pid);
+      }
+
       const formData = new FormData();
       formData.append('file', file);
-      const pid = targetParentId !== undefined ? targetParentId : currentFolderId;
       if (pid) formData.append('parentId', pid);
 
       const res = await fetch(`/api/public/shares/${slug}/upload`, { method: 'POST', body: formData });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error || 'Upload fehlgeschlagen.');
+      }
+    }
+
+    async function uploadOneFileChunked(file, parentId) {
+      const initRes = await fetch(`/api/public/shares/${slug}/upload/chunked/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: file.name, size: file.size, parentId }),
+      });
+      if (!initRes.ok) {
+        const err = await initRes.json();
+        throw new Error(err.error || 'Upload fehlgeschlagen.');
+      }
+      const { uploadId, chunkSize, totalChunks } = await initRes.json();
+      const effectiveChunkSize = chunkSize || UPLOAD_CHUNK_SIZE_HINT;
+
+      try {
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * effectiveChunkSize;
+          const end = Math.min(start + effectiveChunkSize, file.size);
+          const blob = file.slice(start, end);
+
+          let attempt = 0;
+          while (true) {
+            try {
+              const chunkRes = await fetch(`/api/uploads/chunked/${uploadId}/${i}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: blob,
+              });
+              if (!chunkRes.ok) {
+                const err = await chunkRes.json();
+                throw new Error(err.error || 'Upload fehlgeschlagen.');
+              }
+              break;
+            } catch (err) {
+              attempt++;
+              if (attempt > UPLOAD_CHUNK_RETRY_LIMIT) throw err;
+            }
+          }
+        }
+
+        const completeRes = await fetch(`/api/uploads/chunked/${uploadId}/complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!completeRes.ok) {
+          const err = await completeRes.json();
+          throw new Error(err.error || 'Upload fehlgeschlagen.');
+        }
+      } catch (err) {
+        fetch(`/api/uploads/chunked/${uploadId}`, { method: 'DELETE' }).catch(() => {});
+        throw err;
       }
     }
 
