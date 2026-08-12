@@ -194,6 +194,11 @@ async function initDb() {
     // server.js) rather than backfilled for every existing row up front — so this stays NULL for
     // most files until then, which is expected, not a bug.
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)');
+    // Non-null once an MP4/MOV/M4V has been losslessly remuxed for progressive playback (moov
+    // atom moved to the front — see remuxMp4Faststart() in server.js). New uploads are remuxed
+    // automatically; this also drives the admin-triggered backfill over files uploaded before
+    // that existed — NULL there just means "not processed yet", not "processing failed".
+    await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS faststart_processed_at TIMESTAMP');
     await client.query('CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at) WHERE deleted_at IS NOT NULL');
     // The listing query filters owner_id + parent_id + deleted_at IS NULL together on every
     // folder navigation; the single-column indexes above don't serve that combination directly.

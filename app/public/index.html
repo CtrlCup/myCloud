@@ -911,6 +911,17 @@
                 Systemkonfigurationen speichern
               </button>
             </form>
+
+            <div class="card" style="background: rgba(0,0,0,0.15); margin-top: 2rem;">
+              <h3>Video-Streaming optimieren</h3>
+              <p style="font-size: 0.85rem; color: var(--color-text-muted); margin-top: 0.5rem; line-height: 1.5;">
+                Kamera-Videos (GoPro, Handy, ...) speichern ihren Datei-Index oft erst am Ende der Datei — dadurch muss der Browser die komplette Datei laden, bevor die Wiedergabe starten kann. Neue Uploads werden automatisch verlustfrei optimiert (kein Qualitätsverlust); hier lässt sich das nachträglich auch für bereits vorhandene Videos anstoßen. Läuft im Hintergrund, eine Datei nach der anderen.
+              </p>
+              <div id="admin-faststart-status" style="margin-top: 1rem; font-size: 0.85rem; color: var(--color-text-muted);">Wird geladen…</div>
+              <button type="button" class="btn" id="admin-faststart-backfill-btn" style="margin-top: 1rem;">
+                <i data-lucide="film" style="width: 14px; height: 14px;"></i> Bestehende Videos optimieren
+              </button>
+            </div>
           </section>
 
           <!-- Section 2b: Registrierung & SSO -->

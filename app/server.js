@@ -1758,34 +1758,60 @@ function scheduleTextExtraction(physicalPath, mimeType, originalName, fileId) {
 // playback possible. Runs after the upload response, fire-and-forget, same reasoning as
 // scheduleTextExtraction: can take a while on a large file and must never block the response.
 const FASTSTART_EXTS = ['mp4', 'm4v', 'mov'];
+
+// Core remux — resolves with the new file size once physicalPath has been rewritten in place and
+// its DB row updated (size, content_hash, faststart_processed_at), or rejects on failure. Shared
+// by the fire-and-forget post-upload path below and the sequential admin backfill (see
+// runFaststartBackfill), which needs to await one file at a time instead of letting a whole
+// library's worth of ffmpeg processes race each other.
+function remuxMp4Faststart(physicalPath, originalName, fileId) {
+  return new Promise((resolve, reject) => {
+    const tempPath = `${physicalPath}.faststart.mp4`;
+    const { exec } = require('child_process');
+    const cmd = `ffmpeg -y -i "${physicalPath}" -c copy -movflags +faststart -f mp4 "${tempPath}"`;
+    exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, async (err) => {
+      try {
+        if (err || !fs.existsSync(tempPath) || fs.statSync(tempPath).size === 0) {
+          if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+          return reject(err || new Error('ffmpeg produced no output'));
+        }
+        const newSize = fs.statSync(tempPath).size;
+        fs.renameSync(tempPath, physicalPath);
+        // The container bytes changed (even though the video content itself didn't) — the hash
+        // computed at upload time is now stale, and size can shift by a few KB (the moved atom).
+        const newHash = await computeFileHash(physicalPath);
+        await pool.query(
+          'UPDATE files SET size = $1, content_hash = $2, faststart_processed_at = NOW() WHERE id = $3',
+          [newSize, newHash, fileId]
+        );
+        resolve(newSize);
+      } catch (postErr) {
+        if (fs.existsSync(tempPath)) {
+          try { fs.unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
+        }
+        reject(postErr);
+      }
+    });
+  });
+}
+
+// MP4/MOV/M4V files straight off a camera (GoPro, phones, camcorders) almost always have their
+// "moov" atom — the index a player needs before it can decode anything at all — written at the
+// END of the file, appended only once recording stops. A browser's <video> tag then has to fetch
+// most or all of the file before playback can start, no matter how good its Range-request
+// support is: exactly the "has to fully buffer first" symptom, unlike e.g. YouTube, where
+// uploads are always reprocessed server-side before anyone can stream them. Rewriting the
+// container losslessly — no re-encode, just moving that index to the front, what
+// "-movflags +faststart" does — is what makes progressive "starts after the first chunk"
+// playback possible. Runs after the upload response, fire-and-forget, same reasoning as
+// scheduleTextExtraction: can take a while on a large file and must never block the response.
 function scheduleFaststartRemux(physicalPath, originalName, fileId) {
   const ext = path.extname(originalName || '').slice(1).toLowerCase();
   if (!FASTSTART_EXTS.includes(ext)) return;
 
-  const tempPath = `${physicalPath}.faststart.mp4`;
-  const { exec } = require('child_process');
-  const cmd = `ffmpeg -y -i "${physicalPath}" -c copy -movflags +faststart -f mp4 "${tempPath}"`;
-  exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, async (err) => {
-    try {
-      if (err || !fs.existsSync(tempPath) || fs.statSync(tempPath).size === 0) {
-        console.error(`Faststart remux failed for "${originalName}" (file ${fileId}):`, err);
-        if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-        return;
-      }
-      const newSize = fs.statSync(tempPath).size;
-      fs.renameSync(tempPath, physicalPath);
-      // The container bytes changed (even though the video content itself didn't) — the hash
-      // computed at upload time is now stale, and size can shift by a few KB (the moved atom).
-      const newHash = await computeFileHash(physicalPath);
-      await pool.query('UPDATE files SET size = $1, content_hash = $2 WHERE id = $3', [newSize, newHash, fileId]);
-      console.log(`Faststart remux OK for "${originalName}" (file ${fileId}, ${newSize} bytes)`);
-    } catch (postErr) {
-      console.error(`Error finalizing faststart remux for "${originalName}" (file ${fileId}):`, postErr);
-      if (fs.existsSync(tempPath)) {
-        try { fs.unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
-      }
-    }
-  });
+  remuxMp4Faststart(physicalPath, originalName, fileId)
+    .then((newSize) => console.log(`Faststart remux OK for "${originalName}" (file ${fileId}, ${newSize} bytes)`))
+    .catch((err) => console.error(`Faststart remux failed for "${originalName}" (file ${fileId}):`, err));
 }
 
 app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
@@ -5503,6 +5529,78 @@ app.get('/api/settings/admin/version-status', requireAdmin, async (req, res) => 
     console.error('Error fetching version status:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// In-memory only (reset on restart) — mirrors the lightweight "System-Version" check pattern
+// above rather than persisting progress anywhere; a page reload during a run just re-polls
+// whatever this process currently reports. Instance-wide across all users' videos, same scope
+// as any other admin maintenance action (trash retention, SMTP test, ...).
+let faststartBackfillState = { running: false, total: 0, done: 0, failed: 0, currentFile: null };
+
+// Sequentially remuxes every not-yet-processed MP4/MOV/M4V on the instance (see
+// faststart_processed_at) — one file at a time, deliberately: -c copy is I/O-bound and cheap per
+// file, but a whole library's worth running concurrently would still needlessly pile up disk and
+// process load on a box that's also serving live traffic. A file that fails is logged and simply
+// left unmarked (faststart_processed_at stays NULL) — safe to retry on the next manual run,
+// unlike an automatic background loop that could hammer a permanently-broken file forever.
+async function runFaststartBackfill() {
+  if (faststartBackfillState.running) return;
+
+  const res = await pool.query(
+    `SELECT id, name, path FROM files
+     WHERE is_folder = false AND deleted_at IS NULL AND faststart_processed_at IS NULL
+       AND lower(name) ~ '\\.(mp4|m4v|mov)$'
+     ORDER BY id ASC`
+  );
+  const candidates = res.rows;
+  faststartBackfillState = { running: true, total: candidates.length, done: 0, failed: 0, currentFile: null };
+
+  for (const file of candidates) {
+    faststartBackfillState.currentFile = file.name;
+    const physicalPath = path.join(UPLOADS_DIR, file.path);
+    if (fs.existsSync(physicalPath)) {
+      try {
+        await remuxMp4Faststart(physicalPath, file.name, file.id);
+      } catch (err) {
+        console.error(`Faststart backfill: remux failed for "${file.name}" (file ${file.id}):`, err);
+        faststartBackfillState.failed++;
+      }
+    }
+    faststartBackfillState.done++;
+  }
+
+  console.log(`Faststart backfill finished: ${faststartBackfillState.total - faststartBackfillState.failed}/${faststartBackfillState.total} succeeded.`);
+  faststartBackfillState.running = false;
+  faststartBackfillState.currentFile = null;
+}
+
+app.get('/api/settings/admin/faststart-status', requireAdmin, async (req, res) => {
+  try {
+    let pending = faststartBackfillState.total - faststartBackfillState.done;
+    if (!faststartBackfillState.running) {
+      const countRes = await pool.query(
+        `SELECT COUNT(*) FROM files
+         WHERE is_folder = false AND deleted_at IS NULL AND faststart_processed_at IS NULL
+           AND lower(name) ~ '\\.(mp4|m4v|mov)$'`
+      );
+      pending = parseInt(countRes.rows[0].count);
+    }
+    res.json({ ...faststartBackfillState, pending });
+  } catch (err) {
+    console.error('Error fetching faststart backfill status:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/settings/admin/faststart-backfill', requireAdmin, async (req, res) => {
+  if (faststartBackfillState.running) {
+    return res.status(409).json({ error: 'Backfill already running.' });
+  }
+  runFaststartBackfill().catch((err) => {
+    console.error('Faststart backfill crashed:', err);
+    faststartBackfillState.running = false;
+  });
+  res.json({ started: true });
 });
 
 // Admin test SMTP connection

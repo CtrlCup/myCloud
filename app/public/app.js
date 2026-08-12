@@ -887,6 +887,10 @@ function closeSettingsOrAdmin() {
   viewingRecents = false;
   window.history.replaceState(null, '', window.location.pathname + window.location.search);
   showView('dashboard');
+  if (faststartPollTimer) {
+    clearInterval(faststartPollTimer);
+    faststartPollTimer = null;
+  }
 }
 
 document.getElementById('back-to-dashboard-btn').onclick = () => {
@@ -4596,6 +4600,67 @@ async function loadVersionStatus(force = false) {
 
 document.getElementById('admin-check-update-btn')?.addEventListener('click', () => loadVersionStatus(true));
 
+// Polls /faststart-status every 2s while a backfill run is in progress (see
+// runFaststartBackfill() in server.js) so the admin panel shows live progress without the user
+// needing to manually refresh — stopped as soon as the run reports done, or the admin panel is
+// closed (see closeSettingsOrAdmin).
+let faststartPollTimer = null;
+
+function renderFaststartStatus(data) {
+  const statusEl = document.getElementById('admin-faststart-status');
+  const btn = document.getElementById('admin-faststart-backfill-btn');
+  if (!statusEl || !btn) return;
+
+  if (data.running) {
+    const failedNote = data.failed > 0 ? `, ${data.failed} fehlgeschlagen` : '';
+    const currentNote = data.currentFile ? ` (gerade: ${escapeHtml(data.currentFile)})` : '';
+    statusEl.innerHTML = `Läuft… ${data.done} von ${data.total} verarbeitet${failedNote}${currentNote}`;
+    btn.disabled = true;
+    btn.textContent = 'Läuft…';
+  } else {
+    btn.disabled = false;
+    btn.innerHTML = '<i data-lucide="film" style="width: 14px; height: 14px;"></i> Bestehende Videos optimieren';
+    lucide.createIcons();
+    statusEl.textContent = data.pending > 0
+      ? `${data.pending} Video(s) noch nicht für Streaming optimiert.`
+      : 'Alle Videos sind bereits optimiert.';
+  }
+}
+
+async function loadFaststartStatus() {
+  try {
+    const res = await fetch('/api/settings/admin/faststart-status');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderFaststartStatus(data);
+
+    if (data.running && !faststartPollTimer) {
+      faststartPollTimer = setInterval(loadFaststartStatus, 2000);
+    } else if (!data.running && faststartPollTimer) {
+      clearInterval(faststartPollTimer);
+      faststartPollTimer = null;
+    }
+  } catch (err) {
+    console.error('Error loading faststart backfill status:', err);
+  }
+}
+
+document.getElementById('admin-faststart-backfill-btn')?.addEventListener('click', async () => {
+  try {
+    const res = await fetch('/api/settings/admin/faststart-backfill', { method: 'POST' });
+    if (res.status === 409) {
+      showToast('Läuft bereits.');
+    } else if (!res.ok) {
+      showToast('Fehler beim Starten der Video-Optimierung.');
+    } else {
+      showToast('Video-Optimierung gestartet.');
+    }
+    loadFaststartStatus();
+  } catch (err) {
+    showToast('Verbindungsfehler.');
+  }
+});
+
 async function loadAdminSettings() {
   try {
     const res = await fetch('/api/settings');
@@ -4604,6 +4669,7 @@ async function loadAdminSettings() {
     if (currentUser.role === 'admin' && data.adminConfig) {
       const conf = data.adminConfig;
       loadVersionStatus();
+      loadFaststartStatus();
 
       // Branding Sektion befüllen
       document.getElementById('admin-cloud-name').value = conf.cloud_name || 'myCloud';
