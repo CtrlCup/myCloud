@@ -2083,6 +2083,11 @@ function showFileContextMenu(file, x, y) {
     }
 
     actions.push({
+      label: 'Umbenennen',
+      icon: 'pencil',
+      action: () => renameFileOrFolder(file)
+    });
+    actions.push({
       label: 'Kopieren',
       icon: 'copy',
       action: () => {
@@ -2230,6 +2235,52 @@ if (dashboardView) {
       clearSelection();
     }
   });
+}
+
+// Renames a file or folder from the dashboard's context menu — reuses the same rename
+// endpoint/conflict flow as the viewer's in-place filename rename (startViewerRename).
+async function renameFileOrFolder(file) {
+  const newName = await showInputPrompt(
+    file.is_folder ? 'Ordner umbenennen' : 'Datei umbenennen',
+    'Neuer Name:',
+    file.name,
+    'Name'
+  );
+  if (!newName || newName === file.name) return;
+
+  let onConflict;
+  while (true) {
+    try {
+      const res = await fetch(`/api/files/${file.id}/rename`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName, onConflict }),
+      });
+      const data = await res.json();
+
+      if (res.ok) {
+        showToast('Umbenannt.');
+        loadFiles(currentFolderId);
+        return;
+      }
+
+      if (res.status === 409) {
+        const choice = await showFileConflictDialog(newName, {
+          isExactDuplicate: data.isExactDuplicate,
+          canReplace: data.canReplace
+        });
+        if (choice.action === 'skip') return;
+        onConflict = choice.action;
+        continue;
+      }
+
+      showToast(data.error || 'Fehler beim Umbenennen.');
+      return;
+    } catch (err) {
+      showToast('Verbindungsfehler.');
+      return;
+    }
+  }
 }
 
 async function createNewFolder() {
@@ -2686,7 +2737,7 @@ function updateUploadUI() {
     if (item.status === 'uploading') {
       progressPercent = item.size > 0 ? Math.round((item.uploaded / item.size) * 100) : 0;
       statusText = `Lädt hoch... ${progressPercent}%`;
-      statusColor = 'var(--color-primary)';
+      statusColor = 'var(--color-accent)';
     } else if (item.status === 'done') {
       statusText = 'Hochgeladen';
       statusColor = '#00e676';
@@ -2705,7 +2756,7 @@ function updateUploadUI() {
           <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 500;">${escapeHtml(statusText)}</span>
           ${item.status === 'error' ? `
             <button class="retry-upload-item-btn" data-index="${index}" style="border: none; background: transparent; cursor: pointer; padding: 0.1rem; display: flex; align-items: center; justify-content: center; opacity: 0.8; transition: opacity 0.2s;" title="Erneut versuchen">
-              <i data-lucide="rotate-cw" style="width: 14px; height: 14px; color: var(--color-primary);"></i>
+              <i data-lucide="rotate-cw" style="width: 14px; height: 14px; color: var(--color-accent);"></i>
             </button>
           ` : ''}
           <button class="delete-upload-item-btn" data-index="${index}" style="border: none; background: transparent; cursor: pointer; padding: 0.1rem; display: flex; align-items: center; justify-content: center; opacity: 0.6; transition: opacity 0.2s;" title="Aus Liste entfernen">
@@ -2715,7 +2766,7 @@ function updateUploadUI() {
       </div>
       ${item.status === 'uploading' ? `
         <div style="width: 100%; height: 4px; background: var(--color-border); border-radius: 2px; overflow: hidden; margin-top: 0.25rem;">
-          <div style="width: ${progressPercent}%; height: 100%; background: var(--color-primary); border-radius: 2px;"></div>
+          <div style="width: ${progressPercent}%; height: 100%; background: var(--color-accent); border-radius: 2px;"></div>
         </div>
       ` : ''}
     `;
@@ -2802,7 +2853,7 @@ function updateUploadUI() {
       text.textContent = `Hochladen... ${totalPercent}%`;
       text.style.color = 'var(--color-text)';
       circle.style.border = '3px solid var(--color-border)';
-      circle.style.borderTopColor = 'var(--color-primary)';
+      circle.style.borderTopColor = 'var(--color-accent)';
       icon.setAttribute('data-lucide', 'upload-cloud');
     } else {
       const errorItems = currentUploadQueue.filter(item => item.status === 'error');
@@ -2922,7 +2973,7 @@ async function uploadMultipleFiles(filesList, targetFolderId = currentFolderId) 
     pendingConflictChoice = null;
     if (circle && icon && text) {
       circle.style.border = '3px solid var(--color-border)';
-      circle.style.borderTopColor = 'var(--color-primary)';
+      circle.style.borderTopColor = 'var(--color-accent)';
       icon.setAttribute('data-lucide', 'upload-cloud');
       text.textContent = 'Hochladen...';
       text.style.color = 'var(--color-text)';

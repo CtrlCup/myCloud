@@ -453,6 +453,23 @@
     </div>
   </div>
 
+  <!-- CONFIRM MODAL (ersetzt window.confirm() beim Löschen über einen geteilten Link) -->
+  <div class="modal-overlay" id="confirm-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+    <div class="card modal" style="max-width: 400px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="confirm-modal-title">Bestätigung erforderlich</h3>
+        <button class="close-btn" id="close-confirm-modal-btn" aria-label="Schließen">&times;</button>
+      </div>
+      <div style="margin-top: 1rem;">
+        <p id="confirm-modal-message" style="font-size: 0.95rem; color: var(--color-text-muted); line-height: 1.5; margin-bottom: 1.5rem;"></p>
+        <div class="form-actions" style="display: flex; gap: 0.5rem; justify-content: flex-end;">
+          <button type="button" class="btn" id="cancel-confirm-modal-btn" style="justify-content: center;">Abbrechen</button>
+          <button type="button" class="btn btn-primary" id="submit-confirm-modal-btn" style="justify-content: center;">Bestätigen</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Client-side Logic Script for public share page -->
   <script>
     // Config und State
@@ -462,11 +479,53 @@
     let breadcrumbsHistory = [];
     let shareBranding = null;
 
+    // ─── Mobile/browser back-button integration ───
+    // Folder navigation and every viewer/editor open push one browser history entry each, so
+    // the device back button steps back through the shared view one level at a time (closing an
+    // open viewer, then climbing out of folders) instead of leaving the page entirely — see
+    // GitHub issue #21.
+    let breadcrumbsHistoryStack = [];   // snapshots of breadcrumbsHistory, one per pushed folder nav entry
+    let activeViewerSession = null;     // 'image' | 'video' | 'pdf' | 'code' | 'office' | null
+
+    function pushFolderNavState() {
+      breadcrumbsHistoryStack.push(breadcrumbsHistory.slice());
+      history.pushState({ mycloudNav: 'folder' }, '');
+    }
+
+    // kind: viewer/editor type being opened. keepSession: true when this open() call is just
+    // switching media within an already-open viewer (gallery next/prev) — that should not
+    // consume/produce a history entry of its own, only a genuinely new open does.
+    function beginViewerSession(kind, keepSession) {
+      activeViewerSession = kind;
+      if (!keepSession) history.pushState({ mycloudNav: 'viewer' }, '');
+    }
+
+    window.addEventListener('popstate', () => {
+      if (activeViewerSession) {
+        const kind = activeViewerSession;
+        activeViewerSession = null;
+        if (kind === 'image') hideImageViewerOverlay();
+        else if (kind === 'video') hideVideoViewerOverlay();
+        else if (kind === 'pdf') closePdfViewer();
+        else if (kind === 'code') hideCodeEditorOverlay();
+        else if (kind === 'office') hideOfficeEditorOverlay();
+        return;
+      }
+      if (breadcrumbsHistoryStack.length > 0) {
+        breadcrumbsHistory = breadcrumbsHistoryStack.pop();
+        const last = breadcrumbsHistory[breadcrumbsHistory.length - 1];
+        loadShareData(last ? last.id : null);
+      }
+      // Otherwise there's nothing left to unwind — let the browser leave the shared page.
+    });
+
     document.getElementById('share-logo-home').onclick = () => {
+      pushFolderNavState();
       breadcrumbsHistory = [];
       loadShareData(null);
     };
     document.getElementById('shared-title').onclick = () => {
+      pushFolderNavState();
       breadcrumbsHistory = [];
       loadShareData(null);
     };
@@ -504,11 +563,11 @@
       const imageOverlay = document.getElementById('image-viewer-overlay');
       const videoOverlay = document.getElementById('video-viewer-overlay');
       if (VIEWER_IMAGE_EXTS.includes(ext)) {
-        if (videoOverlay.classList.contains('active')) document.getElementById('close-video-viewer-btn').click();
-        openImageViewer(next.id, next.name, true, slug);
+        if (videoOverlay.classList.contains('active')) hideVideoViewerOverlay();
+        openImageViewer(next.id, next.name, true, slug, true);
       } else if (VIEWER_VIDEO_EXTS.includes(ext)) {
-        if (imageOverlay.classList.contains('active')) document.getElementById('close-image-viewer-btn').click();
-        openVideoViewer(next.id, next.name, true, slug);
+        if (imageOverlay.classList.contains('active')) hideImageViewerOverlay();
+        openVideoViewer(next.id, next.name, true, slug, true);
       }
     }
 
@@ -651,6 +710,42 @@
       });
     }
 
+    // Custom confirm dialog — replaces window.confirm() so destructive actions (delete) over a
+    // shared link stay inside the app UI instead of popping a native browser dialog.
+    function showConfirmPrompt(title, message) {
+      return new Promise((resolve) => {
+        const overlay = document.getElementById('confirm-modal-overlay');
+        const titleEl = document.getElementById('confirm-modal-title');
+        const messageEl = document.getElementById('confirm-modal-message');
+        const cancelBtn = document.getElementById('cancel-confirm-modal-btn');
+        const submitBtn = document.getElementById('submit-confirm-modal-btn');
+        const closeBtn = document.getElementById('close-confirm-modal-btn');
+
+        titleEl.textContent = title || 'Bestätigung erforderlich';
+        messageEl.textContent = message || '';
+
+        overlay.classList.add('active');
+
+        const cleanup = () => {
+          overlay.classList.remove('active');
+          cancelBtn.onclick = null;
+          submitBtn.onclick = null;
+          closeBtn.onclick = null;
+          overlay.onclick = null;
+          document.removeEventListener('keydown', onKeydown);
+        };
+        const onKeydown = (e) => {
+          if (e.key === 'Escape') { cleanup(); resolve(false); }
+        };
+
+        cancelBtn.onclick = () => { cleanup(); resolve(false); };
+        closeBtn.onclick = () => { cleanup(); resolve(false); };
+        submitBtn.onclick = () => { cleanup(); resolve(true); };
+        overlay.onclick = (e) => { if (e.target === overlay) { cleanup(); resolve(false); } };
+        document.addEventListener('keydown', onKeydown);
+      });
+    }
+
     async function createFolderInShare() {
       const name = await showInputPrompt('Neuer Ordner', 'Name des neuen Ordners', 'mein-ordner');
       if (!name) return;
@@ -680,7 +775,7 @@
     }
 
     async function deleteFileInShare(fileId, fileName) {
-      if (!confirm(`"${fileName}" wirklich löschen?`)) return;
+      if (!await showConfirmPrompt('Element löschen', `"${fileName}" wirklich löschen?`)) return;
       try {
         const r = await fetch(`/api/public/shares/${slug}/files/${fileId}`, { method: 'DELETE' });
         const d = await r.json();
@@ -1221,6 +1316,7 @@
           link.textContent = crumb.name;
           link.onclick = (e) => {
             e.preventDefault();
+            pushFolderNavState();
             breadcrumbsHistory = breadcrumbsHistory.slice(0, idx + 1);
             loadShareData(crumb.id);
           };
@@ -1271,6 +1367,7 @@
 
         item.onclick = () => {
           if (file.is_folder) {
+            pushFolderNavState();
             // In Breadcrumb history packen
             if (!breadcrumbsHistory.some(c => c.id === file.id)) {
               breadcrumbsHistory.push({ id: file.id, name: file.name });
@@ -2018,6 +2115,7 @@
         lucide.createIcons();
 
         document.getElementById('code-editor-overlay').classList.add('active');
+        beginViewerSession('code', false);
         const collabContainer = document.getElementById('collab-users-container');
         if (collabContainer) {
           collabContainer.style.display = 'none';
@@ -2178,7 +2276,7 @@
       }
     }
 
-    document.getElementById('close-code-editor-btn').onclick = () => {
+    function hideCodeEditorOverlay() {
       closeLanguageMenu();
       if (collabSocket) {
         collabSocket.close();
@@ -2196,7 +2294,8 @@
       }
       document.getElementById('code-editor-overlay').classList.remove('active');
       loadShareData(currentFolderId);
-    };
+    }
+    document.getElementById('close-code-editor-btn').onclick = () => history.back();
 
     let heicLibLoaded = false;
     function loadHeicLib() {
@@ -2264,7 +2363,8 @@
       }
     }
 
-    async function openImageViewer(fileId, fileName, isPublic = false, slug = '') {
+    async function openImageViewer(fileId, fileName, isPublic = false, slug = '', keepSession = false) {
+      beginViewerSession('image', keepSession);
       const loadToken = ++imageViewerLoadToken;
       const overlay = document.getElementById('image-viewer-overlay');
       const img = document.getElementById('image-viewer-img');
@@ -2347,7 +2447,7 @@
       }
     }
 
-    document.getElementById('close-image-viewer-btn').onclick = () => {
+    function hideImageViewerOverlay() {
       document.getElementById('image-viewer-overlay').classList.remove('active');
       const img = document.getElementById('image-viewer-img');
       img.src = '';
@@ -2355,9 +2455,11 @@
         URL.revokeObjectURL(currentImageObjectUrl);
         currentImageObjectUrl = null;
       }
-    };
+    }
+    document.getElementById('close-image-viewer-btn').onclick = () => history.back();
 
-    function openVideoViewer(fileId, fileName, isPublic = false, slug = '') {
+    function openVideoViewer(fileId, fileName, isPublic = false, slug = '', keepSession = false) {
+      beginViewerSession('video', keepSession);
       const overlay = document.getElementById('video-viewer-overlay');
       const player = document.getElementById('video-viewer-player');
       const title = document.getElementById('video-viewer-title');
@@ -2390,12 +2492,13 @@
       resetCustomVideoControls();
     }
 
-    document.getElementById('close-video-viewer-btn').onclick = () => {
+    function hideVideoViewerOverlay() {
       document.getElementById('video-viewer-overlay').classList.remove('active');
       const player = document.getElementById('video-viewer-player');
       player.pause();
       player.src = '';
-    };
+    }
+    document.getElementById('close-video-viewer-btn').onclick = () => history.back();
 
     // Custom video control bar — see app.js's identical implementation for the rationale
     // (native <video controls> right-click menu can't be styled).
@@ -2579,6 +2682,7 @@
     }
 
     async function openPdfViewer(fileId, fileName, isPublic = false, slug = '', parentId = null) {
+      beginViewerSession('pdf', false);
       const session = ++pdfViewerSession;
 
       const overlay = document.getElementById('pdf-viewer-overlay');
@@ -2719,7 +2823,7 @@
       pdfPageOps = new Map();
       pdfActiveStroke = null;
     }
-    document.getElementById('close-pdf-viewer-btn').onclick = closePdfViewer;
+    document.getElementById('close-pdf-viewer-btn').onclick = () => history.back();
 
     /* ── Toolbar dropdown popovers ── */
     function closeAllPdfToolbarMenus() {
@@ -3407,6 +3511,7 @@
         const officeOverlayEl = document.getElementById('office-editor-overlay');
         officeOverlayEl.style.display = 'block';
         officeOverlayEl.classList.add('active');
+        beginViewerSession('office', false);
 
         docEditorInstance = new DocsAPI.DocEditor('office-iframe-placeholder', config);
       } catch (err) {
@@ -3415,7 +3520,7 @@
       }
     }
 
-    document.getElementById('close-office-editor-btn').onclick = () => {
+    function hideOfficeEditorOverlay() {
       if (docEditorInstance) {
         docEditorInstance.destroyEditor();
         docEditorInstance = null;
@@ -3423,7 +3528,8 @@
       const officeOverlayEl = document.getElementById('office-editor-overlay');
       officeOverlayEl.style.display = 'none';
       officeOverlayEl.classList.remove('active');
-    };
+    }
+    document.getElementById('close-office-editor-btn').onclick = () => history.back();
 
     // Backdrop click close for public overlays
     ['code-editor-overlay', 'image-viewer-overlay', 'video-viewer-overlay', 'pdf-viewer-overlay'].forEach(id => {
