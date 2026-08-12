@@ -1656,6 +1656,42 @@ app.get('/api/files/list', requireAuth, async (req, res) => {
   }
 });
 
+// Resolves a folder's full ancestor chain (root-first, including the folder itself) — used to
+// rebuild the breadcrumb bar when the dashboard is opened directly at a folder's URL (see
+// /f/:id-slug client-side routing) instead of via in-app navigation, where the chain is already
+// known from the click path. 404s for anything that isn't an existing, owned, non-deleted folder
+// — including a plain file id — so the client can fall back to the dashboard root instead of
+// rendering a broken breadcrumb trail.
+app.get('/api/files/:id/breadcrumbs', requireAuth, async (req, res) => {
+  const folderId = parseInt(req.params.id);
+  const userId = req.session.userId;
+
+  try {
+    const result = await pool.query(
+      `WITH RECURSIVE ancestors AS (
+         SELECT id, name, parent_id, 0 AS depth FROM files
+         WHERE id = $1 AND owner_id = $2 AND is_folder = true AND deleted_at IS NULL
+         UNION ALL
+         SELECT f.id, f.name, f.parent_id, a.depth + 1
+         FROM files f
+         JOIN ancestors a ON f.id = a.parent_id
+         WHERE f.owner_id = $2 AND f.deleted_at IS NULL
+       )
+       SELECT id, name FROM ancestors ORDER BY depth DESC`,
+      [folderId, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+
+    res.json({ breadcrumbs: result.rows });
+  } catch (err) {
+    console.error('Error resolving folder breadcrumbs:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Create new folder
 app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), async (req, res) => {
   const { name, parentId, onConflict } = req.body;
@@ -1726,6 +1762,13 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
   // Tracks wherever the physical file currently is, so error-path cleanup below always unlinks
   // the right place whether or not relocateUploadToOwnerDir() has run yet.
   let currentPhysicalPath = req.file.path;
+
+  // A file that "just won't upload, no matter how often you retry" is otherwise near-impossible
+  // to reconstruct after the fact — the client only ever shows a generic message. This marks
+  // that the request actually reached the app (ruling out a proxy/CDN-level rejection upstream,
+  // which would leave no trace here at all) and gives a timestamp + size to correlate against
+  // whatever error (if any) follows below.
+  console.log(`Upload received: "${req.file.originalname}" (${req.file.size} bytes) from user ${userId}`);
 
   try {
     if (parentId !== null) {
@@ -1820,7 +1863,7 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
     scheduleTextExtraction(currentPhysicalPath, safeMimeType, finalName, insertedFile.id);
     return;
   } catch (err) {
-    console.error('Error uploading file:', err);
+    console.error(`Error uploading file "${req.file.originalname}" (${req.file.size} bytes, user ${userId}):`, err);
     // Cleanup file
     if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
       fs.unlinkSync(currentPhysicalPath);
@@ -5849,16 +5892,39 @@ app.get('*', (req, res) => {
   renderAppShell(req, res);
 });
 
-// Multer errors (e.g. exceeding MAX_UPLOAD_SIZE_BYTES) otherwise fall through to Express's
-// default HTML error page instead of a clean JSON response.
+// Multer/busboy errors (e.g. exceeding MAX_UPLOAD_SIZE_BYTES, a malformed multipart body, or the
+// connection dropping mid-upload) happen while multer is still parsing the request — before the
+// route handler's own try/catch ever runs — so they land here instead. Previously unlogged: the
+// client got a clean-enough JSON error, but there was no server-side trail at all to explain a
+// report like "this file just won't upload, no matter how often I try". Logged with whatever
+// request context we have so a recurring failure can be correlated to a concrete file/size/user.
 app.use((err, req, res, next) => {
   if (err && err.name === 'MulterError') {
+    console.error(
+      `Upload/multer error (${err.code}) on ${req.method} ${req.path} — user ${req.session?.userId ?? 'unauthenticated'}, ` +
+      `field "${err.field}", content-length ${req.headers['content-length'] ?? 'unknown'}: ${err.message}`
+    );
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({ error: 'File is too large.' });
     }
     return res.status(400).json({ error: err.message });
   }
   next(err);
+});
+
+// Final catch-all: anything reaching here would otherwise fall through to Express's default
+// error page — an opaque HTML response the client can't parse as JSON (surfacing as a generic
+// "Fehler beim Hochladen." with zero detail) and, depending on environment, not necessarily
+// logged anywhere either. Always log full context and stack, and always answer with JSON so API
+// clients get a parseable body even for a failure mode nothing here anticipated.
+app.use((err, req, res, next) => {
+  console.error(
+    `Unhandled error on ${req.method} ${req.path} — user ${req.session?.userId ?? 'unauthenticated'}, ` +
+    `content-length ${req.headers['content-length'] ?? 'unknown'}:`,
+    err
+  );
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Background cleanup task for expired shares and self-destruct notes

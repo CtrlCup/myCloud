@@ -2600,7 +2600,16 @@ function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, on
         // user how to proceed instead of treating it as a hard error.
         resolve({ conflict: true, ...response });
       } else {
-        const errorMsg = response.error || 'Fehler beim Hochladen.';
+        // response.error is only present when the server had a chance to answer with JSON — a
+        // proxy/CDN-level rejection (e.g. a body-size limit in front of the app) or a genuinely
+        // unhandled server error instead returns an HTML page here, which JSON.parse above just
+        // silently swallows. Falling back to the raw HTTP status at least tells the user (and
+        // whoever they report it to) *something* concrete instead of a bare "failed", and — for
+        // status 0 specifically, meaning the connection was cut before any response headers came
+        // back at all — flags that distinctly from a real server-side rejection.
+        const errorMsg = response.error || (xhr.status === 0
+          ? 'Verbindung beim Hochladen abgebrochen (evtl. Datei zu groß oder Verbindung unterbrochen).'
+          : `Fehler beim Hochladen (Status ${xhr.status}).`);
         onError(errorMsg);
         reject(new Error(errorMsg));
       }
