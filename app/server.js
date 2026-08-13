@@ -3431,6 +3431,24 @@ function generateThumbnail(physicalFilename, extension) {
         console.error(`ffmpeg image thumbnail failed for ${physicalFilename}:`, err);
         resolve(null);
       });
+    } else if (['heic', 'heif'].includes(lowerExt)) {
+      // Browsers can't render HEIC/HEIF natively (that's why the full-size viewer converts it
+      // client-side via heic2any) — no safe fallback to serve the original here, unlike the
+      // WEB_IMAGE_EXTS branch above. ffmpeg decodes it via the generic mov/mp4 demuxer + hevc
+      // decoder (no libheif needed) and picks the best video stream automatically — verified
+      // against both a synthetic test file and a real iPhone HEIC (which embeds several extra
+      // streams: a tile-grid main image, an auxiliary depth/portrait-mode map, and a small
+      // low-res preview) and correctly picks the actual photo in both cases. -update 1 tells
+      // the image2 muxer this is a single still frame, not a sequence.
+      const { exec } = require('child_process');
+      const cmd = `ffmpeg -y -i "${inputPath}" -vf "scale='min(480,iw)':-1" -update 1 -q:v 4 "${outputPath}"`;
+      exec(cmd, (err) => {
+        if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+          return resolve(outputPath);
+        }
+        console.error(`ffmpeg HEIC thumbnail failed for ${physicalFilename}:`, err);
+        resolve(null);
+      });
     } else {
       resolve(null);
     }
