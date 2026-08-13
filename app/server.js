@@ -4859,9 +4859,10 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 
 // Public Share Upload - Allow uploads to shared folder if write permission exists
 // Shared by the single-shot public-share upload route and its chunked-upload complete route
-// below. No naming-conflict handling here (unlike the authenticated finalizeUploadedFile) — a
-// public share upload never has an onConflict round-trip with an anonymous visitor, it just
-// always lands under the target folder, same as before this was extracted.
+// below. No onConflict round-trip here (unlike the authenticated finalizeUploadedFile) — an
+// anonymous visitor has no dialog to answer — so a name collision is resolved silently by
+// auto-suffixing via generateUniqueName(), the same "keep both" behavior the dashboard offers
+// as one of its choices.
 async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtRoot, originalName, fileSize }) {
   let currentPhysicalPath = path.join(UPLOADS_DIR, filenameAtRoot);
   try {
@@ -4869,11 +4870,12 @@ async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtR
     // share's owner (whoever created it), same as the binary-content route above.
     const relativePath = relocateUploadToOwnerDir(ownerId, filenameAtRoot);
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
+    const finalName = await generateUniqueName(ownerId, targetFolderId, originalName, false);
 
     const quotaResult = await withStorageQuotaLock(ownerId, fileSize, (client) => client.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [originalName, relativePath, getSafeMimeType(originalName), fileSize, false, targetFolderId, ownerId]
+      [finalName, relativePath, getSafeMimeType(originalName), fileSize, false, targetFolderId, ownerId]
     ));
     if (!quotaResult.ok) {
       fs.unlinkSync(currentPhysicalPath);
@@ -5028,9 +5030,14 @@ app.post('/api/public/shares/:slug/folder', async (req, res) => {
       return res.status(403).json({ error: 'Access denied.' });
     }
 
+    // No onConflict round-trip here — an anonymous visitor has no dialog to answer — so a name
+    // collision (e.g. two visitors both creating "Neuer Ordner", or the same visitor clicking
+    // twice) is resolved silently by auto-suffixing, same as the file-upload path above.
+    const finalName = await generateUniqueName(baseFile.owner_id, targetFolderId, name, true);
+
     const result = await pool.query(
       `INSERT INTO files (name, path, is_folder, parent_id, owner_id) VALUES ($1, 'folder', true, $2, $3) RETURNING *`,
-      [name, targetFolderId, baseFile.owner_id]
+      [finalName, targetFolderId, baseFile.owner_id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -5056,6 +5063,9 @@ app.post('/api/public/shares/:slug/file', async (req, res) => {
     }
 
     const cleanName = rawName.includes('.') ? rawName : rawName + '.txt';
+    // No onConflict round-trip here — an anonymous visitor has no dialog to answer — so a name
+    // collision is resolved silently by auto-suffixing, same as the other public write routes.
+    const finalName = await generateUniqueName(baseFile.owner_id, targetFolderId, cleanName, false);
     const uniqueFilename = crypto.randomUUID() + '.txt';
     const relativePath = `${baseFile.owner_id}/${uniqueFilename}`;
     fs.writeFileSync(path.join(ensureUserUploadDir(baseFile.owner_id), uniqueFilename), '');
@@ -5063,7 +5073,7 @@ app.post('/api/public/shares/:slug/file', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, 'text/plain', 0, false, $3, $4, '') RETURNING *`,
-      [cleanName, relativePath, targetFolderId, baseFile.owner_id]
+      [finalName, relativePath, targetFolderId, baseFile.owner_id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {

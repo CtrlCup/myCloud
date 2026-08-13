@@ -142,6 +142,22 @@
     </main>
   </div>
 
+  <!-- UPLOAD PROGRESS PANEL — appears during a public upload (button or drag&drop) and shows
+       aggregate progress across the whole batch; hidden the rest of the time. -->
+  <div id="public-upload-panel" style="display: none; position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 1100; width: 280px; max-width: calc(100vw - 3rem); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); backdrop-filter: var(--glass-blur); padding: 1rem; box-sizing: border-box;">
+    <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem;">
+      <i data-lucide="upload-cloud" style="width: 16px; height: 16px; color: var(--color-accent); flex-shrink: 0;"></i>
+      <span id="public-upload-panel-filename" style="font-size: 0.85rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; color: var(--color-text);">Wird hochgeladen...</span>
+    </div>
+    <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; margin-bottom: 0.5rem;">
+      <div id="public-upload-panel-bar" style="width: 0%; height: 100%; background: var(--color-accent); border-radius: 3px; transition: width 0.15s ease;"></div>
+    </div>
+    <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--color-text-muted);">
+      <span id="public-upload-panel-summary">0 von 0 Datei(en)</span>
+      <span id="public-upload-panel-percent" style="font-weight: bold; color: var(--color-accent);">0%</span>
+    </div>
+  </div>
+
   <!-- NOTIFICATION TOAST -->
   <div class="notification" id="public-toast">
     <span id="public-toast-message">Meldung</span>
@@ -1427,29 +1443,127 @@
     const CHUNKED_UPLOAD_THRESHOLD_BYTES = 50 * 1024 * 1024; // 50MB
     const UPLOAD_CHUNK_SIZE_HINT = 8 * 1024 * 1024; // matches the server default, only used if init fails to report one
     const UPLOAD_CHUNK_RETRY_LIMIT = 3;
+    // A stalled connection (e.g. iOS Safari suspending the network task when the tab is
+    // backgrounded or the screen locks mid-upload) otherwise leaves the request's promise
+    // pending forever — neither resolving nor rejecting — which blocks the sequential upload
+    // loop indefinitely and leaves the progress panel stuck on screen (see GitHub issue #23).
+    // xhr.timeout/AbortController below cap every request so a hang always turns into a
+    // retryable error instead.
+    const UPLOAD_REQUEST_TIMEOUT_MS = 120000;
+    // Retries (single-shot upload and each chunk) wait between attempts instead of retrying
+    // instantly — an immediate retry on a connection that just dropped (e.g. mobile network
+    // hiccup) almost always fails again right away, burning through the retry budget in
+    // milliseconds instead of giving the connection a moment to recover.
+    const UPLOAD_RETRY_BACKOFF_MS = (attempt) => Math.min(1000 * 2 ** (attempt - 1), 8000);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    // Aggregate progress across the whole upload batch (all files in one button-pick, folder-pick,
+    // or drag&drop drop), driving the fixed-position panel below the file grid.
+    let publicUploadBatch = null; // { totalBytes, uploadedBytes, fileCount, doneCount }
+
+    function showPublicUploadPanel(fileCount, totalBytes) {
+      publicUploadBatch = { totalBytes, uploadedBytes: 0, fileCount, doneCount: 0 };
+      document.getElementById('public-upload-panel').style.display = 'block';
+      updatePublicUploadPanel('Wird hochgeladen...');
+    }
+
+    function updatePublicUploadPanel(currentFileName) {
+      if (!publicUploadBatch) return;
+      const { totalBytes, uploadedBytes, fileCount, doneCount } = publicUploadBatch;
+      const percent = totalBytes > 0 ? Math.min(100, Math.round((uploadedBytes / totalBytes) * 100)) : 0;
+      document.getElementById('public-upload-panel-filename').textContent = currentFileName;
+      document.getElementById('public-upload-panel-bar').style.width = `${percent}%`;
+      document.getElementById('public-upload-panel-percent').textContent = `${percent}%`;
+      document.getElementById('public-upload-panel-summary').textContent = `${doneCount} von ${fileCount} Datei(en)`;
+    }
+
+    function hidePublicUploadPanel() {
+      publicUploadBatch = null;
+      const panel = document.getElementById('public-upload-panel');
+      if (panel) panel.style.display = 'none';
+    }
 
     // Uploads one file into a specific target folder (falls back to the currently browsed
     // folder when none given) via the single-file public upload endpoint, or in chunks for
-    // large files (see CHUNKED_UPLOAD_THRESHOLD_BYTES above).
-    async function uploadOneFile(file, targetParentId) {
+    // large files (see CHUNKED_UPLOAD_THRESHOLD_BYTES above). onProgress(bytesUploadedForFile)
+    // is called as the upload advances, so callers can drive an aggregate progress display.
+    async function uploadOneFile(file, targetParentId, onProgress) {
+      // A File object that reports 0 bytes (seen with iPhone gallery photos still in iCloud,
+      // not yet fully downloaded to the device — the browser hands over a File handle before
+      // its content is actually available) always fails server-side with a cryptic "Unexpected
+      // end of form"; fail fast client-side instead, with a message that points at the actual
+      // cause rather than spending a request (and a retry) on a doomed upload.
+      if (file.size === 0) {
+        throw new Error(`"${file.name}" ist leer oder noch nicht vollständig heruntergeladen (z.B. iCloud-Fotos) — bitte erneut versuchen.`);
+      }
       const pid = targetParentId !== undefined ? targetParentId : currentFolderId;
       if (file.size >= CHUNKED_UPLOAD_THRESHOLD_BYTES) {
-        return uploadOneFileChunked(file, pid);
+        return uploadOneFileChunked(file, pid, onProgress);
       }
+      return uploadOneFileWithRetry(file, pid, onProgress);
+    }
 
-      const formData = new FormData();
-      formData.append('file', file);
-      if (pid) formData.append('parentId', pid);
-
-      const res = await fetch(`/api/public/shares/${slug}/upload`, { method: 'POST', body: formData });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'Upload fehlgeschlagen.');
+    // Retries a transient failure (network error, timeout, or a 5xx from the server) with
+    // backoff, same as the per-chunk retry below — a single dropped request no longer fails
+    // the whole file outright.
+    async function uploadOneFileWithRetry(file, parentId, onProgress) {
+      let attempt = 0;
+      while (true) {
+        try {
+          return await uploadOneFileXHR(file, parentId, onProgress);
+        } catch (err) {
+          attempt++;
+          if (attempt > UPLOAD_CHUNK_RETRY_LIMIT || err.permanent) throw err;
+          await sleep(UPLOAD_RETRY_BACKOFF_MS(attempt));
+        }
       }
     }
 
-    async function uploadOneFileChunked(file, parentId) {
-      const initRes = await fetch(`/api/public/shares/${slug}/upload/chunked/init`, {
+    // XHR (not fetch) specifically because fetch has no cross-browser way to observe upload
+    // progress — xhr.upload.onprogress is what drives the panel's progress bar. xhr.timeout
+    // guards against a request that never settles at all (see UPLOAD_REQUEST_TIMEOUT_MS above).
+    function uploadOneFileXHR(file, parentId, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const formData = new FormData();
+        formData.append('file', file);
+        if (parentId) formData.append('parentId', parentId);
+
+        xhr.timeout = UPLOAD_REQUEST_TIMEOUT_MS;
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && onProgress) onProgress(event.loaded);
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            if (onProgress) onProgress(file.size);
+            resolve();
+          } else {
+            let err = {};
+            try { err = JSON.parse(xhr.responseText); } catch {}
+            const error = new Error(err.error || 'Upload fehlgeschlagen.');
+            // A 4xx (bad request, permission denied, conflict, ...) will fail identically on
+            // every retry — only worth retrying on a server-side hiccup (5xx) or no status at all.
+            if (xhr.status >= 400 && xhr.status < 500) error.permanent = true;
+            reject(error);
+          }
+        };
+        xhr.onerror = () => reject(new Error('Netzwerkfehler.'));
+        xhr.ontimeout = () => reject(new Error('Zeitüberschreitung beim Hochladen.'));
+        xhr.open('POST', `/api/public/shares/${slug}/upload`);
+        xhr.send(formData);
+      });
+    }
+
+    // fetch() has no built-in timeout — AbortController is what turns a hung connection (see
+    // UPLOAD_REQUEST_TIMEOUT_MS above) into a rejected promise instead of one that never settles.
+    function fetchWithTimeout(url, options) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), UPLOAD_REQUEST_TIMEOUT_MS);
+      return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    }
+
+    async function uploadOneFileChunked(file, parentId, onProgress) {
+      const initRes = await fetchWithTimeout(`/api/public/shares/${slug}/upload/chunked/init`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: file.name, size: file.size, parentId }),
@@ -1461,6 +1575,33 @@
       const { uploadId, chunkSize, totalChunks } = await initRes.json();
       const effectiveChunkSize = chunkSize || UPLOAD_CHUNK_SIZE_HINT;
 
+      // XHR per chunk (instead of fetch) so xhr.upload.onprogress can report bytes within the
+      // current chunk too — without it, progress would only advance in whole-chunk jumps.
+      // xhr.timeout guards against a chunk request that never settles at all.
+      const putChunk = (blob, index) => new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.timeout = UPLOAD_REQUEST_TIMEOUT_MS;
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable && onProgress) {
+            onProgress(Math.min(file.size, index * effectiveChunkSize + event.loaded));
+          }
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            let err = {};
+            try { err = JSON.parse(xhr.responseText); } catch {}
+            reject(new Error(err.error || 'Upload fehlgeschlagen.'));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Netzwerkfehler.'));
+        xhr.ontimeout = () => reject(new Error('Zeitüberschreitung beim Hochladen.'));
+        xhr.open('PUT', `/api/uploads/chunked/${uploadId}/${index}`);
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.send(blob);
+      });
+
       try {
         for (let i = 0; i < totalChunks; i++) {
           const start = i * effectiveChunkSize;
@@ -1470,24 +1611,20 @@
           let attempt = 0;
           while (true) {
             try {
-              const chunkRes = await fetch(`/api/uploads/chunked/${uploadId}/${i}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/octet-stream' },
-                body: blob,
-              });
-              if (!chunkRes.ok) {
-                const err = await chunkRes.json();
-                throw new Error(err.error || 'Upload fehlgeschlagen.');
-              }
+              await putChunk(blob, i);
               break;
             } catch (err) {
               attempt++;
               if (attempt > UPLOAD_CHUNK_RETRY_LIMIT) throw err;
+              // Give a connection that just dropped (e.g. iOS backgrounding the tab) a moment
+              // to recover instead of hammering it again immediately.
+              await sleep(UPLOAD_RETRY_BACKOFF_MS(attempt));
             }
           }
+          if (onProgress) onProgress(end);
         }
 
-        const completeRes = await fetch(`/api/uploads/chunked/${uploadId}/complete`, {
+        const completeRes = await fetchWithTimeout(`/api/uploads/chunked/${uploadId}/complete`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}),
@@ -1507,11 +1644,27 @@
     async function uploadMultipleFiles(fileList) {
       const files = Array.from(fileList);
       if (files.length === 0) return;
-      showToast(`Lade ${files.length} Datei(en) hoch...`);
+      const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+      showPublicUploadPanel(files.length, totalBytes);
+
       let failed = 0;
+      let bytesBeforeCurrent = 0;
       for (const file of files) {
-        try { await uploadOneFile(file); } catch { failed++; }
+        try {
+          await uploadOneFile(file, undefined, (uploaded) => {
+            publicUploadBatch.uploadedBytes = bytesBeforeCurrent + uploaded;
+            updatePublicUploadPanel(file.name);
+          });
+        } catch {
+          failed++;
+        }
+        bytesBeforeCurrent += file.size;
+        publicUploadBatch.uploadedBytes = bytesBeforeCurrent;
+        publicUploadBatch.doneCount++;
+        updatePublicUploadPanel(file.name);
       }
+
+      hidePublicUploadPanel();
       showToast(failed === 0 ? 'Erfolgreich hochgeladen!' : `${files.length - failed} von ${files.length} hochgeladen, ${failed} fehlgeschlagen.`);
       loadShareData(currentFolderId);
     }
@@ -1523,7 +1676,8 @@
     async function uploadFolderFiles(fileList) {
       const files = Array.from(fileList);
       if (files.length === 0) return;
-      showToast(`Lade Ordner mit ${files.length} Datei(en) hoch...`);
+      const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+      showPublicUploadPanel(files.length, totalBytes);
 
       const folderIdByPath = new Map();
       folderIdByPath.set('', currentFolderId || null);
@@ -1545,16 +1699,26 @@
       };
 
       let failed = 0;
+      let bytesBeforeCurrent = 0;
       for (const file of files) {
         const relPath = file.webkitRelativePath || file.name;
         const dirPath = relPath.split('/').slice(0, -1).join('/');
         try {
           const parentId = await ensureFolder(dirPath);
-          await uploadOneFile(file, parentId);
+          await uploadOneFile(file, parentId, (uploaded) => {
+            publicUploadBatch.uploadedBytes = bytesBeforeCurrent + uploaded;
+            updatePublicUploadPanel(file.name);
+          });
         } catch {
           failed++;
         }
+        bytesBeforeCurrent += file.size;
+        publicUploadBatch.uploadedBytes = bytesBeforeCurrent;
+        publicUploadBatch.doneCount++;
+        updatePublicUploadPanel(file.name);
       }
+
+      hidePublicUploadPanel();
       showToast(failed === 0 ? 'Ordner erfolgreich hochgeladen!' : `${files.length - failed} von ${files.length} Dateien hochgeladen, ${failed} fehlgeschlagen.`);
       loadShareData(currentFolderId);
     }

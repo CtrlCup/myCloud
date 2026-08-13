@@ -2627,7 +2627,19 @@ async function moveFilesWithConflictHandling(fileIds, targetFolderId) {
   }
 }
 
-function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, onCreatedXHR, conflictResolution) {
+// A stalled connection (e.g. iOS Safari suspending the network task when the tab is backgrounded
+// or the screen locks mid-upload — see GitHub issue #23) otherwise leaves this promise pending
+// forever, neither resolving nor rejecting, which blocks the whole upload queue indefinitely.
+// xhr.timeout caps that at a generous-but-bounded duration so a hang always turns into a
+// retryable error instead.
+const UPLOAD_REQUEST_TIMEOUT_MS = 120000;
+// Retries wait between attempts instead of retrying instantly — an immediate retry on a
+// connection that just dropped almost always fails again right away, burning through the retry
+// budget in milliseconds instead of giving the connection a moment to recover.
+const UPLOAD_RETRY_BACKOFF_MS = (attempt) => Math.min(1000 * 2 ** (attempt - 1), 8000);
+const uploadSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function uploadSingleFileXHRAttempt(file, parentId, onProgress, onCreatedXHR, conflictResolution) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     if (onCreatedXHR) {
@@ -2644,6 +2656,7 @@ function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, on
       formData.append('onConflict', conflictResolution);
     }
 
+    xhr.timeout = UPLOAD_REQUEST_TIMEOUT_MS;
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
         onProgress(event.loaded, event.total);
@@ -2655,12 +2668,11 @@ function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, on
       try { response = JSON.parse(xhr.responseText); } catch(e){}
 
       if (xhr.status >= 200 && xhr.status < 300) {
-        onDone(response);
-        resolve(response);
+        resolve({ conflict: false, response });
       } else if (xhr.status === 409) {
         // A file with this name already exists in the target folder — let the caller ask the
         // user how to proceed instead of treating it as a hard error.
-        resolve({ conflict: true, ...response });
+        resolve({ conflict: true, response: { conflict: true, ...response } });
       } else {
         // response.error is only present when the server had a chance to answer with JSON — a
         // proxy/CDN-level rejection (e.g. a body-size limit in front of the app) or a genuinely
@@ -2672,24 +2684,44 @@ function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, on
         const errorMsg = response.error || (xhr.status === 0
           ? 'Verbindung beim Hochladen abgebrochen (evtl. Datei zu groß oder Verbindung unterbrochen).'
           : `Fehler beim Hochladen (Status ${xhr.status}).`);
-        onError(errorMsg);
-        reject(new Error(errorMsg));
+        const err = new Error(errorMsg);
+        // A 4xx will fail identically on every retry — only worth retrying on a server-side
+        // hiccup (5xx), a lost connection (status 0), or a timeout.
+        if (xhr.status >= 400 && xhr.status < 500) err.permanent = true;
+        reject(err);
       }
     };
 
     xhr.onabort = () => {
-      onError('Upload abgebrochen.');
-      reject(new Error('Upload abgebrochen.'));
+      const err = new Error('Upload abgebrochen.');
+      err.permanent = true;
+      reject(err);
     };
 
-    xhr.onerror = () => {
-      onError('Netzwerkfehler.');
-      reject(new Error('Netzwerkfehler.'));
-    };
+    xhr.onerror = () => reject(new Error('Netzwerkfehler.'));
+    xhr.ontimeout = () => reject(new Error('Zeitüberschreitung beim Hochladen.'));
 
     xhr.open('POST', '/api/files/upload');
     xhr.send(formData);
   });
+}
+
+async function uploadSingleFileWithXHR(file, parentId, onProgress, onDone, onError, onCreatedXHR, conflictResolution) {
+  let attempt = 0;
+  while (true) {
+    try {
+      const { conflict, response } = await uploadSingleFileXHRAttempt(file, parentId, onProgress, onCreatedXHR, conflictResolution);
+      if (!conflict) onDone(response);
+      return response;
+    } catch (err) {
+      attempt++;
+      if (err.permanent || attempt > UPLOAD_CHUNK_RETRY_LIMIT) {
+        onError(err.message);
+        throw err;
+      }
+      await uploadSleep(UPLOAD_RETRY_BACKOFF_MS(attempt));
+    }
+  }
 }
 
 // Files at or above this size upload in fixed-size chunks over several sequential requests
@@ -2746,6 +2778,7 @@ function uploadSingleFileChunked(file, parentId, onProgress, onDone, onError, on
       const xhr = new XMLHttpRequest();
       currentXhr = xhr;
       xhr.open(method, url);
+      xhr.timeout = UPLOAD_REQUEST_TIMEOUT_MS;
       if (contentType) xhr.setRequestHeader('Content-Type', contentType);
       if (onXhrProgress) xhr.upload.onprogress = onXhrProgress;
       xhr.onload = () => {
@@ -2755,6 +2788,7 @@ function uploadSingleFileChunked(file, parentId, onProgress, onDone, onError, on
       };
       xhr.onabort = () => rej(new Error('Upload abgebrochen.'));
       xhr.onerror = () => rej(new Error('Netzwerkfehler.'));
+      xhr.ontimeout = () => rej(new Error('Zeitüberschreitung beim Hochladen.'));
       xhr.send(body);
     });
 
@@ -2792,6 +2826,10 @@ function uploadSingleFileChunked(file, parentId, onProgress, onDone, onError, on
               if (aborted) throw err;
               attempt++;
               if (attempt > UPLOAD_CHUNK_RETRY_LIMIT) throw err;
+              // Give a connection that just dropped (e.g. iOS backgrounding the tab) a moment
+              // to recover instead of hammering it again immediately.
+              await uploadSleep(UPLOAD_RETRY_BACKOFF_MS(attempt));
+              if (aborted) throw new Error('Upload abgebrochen.');
             }
           }
           uploaded = end;
@@ -3168,6 +3206,18 @@ async function processUploadQueue() {
   while (uploadActive) {
     const uploadItem = currentUploadQueue.find(item => item.status === 'pending');
     if (!uploadItem) break;
+
+    // A File object that reports 0 bytes (seen with iPhone gallery photos still in iCloud, not
+    // yet fully downloaded to the device — the browser hands over a File handle before its
+    // content is actually available) always fails server-side with a cryptic "Unexpected end of
+    // form"; fail fast client-side instead, with a message that points at the actual cause
+    // rather than spending a request (and several retries) on a doomed upload.
+    if (uploadItem.fileObj.size === 0) {
+      uploadItem.status = 'error';
+      uploadItem.error = 'Datei ist leer oder noch nicht vollständig heruntergeladen (z.B. iCloud-Fotos).';
+      updateUploadUI();
+      continue;
+    }
 
     uploadItem.status = 'uploading';
     updateUploadUI();
