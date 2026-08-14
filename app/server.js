@@ -5209,6 +5209,81 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
   }
 });
 
+// Public Share ZIP Download — an explicit multi-select (files and/or folders), mirroring the
+// dashboard's /api/files/download-zip-multiple. Unlike that route, every id here must additionally
+// be verified as living inside the shared subtree (a visitor only ever supplies ids they saw
+// rendered in this share, but nothing stops them from tampering with the query string).
+app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
+  const { slug } = req.params;
+  const idsParam = req.query.ids;
+  if (!idsParam) return res.status(400).json({ error: 'No IDs provided.' });
+
+  const ids = [...new Set(idsParam.split(',').map(id => parseInt(id)).filter(Number.isFinite))];
+  if (ids.length === 0) return res.status(400).json({ error: 'No valid IDs provided.' });
+
+  try {
+    const shareRow = await pool.query('SELECT file_id FROM shares WHERE slug = $1', [slug]);
+    if (shareRow.rows.length === 0) return res.status(404).json({ error: 'Share link not found.' });
+
+    // Reuses the same expiry/password/download-limit/only-upload/can_read checks as every other
+    // public route — passing the share's own base file id as the "target" trivially satisfies
+    // the descendant check inside (isDescendantOf treats fileId === ancestorId as true), so this
+    // only validates the share itself; each selected id is checked individually below.
+    const access = await verifyPublicShareAccess(slug, shareRow.rows[0].file_id, req);
+    if (access.error) return res.status(access.status).json({ error: access.error });
+    const { share, file: baseFile } = access;
+    if (!share.can_zip) return res.status(403).json({ error: 'ZIP Download permissions denied.' });
+
+    if (!baseFile.is_one_time_note) {
+      const incRes = await pool.query(
+        `UPDATE shares SET download_count = download_count + 1
+         WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+         RETURNING *`,
+        [share.id]
+      );
+      if (incRes.rows.length === 0) {
+        return res.status(410).json({ error: 'This share has reached its download limit.' });
+      }
+    }
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="mycloud_selection.zip"');
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => {
+      console.error('Public multi-ZIP archive error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to create ZIP.' });
+      } else {
+        res.end();
+      }
+    });
+    archive.pipe(res);
+
+    for (const id of ids) {
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [id, baseFile.owner_id]);
+      if (fileRes.rows.length === 0) continue;
+      const file = fileRes.rows[0];
+      if (!(await isWithinSharedFolder(file.id, baseFile.id))) continue;
+
+      if (file.is_folder) {
+        await addFolderToZip(archive, file.id, file.name, baseFile.owner_id);
+      } else {
+        const physicalPath = path.join(UPLOADS_DIR, file.path);
+        if (fs.existsSync(physicalPath)) {
+          archive.file(physicalPath, { name: file.name });
+        }
+      }
+    }
+    await archive.finalize();
+  } catch (err) {
+    console.error('Public multi-ZIP download error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to create ZIP.' });
+    }
+  }
+});
+
 /* ==========================================================================
    SETTINGS & ADMIN PANEL ROUTES
    ========================================================================== */
