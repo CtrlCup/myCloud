@@ -1122,6 +1122,17 @@ header {
   opacity: 1;
 }
 
+/* Touch/coarse-pointer devices have no :hover state, so the actions button and the
+   selection checkbox (see .file-item-checkbox below) must default to visible instead of
+   depending on a hover that will never fire — otherwise per-item actions like folder
+   download are effectively invisible on phones/tablets. */
+@media (hover: none), (pointer: coarse) {
+  .file-actions,
+  .file-item-checkbox {
+    opacity: 1;
+  }
+}
+
 /* ─── Public Share: single-file download card ─── */
 .share-single-card {
   max-width: 480px;
@@ -2029,6 +2040,120 @@ tr:hover td {
   background: var(--color-surface-hover) !important;
   transform: scale(1.1) !important;
   opacity: 1 !important;
+}
+
+/* ─── Bottom Sheet (mobile-ui.js) ───
+   Replaces the anchored .context-menu card on touch/narrow viewports — small edge-anchored
+   cards clip off-screen and have inconsistent tap targets on phones. Reuses the exact same
+   tokens as .context-menu above so it needs no extra per-theme/per-color-scheme rules. */
+.mobileui-sheet-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.mobileui-sheet-overlay.active {
+  opacity: 1;
+}
+
+.mobileui-sheet-overlay.mobileui-sheet-leaving {
+  opacity: 0;
+}
+
+.mobileui-sheet {
+  width: 100%;
+  max-width: 560px;
+  max-height: 75vh;
+  overflow-y: auto;
+  background: var(--dropdown-bg);
+  background-image: var(--glass-highlight);
+  border: 1px solid var(--glass-border);
+  border-bottom: none;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  padding: 0.5rem 0.5rem max(0.5rem, env(safe-area-inset-bottom));
+  transform: translateY(100%);
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mobileui-sheet-overlay.active .mobileui-sheet {
+  transform: translateY(0);
+}
+
+.mobileui-sheet-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-border);
+  margin: 0.5rem auto 0.75rem;
+}
+
+.mobileui-sheet-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  padding: 0 0.85rem 0.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobileui-sheet-item {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  width: 100%;
+  min-height: 52px;
+  padding: 0.7rem 0.85rem;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-weight: 500;
+  font-size: 0.95rem;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.mobileui-sheet-item:active {
+  background: rgba(var(--color-accent-rgb), 0.12);
+}
+
+.mobileui-sheet-item i {
+  width: 19px;
+  height: 19px;
+  flex-shrink: 0;
+  color: var(--color-accent);
+}
+
+.mobileui-sheet-item[data-danger="true"] {
+  color: #ff453a;
+}
+
+.mobileui-sheet-item[data-danger="true"] i {
+  color: #ff453a;
+}
+
+/* ─── Off-canvas drawer backdrop (mobile-ui.js) ─── */
+.mobileui-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1490;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.mobileui-drawer-backdrop.active {
+  opacity: 1;
 }
 
 /* ─── Share Page ─── */
@@ -3898,5 +4023,182 @@ tbody tr {
   }
   [data-visual-theme="nova"] .nova-sidebar-toggle {
     display: none;
+  }
+}
+
+/* ─── Mobile nav (≤768px): off-canvas Nova drawer + bottom tab bar, both themes ───
+   Below 768px, Nova's sidebar stops shrinking to a permanent icon rail (which still eats
+   >20% of a phone's width at the 620px breakpoint above) and instead becomes a fully hidden
+   off-canvas drawer, opened via #nova-hamburger-btn (see mobile-ui.js initOffCanvasNav).
+   #nova-mobile-tabbar (defined in index.html, duplicating the sidebar's 4 nav destinations)
+   becomes the persistent, zero-permanent-width mobile nav for BOTH themes — LiquidGlass never
+   had a sidebar to begin with, so it only gains the tab bar, not a drawer. */
+#nova-hamburger-btn {
+  display: none;
+}
+
+#nova-mobile-tabbar {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  /* Also overrides the desktop "minimized sidebar" preference (.nova-sidebar-collapsed, set
+     via #nova-sidebar-toggle) — that preference means "icon-only rail" on desktop, which
+     doesn't translate to a slide-in drawer meant to be opened only momentarily; the drawer
+     should always be the full-width, fully-labeled 260px panel regardless of that setting. */
+  [data-visual-theme="nova"].app-authed #nova-sidebar,
+  [data-visual-theme="nova"].app-authed.nova-sidebar-collapsed #nova-sidebar {
+    width: 260px;
+    padding-left: 1.1rem;
+    padding-right: 1.1rem;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    z-index: 1500;
+  }
+  html.nova-drawer-open[data-visual-theme="nova"].app-authed #nova-sidebar {
+    transform: translateX(0);
+  }
+  /* Full label set back on inside the drawer, even though the same viewport width collapses
+     them to icon-only at 620px above — the drawer is a full 260px panel, not an icon rail. */
+  [data-visual-theme="nova"].app-authed #nova-sidebar .nova-logo-text,
+  [data-visual-theme="nova"].app-authed #nova-sidebar .nova-nav-label,
+  [data-visual-theme="nova"].app-authed #nova-sidebar .nova-storage-meter {
+    display: inline;
+  }
+  [data-visual-theme="nova"].app-authed #nova-sidebar .nova-sidebar-top {
+    justify-content: space-between;
+  }
+  [data-visual-theme="nova"].app-authed #nova-sidebar .nova-nav-item {
+    justify-content: flex-start;
+    gap: 0.75rem;
+  }
+  [data-visual-theme="nova"].app-authed #nova-sidebar .nova-sidebar-toggle {
+    display: none;
+  }
+  /* The bottom profile card (header#app-header, relocated here under Nova — see the comment
+     near its base rule above) is a fixed element OUTSIDE #nova-sidebar in the DOM, so it does
+     not automatically follow the sidebar's translateX drawer animation above. Give it the same
+     slide/z-index treatment so it travels with the drawer as one visual unit instead of staying
+     pinned over the new bottom tab bar while the drawer is closed (a plain `display: none` here
+     would lose to the inline `style.display = 'flex'` app.js sets on login — see app.js:361 —
+     since inline styles beat stylesheet rules without !important). Needs the same
+     .nova-sidebar-collapsed-variant selector #nova-sidebar's rule above already has — that
+     desktop "icon rail" preference rule (~line 3949) targets header#app-header too and, being
+     one class more specific, would otherwise keep it stuck at the collapsed 76px width even
+     while this rule's transform makes it visible. z-index 1501, one above #nova-sidebar's 1500:
+     both are DOM siblings, header#app-header comes first, so at equal z-index #nova-sidebar
+     (later in DOM) paints over it and hides it completely — the desktop rules keep the same
+     header-above-sidebar relationship via 1211 vs. 1210 (see line ~3718/3849). */
+  [data-visual-theme="nova"].app-authed header#app-header,
+  [data-visual-theme="nova"].app-authed.nova-sidebar-collapsed header#app-header {
+    width: 260px;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    z-index: 1501;
+  }
+  html.nova-drawer-open[data-visual-theme="nova"].app-authed header#app-header {
+    transform: translateX(0);
+  }
+  /* Same "full label set back on" treatment as #nova-sidebar's children above, for the
+     profile card's own name/chevron — the desktop .nova-sidebar-collapsed icon-only rules
+     (~line 3959) hide these and shrink the trigger to a centered circle, which is correct at
+     260px-permanent-sidebar-shrunk-to-76px but not for a drawer that's always the full panel. */
+  [data-visual-theme="nova"].app-authed header#app-header .user-nav-names {
+    display: flex;
+  }
+  /* Also needed to outrank a pre-existing, unrelated LiquidGlass rule at the same breakpoint
+     (.user-menu-trigger span { display: none; }, ~line 2413) that was written for the old top
+     header bar losing its username label on narrow viewports — as a bare descendant selector
+     it also matches #nav-username here (nested inside .user-nav-names) with nothing before this
+     rule specific enough to outrank it, unlike #nav-role-label right next to it, which has its
+     own ID-anchored Nova rule (~line 3877) and so was unaffected. */
+  [data-visual-theme="nova"].app-authed header#app-header .user-menu-trigger span {
+    display: inline;
+  }
+  [data-visual-theme="nova"].app-authed header#app-header .user-menu-trigger svg {
+    display: block;
+  }
+  [data-visual-theme="nova"].app-authed header#app-header .user-menu-trigger {
+    justify-content: flex-start;
+    padding: 0.4rem;
+  }
+  [data-visual-theme="nova"].app-authed .container {
+    margin-left: 0;
+    width: 100%;
+  }
+  /* The desktop rule (line ~3854 above) reserves 260px of left padding on every centered
+     modal (Settings/Trash/Admin/Notes/confirm dialogs) for the always-visible sidebar — but
+     the sidebar is now a 0-permanent-width off-canvas drawer, so that padding would otherwise
+     squeeze every modal into the remaining ~130px on a phone-width viewport. */
+  [data-visual-theme="nova"].app-authed .modal-overlay {
+    padding-left: 0;
+  }
+
+  [data-visual-theme="nova"].app-authed #nova-hamburger-btn {
+    display: flex;
+  }
+
+  html.app-authed #nova-mobile-tabbar {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 1200;
+    justify-content: space-around;
+    align-items: center;
+    height: 60px;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--dropdown-bg);
+    background-image: var(--glass-highlight);
+    border-top: 1px solid var(--glass-border);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+  }
+  #nova-mobile-tabbar .nova-nav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.2rem;
+    flex: 1;
+    height: 100%;
+    color: var(--color-text-muted);
+    font-size: 0.65rem;
+    font-weight: 500;
+    text-decoration: none;
+  }
+  #nova-mobile-tabbar .nova-nav-item svg {
+    width: 20px;
+    height: 20px;
+  }
+  #nova-mobile-tabbar .nova-nav-item.active {
+    color: var(--color-accent);
+  }
+
+  html.app-authed .container {
+    padding-bottom: calc(60px + env(safe-area-inset-bottom) + 1rem);
+  }
+
+  /* Raised to clear the new bottom tab bar so the two floating bottom bars don't overlap.
+     #multi-actions-bar's default bottom is set via an inline style="" attribute in
+     index.html, which any external stylesheet rule needs !important to outrank. */
+  html.app-authed #multi-actions-bar {
+    bottom: calc(60px + env(safe-area-inset-bottom) + 1rem) !important;
+  }
+
+  /* "Add content" FAB: repositioned to a fixed, thumb-reachable bottom-right corner instead of
+     sitting inline in the toolbar next to search/trash — higher visual weight, easier to find
+     ("Neuer Ordner" wasn't discoverable enough), matching the current floating-action-button
+     convention. Desktop keeps the original in-toolbar position (no rule outside this
+     media query touches #plus-menu-btn's position). */
+  html.app-authed #plus-menu-btn {
+    position: fixed;
+    bottom: calc(60px + env(safe-area-inset-bottom) + 1rem);
+    right: 1rem;
+    /* Below .modal-overlay's 1200 (not above, as a "floating" element might default to) so any
+       open modal (Settings/Trash/Notes/Admin/Share/...) correctly covers the FAB instead of it
+       punching through on top of modal content. */
+    z-index: 1150;
   }
 }

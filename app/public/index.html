@@ -113,6 +113,27 @@
       </div>
     </aside>
 
+    <!-- MOBILE BOTTOM TAB BAR (≤768px only, see styles.css) — duplicates the 4 primary Nova
+         sidebar destinations as always-visible bottom tabs, replacing the old permanent 76px
+         icon rail. Also used under the LiquidGlass theme (which never had a sidebar of its
+         own) so both themes get an equivalent mobile nav primitive. Different element ids from
+         the sidebar's nav links (duplicate ids are invalid HTML), same .nova-nav-item class +
+         data-view so updateNovaSidebarActive() highlights both in sync — see app.js. -->
+    <nav id="nova-mobile-tabbar">
+      <a href="/" class="nova-nav-item" id="nova-tab-files" data-view="dashboard" title="Dateien">
+        <i data-lucide="folder"></i> <span>Dateien</span>
+      </a>
+      <a href="#settings" class="nova-nav-item" id="nova-tab-shares" data-view="shares" title="Geteilte Links">
+        <i data-lucide="link"></i> <span>Geteilt</span>
+      </a>
+      <a href="#recent" class="nova-nav-item" id="nova-tab-recent" data-view="recent" title="Zuletzt hinzugefügt">
+        <i data-lucide="clock"></i> <span>Zuletzt</span>
+      </a>
+      <a href="#trash" class="nova-nav-item" id="nova-tab-trash" data-view="trash" title="Papierkorb">
+        <i data-lucide="trash-2"></i> <span>Papierkorb</span>
+      </a>
+    </nav>
+
     <!-- 1. AUTHENTIFIZIERUNGS-ANSICHT -->
     <main id="auth-view" class="auth-container" style="position: relative;">
       <div class="card auth-card">
@@ -187,6 +208,12 @@
 
       <div class="toolbar">
         <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
+          <!-- Mobile-only: opens the Nova sidebar as an off-canvas drawer (see mobile-ui.js
+               initOffCanvasNav + styles.css @media max-width:768px). Hidden on wider viewports,
+               where the sidebar is either fully expanded or the desktop-narrow icon rail. -->
+          <button type="button" class="btn-icon" id="nova-hamburger-btn" title="Menü öffnen">
+            <i data-lucide="menu"></i>
+          </button>
           <div class="view-toggle">
             <button class="btn-icon" id="view-grid-btn" title="Kachelansicht"><i data-lucide="layout-grid"></i></button>
             <button class="btn-icon" id="view-list-btn" title="Listenansicht"><i data-lucide="list"></i></button>
@@ -216,6 +243,13 @@
               </label>
             </div>
           </div>
+
+          <!-- Persistent download button for the currently open folder — mirrors share.html's
+               always-visible #download-all-zip-btn, since the same action was previously only
+               reachable through the per-item "..." menu (invisible on touch, see .file-actions). -->
+          <button type="button" id="dashboard-zip-current-folder-btn" class="btn-icon" title="Als ZIP herunterladen" style="display: none; color: var(--color-text-muted); padding: 0.5rem;">
+            <i data-lucide="file-archive" style="width: 18px; height: 18px;"></i>
+          </button>
 
           <!-- Direct link to the trash -->
           <a href="#trash" id="trash-nav-btn" class="btn-icon" title="Papierkorb" style="color: var(--color-text-muted); padding: 0.5rem; display: flex; align-items: center; justify-content: center;">
@@ -268,7 +302,7 @@
         <button class="btn btn-icon multi-action-btn" id="multi-cut-btn" title="Ausschneiden (Strg+X)" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
           <i data-lucide="scissors" style="width: 17px; height: 17px;"></i>
         </button>
-        <button class="btn btn-icon multi-action-btn" id="multi-zip-btn" title="Als ZIP laden" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
+        <button class="btn btn-icon multi-action-btn" id="multi-zip-btn" title="Als ZIP herunterladen" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
           <i data-lucide="archive" style="width: 17px; height: 17px;"></i>
         </button>
         <button class="btn btn-icon multi-action-btn" id="multi-move-btn" title="Verschieben nach…" style="width: 36px; height: 36px; border-radius: 50%; padding: 0; display: flex; align-items: center; justify-content: center; border: none; background: transparent;">
@@ -1202,7 +1236,7 @@
             
             <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
               <input type="checkbox" id="share-can-zip" checked>
-              <span>Als ZIP laden</span>
+              <span>Als ZIP herunterladen</span>
             </label>
           </div>
           
@@ -1355,7 +1389,7 @@
               </label>
               <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; margin: 0;">
                 <input type="checkbox" id="share-edit-can-zip">
-                <span>Als ZIP laden</span>
+                <span>Als ZIP herunterladen</span>
               </label>
             </div>
             <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.8rem; padding-left: 0.25rem; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 0.25rem; padding-top: 0.4rem;">
@@ -2058,6 +2092,7 @@
   </div>
 
   <!-- Client-side Logic Script -->
-  <script src="/app.js?v=1.1.35"></script>
+  <script src="/mobile-ui.js?v=1.0.0"></script>
+  <script src="/app.js?v=1.1.36"></script>
 </body>
 </html>

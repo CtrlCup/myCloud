@@ -541,6 +541,8 @@
     </div>
   </div>
 
+  <script src="/mobile-ui.js?v=1.0.0"></script>
+
   <!-- Client-side Logic Script for public share page -->
   <script>
     // Config und State
@@ -959,6 +961,18 @@
         );
       }
       if (actions.length === 0) return;
+
+      // On touch/narrow viewports, use the bottom sheet instead of the small anchored card —
+      // the permission-filtered action list above is left exactly as built either way, only
+      // the rendering differs.
+      if (window.MobileUI && MobileUI.isCoarsePointer() && MobileUI.isNarrowViewport()) {
+        MobileUI.openBottomSheet({
+          title: selectedShareFileIds.length > 1 ? `${selectedShareFileIds.length} ausgewählt` : file.name,
+          items: actions.map(it => ({ label: it.label, icon: it.icon, action: it.onClick, dangerFlag: it.danger }))
+        });
+        return;
+      }
+
       openShareContextMenu(e.clientX, e.clientY, actions);
     }
 
@@ -1516,12 +1530,12 @@
           <div class="file-info">${formatBytes(file.size)}</div>
         `;
 
-        item.oncontextmenu = (e) => {
-          // Right-clicking outside the current selection replaces it with just this item (like
-          // the dashboard) so "Ausgewählte als ZIP" in the menu below acts on what the visitor
-          // actually right-clicked, not a stale earlier selection.
+        // Selects this item — shared by the desktop right-click handler and the touch
+        // long-press handler below (see MobileUI.attachTouchGestures further down), since both
+        // need to "prime" the selection before a context menu/action bar appears.
+        const primeShareSelectionFor = (extendSelection) => {
           if (!selectedShareFileIds.includes(file.id)) {
-            if (!e.ctrlKey && !e.metaKey) {
+            if (!extendSelection) {
               selectedShareFileIds = [file.id];
             } else {
               selectedShareFileIds.push(file.id);
@@ -1529,6 +1543,13 @@
             lastSelectedShareId = file.id;
             updateShareMultiSelectUI();
           }
+        };
+
+        item.oncontextmenu = (e) => {
+          // Right-clicking outside the current selection replaces it with just this item (like
+          // the dashboard) so "Ausgewählte als ZIP" in the menu below acts on what the visitor
+          // actually right-clicked, not a stale earlier selection.
+          primeShareSelectionFor(e.ctrlKey || e.metaKey);
           showFileContextMenu(e, file);
         };
 
@@ -1612,6 +1633,18 @@
             }
           }
         };
+
+        // Long-press starts multi-selection, matching the desktop right-click's "prime
+        // selection" behavior — no onTap is passed here, so this is purely additive on top of
+        // the native single-click-to-open/select behavior above, which already works correctly
+        // on touch and must not be intercepted or double-handled (this page's only other path
+        // to the per-item context menu is a desktop-only right-click; there is no "..." button
+        // here, unlike the dashboard, so long-press is the sole touch entry point).
+        if (window.MobileUI) {
+          MobileUI.attachTouchGestures(item, {
+            onLongPress: () => primeShareSelectionFor(false)
+          });
+        }
 
         // Middle-click opens the file directly in a new tab, same as most browser file
         // managers — auxclick fires for the middle button, button === 1 confirms it wasn't
@@ -4421,6 +4454,10 @@
     document.querySelectorAll('.modal-overlay').forEach(overlay => {
       modalObserver.observe(overlay, { attributes: true, attributeFilter: ['class', 'style'] });
     });
+
+    // Hand this observer to mobile-ui.js so bottom sheets (created after this querySelectorAll
+    // ran, see mobile-ui.js observeForScrollLock) also scroll-lock the body while open.
+    if (window.MobileUI) MobileUI.registerScrollLockObserver(modalObserver);
 
     checkModalsScrollLock();
   </script>

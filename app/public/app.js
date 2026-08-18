@@ -516,8 +516,9 @@ function updateNovaSidebarActive(viewName) {
     const activeTab = document.querySelector('#settings-nav .settings-nav-item.active');
     key = (activeTab && activeTab.getAttribute('data-section') === 'shares-settings') ? 'shares' : 'settings';
   }
-  const el = document.querySelector(`.nova-nav-item[data-view="${key}"]`);
-  if (el) el.classList.add('active');
+  // querySelectorAll, not querySelector: the mobile bottom tab bar duplicates the same
+  // data-view values as the sidebar (see #nova-mobile-tabbar), so both must get highlighted.
+  document.querySelectorAll(`.nova-nav-item[data-view="${key}"]`).forEach(el => el.classList.add('active'));
 }
 
 // Fills in the Nova theme's dashboard welcome header (hidden entirely under LiquidGlass).
@@ -917,19 +918,19 @@ function goToDashboardRoot(e) {
 
 document.getElementById('logo-btn').onclick = goToDashboardRoot;
 document.getElementById('nova-logo-btn').onclick = goToDashboardRoot;
-document.getElementById('nova-nav-files').onclick = goToDashboardRoot;
 
-document.getElementById('nova-nav-recent').onclick = (e) => {
+// Named (not inline) so the new mobile bottom tab bar (see #nova-mobile-tabbar below) can wire
+// its own, differently-id'd duplicate links to the exact same behavior instead of re-declaring
+// the logic a second time.
+function goToNovaRecent(e) {
   e.preventDefault();
   showRecents();
-};
-
-document.getElementById('nova-nav-trash').onclick = (e) => {
+}
+function goToNovaTrash(e) {
   e.preventDefault();
   openHashView('#trash', 'trash');
-};
-
-document.getElementById('nova-nav-shares').onclick = (e) => {
+}
+function goToNovaShares(e) {
   e.preventDefault();
   openHashView('#settings', 'settings');
   document.querySelectorAll('.settings-nav-item').forEach(i => i.classList.remove('active'));
@@ -941,7 +942,41 @@ document.getElementById('nova-nav-shares').onclick = (e) => {
     sharesSection.classList.add('active');
   }
   updateNovaSidebarActive('settings');
-};
+}
+
+document.getElementById('nova-nav-files').onclick = goToDashboardRoot;
+document.getElementById('nova-nav-recent').onclick = goToNovaRecent;
+document.getElementById('nova-nav-trash').onclick = goToNovaTrash;
+document.getElementById('nova-nav-shares').onclick = goToNovaShares;
+
+// Mobile-only bottom tab bar (Nova + LiquidGlass alike, see styles.css @media max-width:768px)
+// — duplicates the same 4 destinations as the Nova sidebar nav so there's always a reachable,
+// always-visible nav on narrow viewports instead of Nova's old permanent 76px icon rail.
+const novaTabFiles = document.getElementById('nova-tab-files');
+const novaTabShares = document.getElementById('nova-tab-shares');
+const novaTabRecent = document.getElementById('nova-tab-recent');
+const novaTabTrash = document.getElementById('nova-tab-trash');
+if (novaTabFiles) novaTabFiles.onclick = goToDashboardRoot;
+if (novaTabShares) novaTabShares.onclick = goToNovaShares;
+if (novaTabRecent) novaTabRecent.onclick = goToNovaRecent;
+if (novaTabTrash) novaTabTrash.onclick = goToNovaTrash;
+
+// Hamburger button (mobile-only, see styles.css) opens the Nova sidebar as an off-canvas drawer
+// instead of the permanent icon rail it collapses to on desktop-narrow widths.
+const novaHamburgerBtn = document.getElementById('nova-hamburger-btn');
+const novaSidebarEl = document.getElementById('nova-sidebar');
+if (novaHamburgerBtn && novaSidebarEl && window.MobileUI) {
+  MobileUI.initOffCanvasNav({
+    sidebarEl: novaSidebarEl,
+    triggerEl: novaHamburgerBtn,
+    openClass: 'nova-drawer-open',
+    // appHeader (the profile/logout card, relocated under Nova — see styles.css) is a DOM
+    // sibling of #nova-sidebar, not a child, but styles.css slides it in/out together with the
+    // sidebar as one visual drawer panel on mobile — so its "Einstellungen"/"Abmelden" links
+    // need the same close-drawer-on-tap behavior sidebarEl's own nav links get.
+    extraCloseEls: [appHeader]
+  });
+}
 
 // Nova sidebar minimize/expand toggle — icon-only rail with just the avatar (no name) at the
 // bottom, persisted per-browser so it survives reloads.
@@ -993,9 +1028,27 @@ async function loadFiles(folderId = null) {
     if (grid) grid.classList.remove('grid-exit');
     renderFiles(files);
     renderBreadcrumbs();
+    updateDashboardZipButton();
   } catch (err) {
     console.error(err);
     showToast('Fehler beim Laden des Datei-Explorers.');
+  }
+}
+
+// Persistent "download current folder as ZIP" toolbar button — mirrors share.html's
+// #download-all-zip-btn. Only meaningful for a real, currently-open folder (not the account
+// root, and not a pseudo-view like "Zuletzt hinzugefügt" that isn't backed by one folder id).
+function updateDashboardZipButton() {
+  const btn = document.getElementById('dashboard-zip-current-folder-btn');
+  if (!btn) return;
+  if (currentFolderId && !viewingRecents) {
+    btn.style.display = 'flex';
+    btn.onclick = () => {
+      window.location.href = `/api/files/download-zip/${currentFolderId}`;
+    };
+  } else {
+    btn.style.display = 'none';
+    btn.onclick = null;
   }
 }
 
@@ -1026,6 +1079,7 @@ async function loadRecentFiles() {
     if (container) {
       container.innerHTML = '<span class="breadcrumb-current">Zuletzt hinzugefügt</span>';
     }
+    updateDashboardZipButton();
   } catch (err) {
     console.error(err);
     showToast('Fehler beim Laden der zuletzt hinzugefügten Dateien.');
@@ -1839,22 +1893,17 @@ function renderFiles(files) {
     };
 
     // Double Click handler for Navigation / Opening file
-    item.ondblclick = (e) => {
-      if (clickTimeout) {
-        clearTimeout(clickTimeout);
-        clickTimeout = null;
-      }
-      if (e.target.closest('.btn-action-more') || e.target.closest('.file-actions')) {
-        return;
-      }
-
+    // Shared by the desktop double-click handler below and the touch single-tap handler
+    // (wired further down via MobileUI.attachTouchGestures) — opening a file/folder is
+    // identical either way, only the gesture that triggers it differs per input type.
+    const openItem = () => {
       if (file.is_folder) {
         clearSelection();
         breadcrumbsHistory.push({ id: file.id, name: file.name });
         loadFiles(file.id);
       } else {
         const ext = file.name.split('.').pop().toLowerCase();
-        
+
         // Define groupings
         const imageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'heic', 'heif', 'cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
         const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
@@ -1879,9 +1928,21 @@ function renderFiles(files) {
         } else if (officeExts.includes(ext)) {
           openOfficeEditor(file.id, file.name);
         }
-        // No in-app viewer for this type (archives, executables, ...): double-click no longer
-        // triggers an implicit download — use the "..." menu's explicit "Herunterladen" action.
+        // No in-app viewer for this type (archives, executables, ...): double-click/tap no
+        // longer triggers an implicit download — use the "..." menu's explicit "Herunterladen"
+        // action.
       }
+    };
+
+    item.ondblclick = (e) => {
+      if (clickTimeout) {
+        clearTimeout(clickTimeout);
+        clickTimeout = null;
+      }
+      if (e.target.closest('.btn-action-more') || e.target.closest('.file-actions')) {
+        return;
+      }
+      openItem();
     };
 
     // Drag & Drop (internal: move into folder)
@@ -1947,12 +2008,12 @@ function renderFiles(files) {
     }
 
     // Right Click context menu for item
-    item.oncontextmenu = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
+    // Selects this item (without clearing an existing multi-selection unless requested) —
+    // shared by the desktop right-click handler and the touch long-press handler below, since
+    // both need to "prime" the selection before a context menu/action bar appears.
+    const primeSelectionFor = (extendSelection) => {
       if (!selectedFileIds.includes(file.id)) {
-        if (!e.ctrlKey && !e.metaKey) {
+        if (!extendSelection) {
           selectedFileIds = [file.id];
         } else {
           selectedFileIds.push(file.id);
@@ -1960,7 +2021,12 @@ function renderFiles(files) {
         lastSelectedId = file.id;
         updateMultiSelectUI();
       }
+    };
 
+    item.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      primeSelectionFor(e.ctrlKey || e.metaKey);
       showFileContextMenu(file, e.clientX, e.clientY);
     };
 
@@ -1969,6 +2035,43 @@ function renderFiles(files) {
       e.stopPropagation();
       showFileContextMenu(file, e.clientX, e.clientY);
     };
+
+    // Touch gestures: single tap opens (matching standard mobile file-browser convention,
+    // instead of requiring the desktop's double-click), long-press starts multi-selection
+    // (matching the desktop's right-click "prime selection" behavior) without opening a menu —
+    // the now-visible #multi-actions-bar is the entry point for a subsequent bulk action.
+    // Purely additive: only fires for touch pointers, mouse/pen behavior above is untouched.
+    if (window.MobileUI) {
+      MobileUI.attachTouchGestures(item, {
+        // The "..." button already has its own tap target/handler — leave it alone entirely
+        // so its native click still fires instead of being suppressed by this gesture layer.
+        ignoreSelector: '.btn-action-more',
+        onTap: (el, e) => {
+          // Tapping the checkbox itself always toggles selection, matching its purpose as an
+          // explicit selection control — it never opens the item, even outside multi-select.
+          const isCheckboxTap = !!e.target.closest('.file-item-checkbox');
+          const isMultiSelectActive = selectedFileIds.length > 0;
+          if (isCheckboxTap || isMultiSelectActive) {
+            const idx = selectedFileIds.indexOf(file.id);
+            if (idx === -1) {
+              selectedFileIds.push(file.id);
+              lastSelectedId = file.id;
+            } else {
+              selectedFileIds.splice(idx, 1);
+              if (lastSelectedId === file.id) {
+                lastSelectedId = selectedFileIds[selectedFileIds.length - 1] || null;
+              }
+            }
+            updateMultiSelectUI();
+          } else {
+            openItem();
+          }
+        },
+        onLongPress: () => {
+          primeSelectionFor(false);
+        }
+      });
+    }
 
     grid.appendChild(item);
   });
@@ -2047,7 +2150,7 @@ function showFileContextMenu(file, x, y) {
       }
     });
     actions.push({
-      label: 'Ausgewählte als ZIP',
+      label: 'Ausgewählte als ZIP herunterladen',
       icon: 'file-archive',
       action: () => {
         window.location.href = `/api/files/download-zip-multiple?ids=${selectedFileIds.join(',')}`;
@@ -2083,7 +2186,7 @@ function showFileContextMenu(file, x, y) {
       });
     } else {
       actions.push({
-        label: 'Als ZIP laden',
+        label: 'Als ZIP herunterladen',
         icon: 'file-archive',
         action: () => window.location.href = `/api/files/download-zip/${file.id}`
       });
@@ -2126,11 +2229,27 @@ function showFileContextMenu(file, x, y) {
     });
   }
 
+  // On touch/narrow viewports, a small card anchored at the tap coordinates clips off-screen
+  // and has inconsistent tap targets — use the bottom sheet instead. The action list above is
+  // built identically either way; only the rendering differs.
+  if (window.MobileUI && MobileUI.isCoarsePointer() && MobileUI.isNarrowViewport()) {
+    MobileUI.openBottomSheet({
+      title: selectedFileIds.length > 1 ? `${selectedFileIds.length} ausgewählt` : file.name,
+      items: actions.map(act => ({
+        label: act.label,
+        icon: act.icon,
+        action: act.action,
+        dangerFlag: act.label.includes('löschen') || act.label === 'Löschen'
+      }))
+    });
+    return;
+  }
+
   actions.forEach(act => {
     const btn = document.createElement('button');
     btn.className = 'btn-menu-item';
     btn.innerHTML = `<i data-lucide="${act.icon}"></i> ${act.label}`;
-    
+
     if (act.label.includes('löschen') || act.label === 'Löschen') {
       btn.classList.add('delete-action');
     }
@@ -9377,6 +9496,23 @@ const plusDropdownMenu = document.getElementById('plus-dropdown-menu');
 if (plusMenuBtn && plusDropdownMenu) {
   plusMenuBtn.onclick = (e) => {
     e.stopPropagation();
+
+    // On touch/narrow viewports, an edge-anchored popover is cramped — use the bottom sheet
+    // instead, built from the exact same 4 actions the desktop popover already has (same
+    // order, "Neuer Ordner" first) so nothing needs to be duplicated, just re-rendered.
+    if (window.MobileUI && MobileUI.isCoarsePointer() && MobileUI.isNarrowViewport()) {
+      MobileUI.openBottomSheet({
+        title: 'Hinzufügen',
+        items: [
+          { label: 'Neuer Ordner', icon: 'folder-plus', action: () => createNewFolder() },
+          { label: 'Neue Datei', icon: 'file-plus', action: () => createNewEmptyFile() },
+          { label: 'Datei hochladen', icon: 'upload', action: () => document.getElementById('file-upload-input').click() },
+          { label: 'Ordner hochladen', icon: 'folder-up', action: () => document.getElementById('folder-upload-input').click() }
+        ]
+      });
+      return;
+    }
+
     const isVisible = plusDropdownMenu.style.display === 'block';
     plusDropdownMenu.style.display = isVisible ? 'none' : 'block';
   };
@@ -9417,6 +9553,11 @@ const modalObserver = new MutationObserver(() => {
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
   modalObserver.observe(overlay, { attributes: true, attributeFilter: ['class', 'style'] });
 });
+
+// Hand this observer to mobile-ui.js so bottom sheets and the off-canvas drawer backdrop
+// (both created after this querySelectorAll ran, see mobile-ui.js observeForScrollLock) also
+// scroll-lock the body while open, instead of a second scroll-lock implementation.
+if (window.MobileUI) MobileUI.registerScrollLockObserver(modalObserver);
 
 // Run initially
 checkModalsScrollLock();
