@@ -1034,7 +1034,7 @@
                 <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem;">
                   <div>
                     <strong style="display: block;">API-Key-Authentifizierung erlauben</strong>
-                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Erlaubt Anmeldung per persönlichem API-Key (<code>Authorization: Bearer mcld_...</code>) — genutzt von externen Apps und KI-Agenten. Ein API-Key hat exakt die Rechte seines Erstellers, bei Admins also auch Admin-Rechte. Deaktivieren blockiert alle Requests mit einem API-Key sofort instanzweit; bestehende Browser-Sitzungen (Cookie-Login) sind davon nicht betroffen. Bestehende Keys bleiben dabei erhalten und funktionieren nach erneutem Aktivieren wieder.</span>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Erlaubt Anmeldung per persönlichem API-Key (<code>Authorization: Bearer mcld_...</code>) für externe Apps und KI-Agenten — mit den Rechten des Erstellers, bei Admins also auch Admin-Rechten. Deaktivieren blockiert alle API-Keys sofort, ohne sie zu löschen; Cookie-Login bleibt unberührt. <a href="/api/docs" target="_blank" rel="noopener">API-Doku</a>.</span>
                   </div>
                   <label class="switch">
                     <input type="checkbox" id="admin-api-key-auth-enabled">
