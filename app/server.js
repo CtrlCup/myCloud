@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const swaggerUi = require('swagger-ui-express');
 const yaml = require('js-yaml');
 const compression = require('compression');
+const { jwtVerify, createRemoteJWKSet } = require('jose');
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -624,6 +625,101 @@ app.use(async (req, res, next) => {
     }
   } catch (err) {
     console.error('API key auth error:', err);
+  }
+  next();
+});
+
+// Forward-Auth SSO (Authentik behind a reverse proxy's forward_auth gate, e.g. Caddy)
+// Populates req.session.userId/.username/.role from a cryptographically verified JWT that the
+// proxy attaches to every request it lets through its Authentik check — never from the plaintext
+// X-Authentik-Username/X-Authentik-Email headers Authentik also sends alongside it, which any
+// misconfigured proxy hop or direct connection to this app (bypassing the proxy) could forge just
+// as easily. This exact class of blind-header-trust bug was CVE-2026-25748. Only claims out of a
+// signature-, issuer-, audience- and expiry-checked JWT are ever used as a source of identity.
+const forwardAuthJwksCache = new Map(); // JWKS URL -> createRemoteJWKSet() instance (keeps its own key cache/cooldown)
+function getForwardAuthJwks(jwksUrl) {
+  let jwks = forwardAuthJwksCache.get(jwksUrl);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(jwksUrl), {
+      cooldownDuration: 30_000, // don't re-fetch more than once per 30s even on a cache-miss kid
+      cacheMaxAge: 10 * 60_000, // treat cached public keys as fresh for 10 minutes
+    });
+    forwardAuthJwksCache.set(jwksUrl, jwks);
+  }
+  return jwks;
+}
+
+app.use(async (req, res, next) => {
+  if (req.session.userId) return next();
+  const jwt = req.headers['x-authentik-jwt'];
+  const jwksUrl = req.headers['x-authentik-meta-jwks'];
+  if (!jwt || !jwksUrl) return next();
+
+  try {
+    // Instance-wide switch + required issuer/audience (Admin-Einstellungen → Registrierung &
+    // SSO → Forward-Auth). Without issuer/audience configured, refuse to guess and fall through
+    // to the regular login rather than verifying against attacker-suppliable values.
+    if ((await getSetting('forward_auth_enabled')) !== 'true') return next();
+    const issuer = await getSetting('forward_auth_issuer');
+    const audience = await getSetting('forward_auth_audience');
+    if (!issuer || !audience) return next();
+
+    // The JWKS URL itself comes from a request header, so it cannot be trusted outright — only
+    // enough to fetch keys from the SAME host as the configured issuer, over HTTPS. Without this
+    // check, anyone able to reach this app directly (bypassing the proxy) could point
+    // X-Authentik-Meta-Jwks at a JWKS server of their own and sign their own "valid" JWT, trading
+    // one header-trust bug for another.
+    let jwksHost, issuerHost, jwksProtocol;
+    try {
+      const parsedJwksUrl = new URL(jwksUrl);
+      jwksHost = parsedJwksUrl.hostname;
+      jwksProtocol = parsedJwksUrl.protocol;
+      issuerHost = new URL(issuer).hostname;
+    } catch {
+      return next();
+    }
+    if (jwksProtocol !== 'https:' || !issuerHost || jwksHost !== issuerHost) {
+      console.warn(`Forward-Auth: JWKS-Host "${jwksHost}" weicht vom konfigurierten Issuer-Host "${issuerHost}" ab oder ist kein HTTPS — ignoriert.`);
+      return next();
+    }
+
+    const { payload } = await jwtVerify(jwt, getForwardAuthJwks(jwksUrl), {
+      issuer,
+      audience,
+      algorithms: ['RS256', 'ES256', 'PS256'], // asymmetric only — never accept an HMAC or "none" alg here
+    });
+
+    const ssoId = payload.sub;
+    const username = payload.preferred_username || payload.username || (payload.email ? payload.email.split('@')[0] : null);
+    if (!ssoId || !username) return next();
+
+    let userRes = await pool.query('SELECT * FROM users WHERE sso_id = $1 AND sso_provider = $2', [ssoId, 'authentik']);
+    if (userRes.rows.length === 0) {
+      const checkUsernameRes = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+      let finalUsername = username;
+      if (checkUsernameRes.rows.length > 0) {
+        finalUsername = `${username}_${crypto.randomBytes(3).toString('hex')}`;
+      }
+      const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
+      const role = parseInt(userCountRes.rows[0].count) === 0 ? 'admin' : 'user';
+      userRes = await pool.query(
+        'INSERT INTO users (username, role, sso_id, sso_provider) VALUES ($1, $2, $3, $4) RETURNING *',
+        [finalUsername, role, ssoId, 'authentik']
+      );
+    }
+
+    const user = userRes.rows[0];
+    if (user.is_active === false) return next(); // show the regular login rather than an opaque error
+
+    await regenerateSession(req);
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.role = user.role;
+    pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]).catch(() => {});
+  } catch (err) {
+    // Invalid signature, expired token, wrong issuer/audience, unreachable JWKS endpoint, etc.
+    // Never fall back to trusting the plaintext headers — just show the regular login.
+    console.warn('Forward-Auth JWT verification failed:', err.message);
   }
   next();
 });
@@ -5812,6 +5908,22 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
         : (await getSetting('sso_only')) === 'true';
       if (ssoOnly) {
         return res.status(400).json({ error: 'SSO kann nicht deaktiviert werden, solange "Nur SSO-Anmeldung" aktiv ist. Bitte diese Option zuerst deaktivieren.' });
+      }
+    }
+
+    // Forward-Auth verifiziert eingehende JWTs gegen einen konfigurierten Aussteller/Audience —
+    // ohne beides kann die Middleware nicht sicher prüfen, gegen wen sie überhaupt validiert.
+    // Nie aktivierbar lassen, ohne dass beide Werte gesetzt sind (weder hier noch bereits in der DB).
+    if ('forward_auth_enabled' in configs && configs.forward_auth_enabled === 'true') {
+      const issuer = 'forward_auth_issuer' in configs ? configs.forward_auth_issuer : await getSetting('forward_auth_issuer');
+      const audience = 'forward_auth_audience' in configs ? configs.forward_auth_audience : await getSetting('forward_auth_audience');
+      if (!issuer || !audience) {
+        return res.status(400).json({ error: 'Aussteller (iss) und Audience/Client-ID müssen gesetzt sein, bevor Forward-Auth aktiviert werden kann.' });
+      }
+      try {
+        if (new URL(issuer).protocol !== 'https:') throw new Error();
+      } catch {
+        return res.status(400).json({ error: 'Der Aussteller (iss) muss eine gültige HTTPS-URL sein.' });
       }
     }
 

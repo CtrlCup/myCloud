@@ -1043,6 +1043,31 @@
                 </div>
               </div>
 
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>Forward-Auth (Authentik hinter Reverse-Proxy)</h3>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; margin-bottom: 1.5rem;">
+                  <div>
+                    <strong style="display: block;">Automatischer Login per Forward-Auth-Header</strong>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Für Requests, die bereits ein Reverse-Proxy (z. B. Caddy) über Authentiks Forward-Auth-Gate durchgelassen hat. Loggt nur ein, wenn das mitgeschickte JWT signaturgeprüft ist (Aussteller, Audience, Ablauf) — den Klartext-Headern wird nicht vertraut. Details siehe <code>docs/Forward-Auth-Authentik.md</code> im Repository.</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="admin-forward-auth-enabled">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                <div class="form-group">
+                  <label for="admin-forward-auth-issuer">Erwarteter Aussteller (iss)</label>
+                  <input type="url" id="admin-forward-auth-issuer" class="form-control" placeholder="https://authentik.company.local/application/o/mycloud/">
+                </div>
+                <div class="form-group">
+                  <label for="admin-forward-auth-audience">Erwartete Audience / Client-ID (aud)</label>
+                  <input type="text" id="admin-forward-auth-audience" class="form-control" placeholder="z. B. die Client-ID des Proxy-Providers/Outposts">
+                </div>
+                <div class="form-group" style="background: rgba(255,159,10,0.1); border: 1px solid rgba(255,159,10,0.3); border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 0;">
+                  <span style="font-size: 0.85rem; color: #ff9f0a;">⚠ Nur aktivieren, wenn diese myCloud-Instanz <strong>ausschließlich</strong> über den Reverse-Proxy erreichbar ist (kein direkt auf den Host gemappter Port, siehe <code>docker-compose.yml</code> — dort <code>expose</code> statt <code>ports</code> verwenden). Sonst könnte jeder mit direktem Zugriff auf den App-Port die Header selbst setzen.</span>
+                </div>
+              </div>
+
               <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
                 Einstellungen speichern
               </button>

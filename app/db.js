@@ -259,7 +259,10 @@ async function initDb() {
       { key: 'dashboard_bg_image', value: '' },
       { key: 'login_bg_image', value: '' },
       { key: 'default_theme', value: 'nova' },
-      { key: 'api_key_auth_enabled', value: 'true' }
+      { key: 'api_key_auth_enabled', value: 'true' },
+      { key: 'forward_auth_enabled', value: 'false' },
+      { key: 'forward_auth_issuer', value: '' },
+      { key: 'forward_auth_audience', value: '' }
     ];
 
     // If SMTP host is configured via env, set email_smtp_tested to true automatically

@@ -8,7 +8,7 @@ info:
     dieselben Endpunkte an, es gibt keine separate "App-API".
 
 
-    **Authentifizierung** — zwei gleichwertige Methoden, die parallel funktionieren:
+    **Authentifizierung** — drei gleichwertige Methoden, die parallel funktionieren:
 
     1. **API-Key (empfohlen für App-/Drittanbieter-Clients, auch KI-Agenten):** Unter
        `POST /api/settings/api-keys` einen persönlichen Key erzeugen (Format `mcld_<48 hex Zeichen>`,
@@ -23,6 +23,12 @@ info:
     2. **Session-Cookie (wie im Browser):** `POST /api/auth/login` setzt ein Session-Cookie
        (`connect.sid`), das bei jedem folgenden Request automatisch mitgeschickt wird. Von der
        API-Key-Abschaltung unberührt.
+    3. **Forward-Auth (Authentik hinter einem Reverse-Proxy wie Caddy):** kein API-Endpunkt,
+       sondern eine Server-Middleware, die bei jedem Request ein von Authentik im Header
+       `X-Authentik-Jwt` mitgeschicktes JWT gegen den in `X-Authentik-Meta-Jwks` genannten
+       Endpoint verifiziert (Signatur, Ablauf, Aussteller, Audience) und daraus automatisch eine
+       Session erstellt. Standardmäßig aus; nur relevant, wenn kein Cookie/Key vorliegt. Details
+       und Sicherheitsmodell: [`docs/Forward-Auth-Authentik.md`](../docs/Forward-Auth-Authentik.md).
 
     Endpunkte ohne `security`-Angabe sind öffentlich (kein Login nötig), u.a. alle
     `/api/public/...`-Routen und der Auth-Flow selbst (`/api/auth/login`, `/api/auth/register`, ...).

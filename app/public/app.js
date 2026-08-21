@@ -5089,6 +5089,9 @@ async function loadAdminSettings() {
       document.getElementById('admin-sso-client-secret').value = conf.sso_client_secret_configured ? '__placeholder__' : '';
       document.getElementById('admin-sso-redirect').value = `${window.location.origin}/auth/sso/callback`;
       document.getElementById('admin-api-key-auth-enabled').checked = conf.api_key_auth_enabled !== 'false';
+      document.getElementById('admin-forward-auth-enabled').checked = conf.forward_auth_enabled === 'true';
+      document.getElementById('admin-forward-auth-issuer').value = conf.forward_auth_issuer || '';
+      document.getElementById('admin-forward-auth-audience').value = conf.forward_auth_audience || '';
 
       // SMTP befüllen
       document.getElementById('admin-smtp-host').value = conf.email_smtp_host || '';
@@ -5272,7 +5275,10 @@ document.getElementById('admin-auth-form').onsubmit = async (e) => {
     sso_issuer_url: document.getElementById('admin-sso-issuer').value.trim(),
     sso_client_id: document.getElementById('admin-sso-client-id').value.trim(),
     sso_client_secret: secretInput === '__placeholder__' ? '__placeholder__' : secretInput,
-    api_key_auth_enabled: document.getElementById('admin-api-key-auth-enabled').checked ? 'true' : 'false'
+    api_key_auth_enabled: document.getElementById('admin-api-key-auth-enabled').checked ? 'true' : 'false',
+    forward_auth_enabled: document.getElementById('admin-forward-auth-enabled').checked ? 'true' : 'false',
+    forward_auth_issuer: document.getElementById('admin-forward-auth-issuer').value.trim(),
+    forward_auth_audience: document.getElementById('admin-forward-auth-audience').value.trim()
   };
   await saveAdminConfig(payload);
 };
