@@ -1439,6 +1439,32 @@ app.post('/api/auth/passkey/login-verify', async (req, res) => {
    SSO / OIDC (AUTHENTIK) ROUTES
    ========================================================================== */
 
+// Resolves the three endpoints (authorization/token/userinfo) via OIDC discovery
+// (issuer + "/.well-known/openid-configuration") instead of hardcoding a URL layout.
+// Authentik and Keycloak (and every other spec-compliant provider) place these endpoints
+// under different paths — e.g. Authentik uses "/application/o/authorize/" while Keycloak
+// uses "/protocol/openid-connect/auth" under a realm — so guessing one provider's layout
+// silently breaks every other provider. Cached per issuer since it rarely changes.
+const oidcDiscoveryCache = new Map(); // issuer URL -> { doc, fetchedAt }
+const OIDC_DISCOVERY_CACHE_MS = 10 * 60 * 1000;
+async function getOidcDiscovery(issuerUrl) {
+  const cached = oidcDiscoveryCache.get(issuerUrl);
+  if (cached && Date.now() - cached.fetchedAt < OIDC_DISCOVERY_CACHE_MS) {
+    return cached.doc;
+  }
+  const discoveryUrl = `${issuerUrl.replace(/\/$/, '')}/.well-known/openid-configuration`;
+  const res = await fetch(discoveryUrl);
+  if (!res.ok) {
+    throw new Error(`OIDC-Discovery-Dokument nicht erreichbar unter ${discoveryUrl} (HTTP ${res.status}).`);
+  }
+  const doc = await res.json();
+  if (!doc.authorization_endpoint || !doc.token_endpoint || !doc.userinfo_endpoint) {
+    throw new Error(`OIDC-Discovery-Dokument unter ${discoveryUrl} enthält nicht alle erforderlichen Endpunkte.`);
+  }
+  oidcDiscoveryCache.set(issuerUrl, { doc, fetchedAt: Date.now() });
+  return doc;
+}
+
 // Redirect to SSO Provider
 app.get('/auth/sso', async (req, res) => {
   try {
@@ -1449,17 +1475,28 @@ app.get('/auth/sso', async (req, res) => {
 
     const clientId = await getSetting('sso_client_id');
     const issuerUrl = await getSetting('sso_issuer_url');
-    const redirectUri = await getSetting('sso_redirect_uri');
+    // Derived from the request's own Host header (like getExpectedOrigin() is used elsewhere for
+    // share links/WebAuthn) rather than a stored setting — sso_redirect_uri was never actually
+    // written anywhere (the admin UI only ever displayed it read-only), so getSetting() for it
+    // always returned null and this route 500'd unconditionally before ever reaching Authentik.
+    const redirectUri = `${getExpectedOrigin(req)}/auth/sso/callback`;
 
-    if (!clientId || !issuerUrl || !redirectUri) {
+    if (!clientId || !issuerUrl) {
       return res.status(500).send('SSO configuration is incomplete.');
+    }
+
+    let discovery;
+    try {
+      discovery = await getOidcDiscovery(issuerUrl);
+    } catch (err) {
+      console.error('OIDC discovery error:', err.message);
+      return res.status(500).send('SSO-Konfiguration fehlerhaft: Das OIDC-Discovery-Dokument des Ausstellers konnte nicht geladen werden. Bitte die Aussteller-URL in den Admin-Einstellungen prüfen.');
     }
 
     const state = crypto.randomBytes(16).toString('hex');
     req.session.ssoState = state;
 
-    // Build Auth URL (Assuming standard OIDC endpoint /protocol/openid-connect/auth)
-    const authUrl = `${issuerUrl.replace(/\/$/, '')}/protocol/openid-connect/auth?` +
+    const authUrl = `${discovery.authorization_endpoint}?` +
       `client_id=${encodeURIComponent(clientId)}&` +
       `redirect_uri=${encodeURIComponent(redirectUri)}&` +
       `response_type=code&` +
@@ -1488,11 +1525,12 @@ app.get('/auth/sso/callback', async (req, res) => {
     const clientId = await getSetting('sso_client_id');
     const clientSecret = await getSetting('sso_client_secret');
     const issuerUrl = await getSetting('sso_issuer_url');
-    const redirectUri = await getSetting('sso_redirect_uri');
+    // Must be byte-identical to the redirect_uri /auth/sso sent Authentik with, which is also
+    // derived from the request host rather than a (never populated) stored setting — see there.
+    const redirectUri = `${getExpectedOrigin(req)}/auth/sso/callback`;
 
-    // Token Endpoint
-    const tokenUrl = `${issuerUrl.replace(/\/$/, '')}/protocol/openid-connect/token`;
-    
+    const discovery = await getOidcDiscovery(issuerUrl);
+
     const params = new URLSearchParams();
     params.append('client_id', clientId);
     params.append('client_secret', clientSecret);
@@ -1500,7 +1538,7 @@ app.get('/auth/sso/callback', async (req, res) => {
     params.append('redirect_uri', redirectUri);
     params.append('grant_type', 'authorization_code');
 
-    const tokenResponse = await fetch(tokenUrl, {
+    const tokenResponse = await fetch(discovery.token_endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: params,
@@ -1511,10 +1549,8 @@ app.get('/auth/sso/callback', async (req, res) => {
     }
 
     const tokenData = await tokenResponse.json();
-    
-    // UserInfo Endpoint
-    const userInfoUrl = `${issuerUrl.replace(/\/$/, '')}/protocol/openid-connect/userinfo`;
-    const userResponse = await fetch(userInfoUrl, {
+
+    const userResponse = await fetch(discovery.userinfo_endpoint, {
       headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
     });
 

@@ -118,7 +118,11 @@ Alle Variablen sind optional und lassen sich alternativ bequem über die **Admin
 | `SSO_ENABLED` | SSO-Login aktivieren (`true` / `false`) |
 | `SSO_CLIENT_ID` / `SSO_CLIENT_SECRET` | Zugangsdaten deines OIDC-Providers (z. B. Authentik) |
 | `SSO_ISSUER_URL` | Issuer-URL des Providers |
-| `SSO_REDIRECT_URI` | Callback-URL (Standard: `http://localhost:3030/auth/sso/callback`) |
+
+Die Callback-URL (`.../auth/sso/callback`) ist nicht konfigurierbar — sie wird aus der Domain
+abgeleitet, unter der der Login-Flow aufgerufen wurde (identisch zur schreibgeschützten Anzeige
+unter „Redirect URI (Callback)“ in den Admin-Einstellungen). Genau dieser Wert muss 1:1 als
+Redirect-URI im OIDC-Provider (z. B. Authentik) hinterlegt sein.
 
 </details>
 
