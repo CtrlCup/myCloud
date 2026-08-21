@@ -60,28 +60,79 @@ aktivieren, damit die App nur noch innerhalb des Docker-Netzwerks (`mycloud_netw
 ist und Caddy als einziger Weg von außen bleibt (siehe [`Caddyfile.example`](../Caddyfile.example)
 für das Netzwerk-Setup zwischen Caddy und `app:3000`).
 
-## Caddy-Konfiguration (Beispiel)
+## Öffentliche Freigabe-Links von der Authentik-Pflicht ausnehmen
 
-Beispielhafter Ausschnitt für eine Domain hinter Authentiks Forward-Auth (Proxy-Provider/Outpost).
-Exakte Pfade/Direktiven können je nach Authentik- und Caddy-Version abweichen — maßgeblich ist
-Authentiks eigene Dokumentation zur Caddy-Forward-Auth-Integration:
+Ohne Gegenmaßnahme würde Authentiks Forward-Auth-Gate **jeden** Request auf der Domain abfangen —
+auch `/s/<slug>`. Damit müsste sich jeder Empfänger eines Freigabe-Links erst bei Authentik
+anmelden, nur um eine öffentlich geteilte Datei zu sehen. Das widerspricht dem ganzen Zweck von
+Freigabe-Links.
+
+Damit sich das mit **möglichst wenigen, klar benannten Ausnahmeregeln** lösen lässt (statt einer
+langen, mit der Zeit unvollständigen Liste einzelner Endpunkte), liegt serverseitig konsequent
+**alles, was ein öffentlicher Freigabe-Link jemals braucht** unter genau zwei Präfixen:
+
+- **`/s/*`** — die Freigabe-Seite selbst (`share.html`).
+- **`/api/public/*`** — jeder REST-Aufruf, den diese Seite macht: Freigabe-Metadaten, Auflisten,
+  Hoch-/Herunterladen, Thumbnails, ZIP-Export, EuroOffice-Konfiguration — **und** der
+  Echtzeit-Kollaborations-WebSocket unter `/api/public/collab` (verlangt zwingend einen `slug` und
+  prüft ausschließlich die Freigabe-Berechtigung, nie eine Session — dieser Alias kann also
+  bedenkenlos in dieselbe Ausnahmeregel wie der Rest fallen).
+
+Hinzu kommen ein paar wenige **statische Dateien ohne jeden Nutzerbezug** (reiner Client-Code/CSS,
+identisch für jeden Besucher, ob angemeldet oder nicht): `/styles.css`, `/mobile-ui.js`,
+`/pdfjs/*`, `/pdf-lib/*`. Diese lassen sich gefahrlos in dieselbe Ausnahme aufnehmen.
+
+### Variante A — in Authentik selbst (Proxy-Provider → „Unauthenticated Paths“)
+
+Beim Proxy-Provider des Outposts gibt es ein Feld für regex-basierte Pfade, die **ohne** Login
+durchgelassen werden (die App bekommt dann schlicht keinen `X-Authentik-Jwt`-Header, wie bei jedem
+anderen Request ohne gültige Authentik-Session auch):
+
+```
+^/s/.*$
+^/api/public/.*$
+^/(styles\.css|mobile-ui\.js)$
+^/(pdfjs|pdf-lib)/.*$
+```
+
+### Variante B — in Caddy, per Matcher
+
+Alternativ (oder zusätzlich) lässt sich derselbe Ausschluss direkt in Caddy abbilden, indem die
+`forward_auth`-Direktive nur noch für alles AUSSER diesen Pfaden greift:
 
 ```
 mycloud.company.local {
-	forward_auth outpost.company.local:9000 {
-		uri /outpost.goauthentik.io/auth/caddy
-		copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid X-Authentik-Jwt X-Authentik-Meta-Jwks X-Authentik-Meta-Outpost X-Authentik-Meta-Provider X-Authentik-Meta-App X-Authentik-Meta-Version
-
-		# Nicht angemeldete Besucher zum Authentik-Login schicken statt einen nackten 401 zu zeigen
-		handle_response {
-			@error status 401
-			redir @error https://outpost.company.local/outpost.goauthentik.io/start?rd={uri} 302
-		}
+	@public_share {
+		path /s/* /api/public/* /styles.css /mobile-ui.js /pdfjs/* /pdf-lib/*
 	}
 
-	reverse_proxy app:3000
+	# Freigabe-Links (Seite, API, Kollaborations-Socket) und ihre statischen Assets
+	# laufen komplett ohne Authentik-Gate.
+	handle @public_share {
+		reverse_proxy app:3000
+	}
+
+	handle {
+		forward_auth outpost.company.local:9000 {
+			uri /outpost.goauthentik.io/auth/caddy
+			copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email X-Authentik-Name X-Authentik-Uid X-Authentik-Jwt X-Authentik-Meta-Jwks X-Authentik-Meta-Outpost X-Authentik-Meta-Provider X-Authentik-Meta-App X-Authentik-Meta-Version
+
+			# Nicht angemeldete Besucher zum Authentik-Login schicken statt einen nackten 401 zu zeigen
+			handle_response {
+				@error status 401
+				redir @error https://outpost.company.local/outpost.goauthentik.io/start?rd={uri} 302
+			}
+		}
+
+		reverse_proxy app:3000
+	}
 }
 ```
+
+Exakte Pfade/Direktiven können je nach Authentik- und Caddy-Version abweichen — maßgeblich ist
+Authentiks eigene Dokumentation zur Caddy-Forward-Auth-Integration. Wird ein neuer öffentlicher
+Endpunkt ergänzt, landet er per Konvention automatisch unter `/api/public/...` und ist damit von
+dieser Ausnahmeregel bereits mit abgedeckt, ohne dass Caddy/Authentik angepasst werden müssten.
 
 ## Admin-Einstellungen
 
@@ -113,8 +164,10 @@ den regulären OIDC-Provider identisch konfiguriert ist (z. B. beide auf "Based 
 oder beide auf "Based on the User's ID") — unterscheiden sich die Subject Modes, erzeugt Forward-
 Auth ein zweites, separates myCloud-Konto für denselben Menschen.
 
-## Öffentliche Freigabe-Links (`/s/...`)
+## Öffentliche Freigabe-Links (`/s/...`) und diese Middleware
 
-Bleiben vollständig unangetastet — diese laufen bewusst ohne Authentik/Login und werden von dieser
-Middleware nicht berührt (sie greift ohnehin nur, solange noch kein `req.session.userId` gesetzt
-ist, und Freigabe-Links prüfen ihre eigene Berechtigung unabhängig von Benutzer-Sessions).
+Von dieser Middleware selbst ohnehin unberührt — sie greift ausschließlich, solange noch kein
+`req.session.userId` gesetzt ist, und Freigabe-Links prüfen ihre eigene Berechtigung unabhängig von
+Benutzer-Sessions. Damit sie aber am vorgeschalteten Authentik-Gate überhaupt ankommen, ohne dort
+zuerst einen Login zu verlangen, siehe den Abschnitt „Öffentliche Freigabe-Links von der
+Authentik-Pflicht ausnehmen“ oben.

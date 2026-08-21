@@ -2841,7 +2841,10 @@
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsHost = window.location.host;
       
-      let wsUrl = `${wsProto}//${wsHost}/api/collab?fileId=${fileId}&username=${encodeURIComponent(username)}&userId=${userId}`;
+      // Under /api/public/ (not /api/collab, used by the authenticated dashboard) so that a
+      // reverse-proxy auth gate (e.g. Authentik forward_auth) can exclude every public-share
+      // requirement — page, REST calls and this socket — with a single "/api/public/*" rule.
+      let wsUrl = `${wsProto}//${wsHost}/api/public/collab?fileId=${fileId}&username=${encodeURIComponent(username)}&userId=${userId}`;
       if (isGuest) wsUrl += `&guest=1`;
       if (isPublic) {
         wsUrl += `&slug=${slug}`;

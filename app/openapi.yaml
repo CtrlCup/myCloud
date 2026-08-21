@@ -36,12 +36,17 @@ info:
 
     **Echtzeit-Kollaboration** im Code-/Markdown-Editor läuft über einen separaten WebSocket unter
     `/api/collab?fileId=<id>&userId=<id>&username=<name>[&guest=1][&slug=<shareSlug>]` (nicht Teil
-    dieser REST-Spezifikation, da OpenAPI keine WebSockets beschreibt). Der Server sendet/empfängt
-    JSON-Nachrichten mit `type`: `init` (Willkommensnachricht inkl. zugewiesener Farbe/Name),
-    `user_joined`, `user_left`, `edit` (Textänderungen), `cursor` (Cursor-/Selektionsposition).
-    Anonyme Gäste (`guest=1`, z.B. Betrachter eines öffentlichen Freigabe-Links) bekommen vom
-    Server automatisch einen zufälligen deutschen Tiernamen und eine Farbe aus einer festen Palette
-    zugewiesen, um Kollisionen mit bereits verbundenen Nutzern zu vermeiden.
+    dieser REST-Spezifikation, da OpenAPI keine WebSockets beschreibt). Für öffentliche Freigabe-
+    Links liegt derselbe Socket zusätzlich unter `/api/public/collab?...&slug=<shareSlug>` — dort
+    ist `slug` Pflicht und die Zugriffsprüfung erfolgt ausschließlich über den Freigabe-Link (nie
+    über eine Session), damit sich der gesamte öffentliche Freigabe-Bereich (Seite, REST-Aufrufe
+    und dieser Socket) mit einer einzigen `/api/public/*`-Ausnahmeregel vor einem Reverse-Proxy
+    (z.B. Authentik-Forward-Auth) freigeben lässt. Der Server sendet/empfängt JSON-Nachrichten mit
+    `type`: `init` (Willkommensnachricht inkl. zugewiesener Farbe/Name), `user_joined`,
+    `user_left`, `edit` (Textänderungen), `cursor` (Cursor-/Selektionsposition). Anonyme Gäste
+    (`guest=1`, z.B. Betrachter eines öffentlichen Freigabe-Links) bekommen vom Server automatisch
+    einen zufälligen deutschen Tiernamen und eine Farbe aus einer festen Palette zugewiesen, um
+    Kollisionen mit bereits verbundenen Nutzern zu vermeiden.
 
 
     Für die kollaborative Bearbeitung von Office-Dokumenten (docx/xlsx/pptx) wird kein eigenes

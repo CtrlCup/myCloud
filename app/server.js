@@ -6693,7 +6693,14 @@ function initWebSocket(server) {
       socket.destroy();
       return;
     }
-    if (url.pathname !== '/api/collab') {
+    // /api/public/collab is the exact same collaboration socket, reachable under the same
+    // path prefix as every other public-share endpoint (/api/public/...) — so a reverse-proxy
+    // auth gate (e.g. Authentik forward_auth) can exempt the entire public-share feature with
+    // one "/api/public/*" rule instead of also having to special-case this websocket. Requests
+    // to it are restricted to share access below; use plain /api/collab from the authenticated
+    // dashboard.
+    const isPublicAlias = url.pathname === '/api/public/collab';
+    if (url.pathname !== '/api/collab' && !isPublicAlias) {
       socket.destroy();
       return;
     }
@@ -6707,7 +6714,7 @@ function initWebSocket(server) {
         const fileId = parseInt(url.searchParams.get('fileId'));
         const slug = url.searchParams.get('slug');
 
-        if (!fileId) {
+        if (!fileId || (isPublicAlias && !slug)) {
           socket.destroy();
           return;
         }
@@ -6719,7 +6726,10 @@ function initWebSocket(server) {
         // the same way the REST endpoints do, via session ownership or a public share.
         let access = { canRead: false, canWrite: false };
 
-        if (request.session.userId) {
+        // The /api/public/ alias only ever grants share-based access, even if a session cookie
+        // happens to be present — it must stay exclusively "public, share-scoped" for the proxy
+        // exclusion rule above to remain a safe blanket exemption.
+        if (!isPublicAlias && request.session.userId) {
           const isOwner = await verifyFileOwner(fileId, request.session.userId);
           if (isOwner) access = { canRead: true, canWrite: true };
         }
