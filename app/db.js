@@ -258,7 +258,8 @@ async function initDb() {
       { key: 'custom_color_accent', value: '#00d2ff' },
       { key: 'dashboard_bg_image', value: '' },
       { key: 'login_bg_image', value: '' },
-      { key: 'default_theme', value: 'nova' }
+      { key: 'default_theme', value: 'nova' },
+      { key: 'api_key_auth_enabled', value: 'true' }
     ];
 
     // If SMTP host is configured via env, set email_smtp_tested to true automatically

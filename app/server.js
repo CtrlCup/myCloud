@@ -603,6 +603,11 @@ app.use(async (req, res, next) => {
   if (!token.startsWith('mcld_')) return next();
 
   try {
+    // Instance-wide kill switch (Admin-Einstellungen → Registrierung & SSO → API-Zugriff).
+    // Checked per-request rather than cached, so disabling it takes effect immediately for
+    // every subsequent request without needing a restart.
+    if ((await getSetting('api_key_auth_enabled')) === 'false') return next();
+
     const keyHash = crypto.createHash('sha256').update(token).digest('hex');
     const result = await pool.query(
       `SELECT ak.id AS key_id, u.id AS user_id, u.username, u.role

@@ -1028,6 +1028,21 @@
                   <input type="text" id="admin-sso-redirect" class="form-control" readonly>
                 </div>
               </div>
+
+              <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <h3>API-Zugriff (Apps &amp; KI-Agenten)</h3>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem;">
+                  <div>
+                    <strong style="display: block;">API-Key-Authentifizierung erlauben</strong>
+                    <span style="font-size: 0.85rem; color: var(--color-text-muted);">Erlaubt Anmeldung per persönlichem API-Key (<code>Authorization: Bearer mcld_...</code>) — genutzt von externen Apps und KI-Agenten. Ein API-Key hat exakt die Rechte seines Erstellers, bei Admins also auch Admin-Rechte. Deaktivieren blockiert alle Requests mit einem API-Key sofort instanzweit; bestehende Browser-Sitzungen (Cookie-Login) sind davon nicht betroffen. Bestehende Keys bleiben dabei erhalten und funktionieren nach erneutem Aktivieren wieder.</span>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="admin-api-key-auth-enabled">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
+
               <button type="submit" class="btn btn-primary" style="width: 100%; justify-content: center;">
                 Einstellungen speichern
               </button>

@@ -5088,6 +5088,7 @@ async function loadAdminSettings() {
       document.getElementById('admin-sso-client-id').value = conf.sso_client_id || '';
       document.getElementById('admin-sso-client-secret').value = conf.sso_client_secret_configured ? '__placeholder__' : '';
       document.getElementById('admin-sso-redirect').value = `${window.location.origin}/auth/sso/callback`;
+      document.getElementById('admin-api-key-auth-enabled').checked = conf.api_key_auth_enabled !== 'false';
 
       // SMTP befüllen
       document.getElementById('admin-smtp-host').value = conf.email_smtp_host || '';
@@ -5270,7 +5271,8 @@ document.getElementById('admin-auth-form').onsubmit = async (e) => {
     sso_button_text: document.getElementById('admin-sso-button-text').value.trim(),
     sso_issuer_url: document.getElementById('admin-sso-issuer').value.trim(),
     sso_client_id: document.getElementById('admin-sso-client-id').value.trim(),
-    sso_client_secret: secretInput === '__placeholder__' ? '__placeholder__' : secretInput
+    sso_client_secret: secretInput === '__placeholder__' ? '__placeholder__' : secretInput,
+    api_key_auth_enabled: document.getElementById('admin-api-key-auth-enabled').checked ? 'true' : 'false'
   };
   await saveAdminConfig(payload);
 };

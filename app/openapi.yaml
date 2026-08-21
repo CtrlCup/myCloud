@@ -10,12 +10,19 @@ info:
 
     **Authentifizierung** — zwei gleichwertige Methoden, die parallel funktionieren:
 
-    1. **API-Key (empfohlen für App-/Drittanbieter-Clients):** Unter `POST /api/settings/api-keys`
-       einen persönlichen Key erzeugen (Format `mcld_<64 hex Zeichen>`, wird nur bei der Erstellung
-       einmal im Klartext zurückgegeben) und als `Authorization: Bearer mcld_...`-Header mitschicken.
-       Keys lassen sich einzeln pro Gerät/App widerrufen (`DELETE /api/settings/api-keys/:id`).
+    1. **API-Key (empfohlen für App-/Drittanbieter-Clients, auch KI-Agenten):** Unter
+       `POST /api/settings/api-keys` einen persönlichen Key erzeugen (Format `mcld_<48 hex Zeichen>`,
+       wird nur bei der Erstellung einmal im Klartext zurückgegeben) und als
+       `Authorization: Bearer mcld_...`-Header mitschicken. Ein Key hat exakt die Rechte seines
+       Erstellers — bei einem Admin also auch Zugriff auf alle `Admin`-Endpunkte. Keys lassen sich
+       einzeln pro Gerät/App widerrufen (`DELETE /api/settings/api-keys/:id`). Ein Admin kann die
+       API-Key-Authentifizierung instanzweit deaktivieren (`api_key_auth_enabled` in
+       `POST /api/settings/admin/config`, Admin-Oberfläche unter „Registrierung & SSO“) — ist sie
+       aus, werden alle Requests mit einem API-Key wie unauthentifiziert behandelt, unabhängig von
+       den einzelnen Keys.
     2. **Session-Cookie (wie im Browser):** `POST /api/auth/login` setzt ein Session-Cookie
-       (`connect.sid`), das bei jedem folgenden Request automatisch mitgeschickt wird.
+       (`connect.sid`), das bei jedem folgenden Request automatisch mitgeschickt wird. Von der
+       API-Key-Abschaltung unberührt.
 
     Endpunkte ohne `security`-Angabe sind öffentlich (kein Login nötig), u.a. alle
     `/api/public/...`-Routen und der Auth-Flow selbst (`/api/auth/login`, `/api/auth/register`, ...).

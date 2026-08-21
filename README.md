@@ -21,6 +21,7 @@ myCloud ist ein Node/Express-Monolith mit schlankem Vanilla-JS-Frontend — kein
 - [Architektur](#architektur)
 - [Schnellstart](#schnellstart)
 - [Konfiguration](#konfiguration-umgebungsvariablen)
+- [API & KI-Zugriff](#api--ki-zugriff)
 - [Versionierung](#versionierung)
 - [Screenshots](#screenshots)
 - [Tech-Stack](#tech-stack)
@@ -45,6 +46,7 @@ myCloud ist ein Node/Express-Monolith mit schlankem Vanilla-JS-Frontend — kein
 - **SEO & Sichtbarkeit**: Titel, Beschreibung und Open-Graph-Vorschaubild frei einstellbar, plus Schalter für Suchmaschinen-Indexierung (Standard: privat)
 - **Versionserkennung**: Software, `.env` und `docker-compose.yml` werden unabhängig versioniert und auf Aktualität geprüft — inklusive manuellem GitHub-Update-Check
 - SMTP-Konfiguration, Benutzer- und Rollenverwaltung, Passwort-Reset per E-Mail
+- **API-Zugriff** per persönlichem API-Key lässt sich instanzweit ein-/ausschalten (siehe [API & KI-Zugriff](#api--ki-zugriff))
 
 ## Architektur
 
@@ -119,6 +121,23 @@ Alle Variablen sind optional und lassen sich alternativ bequem über die **Admin
 | `SSO_REDIRECT_URI` | Callback-URL (Standard: `http://localhost:3030/auth/sso/callback`) |
 
 </details>
+
+## API & KI-Zugriff
+
+myCloud hat keine separate "App-API" — dieselbe REST-API, die auch das Web-UI (`app.js`) antreibt,
+lässt sich vollständig extern nutzen:
+
+- **Dokumentation:** OpenAPI-3.0-Spezifikation unter [`app/openapi.yaml`](app/openapi.yaml), interaktiv
+  ausprobierbar über die Swagger-UI unter `/api/docs`.
+- **Authentifizierung per API-Key:** In den persönlichen Einstellungen lässt sich ein Key
+  (`Authorization: Bearer mcld_...`) erzeugen, der einem externen Client exakt dieselben Rechte wie
+  dem erstellenden Benutzer gibt — bei Admins also auch Zugriff auf alle Admin-Funktionen.
+- **Für KI-Agenten:** [`docs/KI-Zugriff.md`](docs/KI-Zugriff.md) beschreibt, wie sich die eigene
+  Instanz per KI-Assistent (Claude, ChatGPT & Co.) einrichten, personalisieren und im Alltag
+  bedienen lässt.
+- **Global abschaltbar:** Ein Admin kann API-Key-Authentifizierung instanzweit deaktivieren
+  (**Admin-Einstellungen → Registrierung & SSO → API-Zugriff**), ohne bestehende Keys zu löschen —
+  Session-Cookie-Logins im Browser bleiben davon unberührt.
 
 ## Versionierung
 
