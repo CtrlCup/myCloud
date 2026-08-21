@@ -1561,6 +1561,10 @@ header {
   display: inline-block;
   width: 48px;
   height: 28px;
+  /* .slider is absolutely positioned, so it contributes nothing to this label's intrinsic
+     width — without flex-shrink:0, a flex parent (e.g. a long description next to the switch)
+     can squeeze this down toward 0, detaching the knob from its track. */
+  flex-shrink: 0;
 }
 
 .switch input {
