@@ -1651,11 +1651,16 @@ tr:hover td {
      10030, ...) so the toast is never silently rendered behind an open overlay. */
   z-index: 10040;
   font-size: 0.9rem;
+  /* Hidden state is only opacity:0 + a translate, so the element still occupies its box. On
+     phones it is anchored to the bottom (see ≤480px rule) — right over the tab bar and the
+     "+" FAB — and would otherwise swallow every tap there while invisible. */
+  pointer-events: none;
 }
 
 .notification.show {
   transform: translateY(0);
   opacity: 1;
+  pointer-events: auto;
 }
 
 .toast-action-btn {
