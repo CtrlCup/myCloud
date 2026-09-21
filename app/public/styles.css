@@ -1651,11 +1651,16 @@ tr:hover td {
      10030, ...) so the toast is never silently rendered behind an open overlay. */
   z-index: 10040;
   font-size: 0.9rem;
+  /* Hidden state is only opacity:0 + a translate, so the element still occupies its box. On
+     phones it is anchored to the bottom (see ≤480px rule) — right over the tab bar and the
+     "+" FAB — and would otherwise swallow every tap there while invisible. */
+  pointer-events: none;
 }
 
 .notification.show {
   transform: translateY(0);
   opacity: 1;
+  pointer-events: auto;
 }
 
 .toast-action-btn {
@@ -4204,5 +4209,18 @@ tbody tr {
        open modal (Settings/Trash/Notes/Admin/Share/...) correctly covers the FAB instead of it
        punching through on top of modal content. */
     z-index: 1150;
+  }
+
+  /* Upload widget (#upload-container): its position/size are inline styles in index.html
+     (bottom/right: 1.5rem, z-index 1100, 480x380 when maximized by setUploadWidgetState()), so
+     these need !important. On a phone that put the pill entirely behind the tab bar (z-index
+     1200, 60px tall) — progress and the cancel button were unreachable during an upload — and
+     the maximized panel was wider than the viewport. Lifted above the tab bar and the FAB,
+     right-aligned with it, and clamped to the viewport. */
+  #upload-container {
+    bottom: calc(60px + env(safe-area-inset-bottom) + 1rem + 42px + 0.75rem) !important;
+    right: 1rem !important;
+    max-width: calc(100vw - 2rem);
+    max-height: calc(100vh - 60px - env(safe-area-inset-bottom) - 7rem);
   }
 }
