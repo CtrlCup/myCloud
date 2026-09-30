@@ -26,6 +26,7 @@ const { getVersionStatus, logVersionStatus, checkForUpdate, GITHUB_REPO } = requ
 
 require('dotenv').config();
 const { parseTrustProxy } = require('./trust-proxy');
+const { buildDocumentKey, saveDownloadedFile } = require('./office-save');
 
 const app = express();
 // req.ip (Rate-Limits) und req.protocol hängen daran; siehe TRUST_PROXY in .env.example.
@@ -4108,7 +4109,7 @@ app.get('/api/eurooffice/config/:id', async (req, res) => {
     const config = {
       document: {
         fileType: ext,
-        key: `file_${file.id}`,
+        key: buildDocumentKey(file.id, file.content_hash),
         title: file.name,
         url: `${internalAppUrl}/api/eurooffice/download/${file.id}?token=${token}`
       },
@@ -4220,36 +4221,18 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
       const file = fileRes.rows[0];
       const filePath = path.join(UPLOADS_DIR, file.path);
 
-      const http = require('http');
-      const https = require('https');
-      const downloadClient = url.startsWith('https') ? https : http;
-
-      downloadClient.get(url, (downloadRes) => {
-        if (downloadRes.statusCode === 200) {
-          const fileStream = fs.createWriteStream(filePath);
-          downloadRes.pipe(fileStream);
-
-          fileStream.on('finish', async () => {
-            fileStream.close();
-            
-            const stats = fs.statSync(filePath);
-            const textContent = await extractTextContent(filePath, file.mime_type, file.name);
-            await pool.query(
-              'UPDATE files SET size = $1, content = $2, updated_at = NOW() WHERE id = $3',
-              [stats.size, textContent, fileId]
-            );
-
-            console.log(`Office document ${fileId} successfully saved. New size: ${stats.size} bytes.`);
-          });
-        } else {
-          console.error(`Failed to download edited file from EuroOffice: status ${downloadRes.statusCode}`);
-        }
-      }).on('error', (err) => {
-        console.error('Error downloading file from EuroOffice callback:', err);
-      });
-
+      // Download into a temp file, rename over the old one only when complete; size/content/hash
+      // are updated afterwards so an aborted download leaves the previous file + index intact.
+      const saved = await saveDownloadedFile(url, filePath);
+      const textContent = await extractTextContent(filePath, file.mime_type, file.name);
+      await pool.query(
+        'UPDATE files SET size = $1, content = $2, content_hash = $3 WHERE id = $4',
+        [saved.size, textContent, saved.hash, fileId]
+      );
+      console.log(`Office document ${fileId} successfully saved. New size: ${saved.size} bytes.`);
     } catch (err) {
       console.error('Callback save error:', err);
+      return res.json({ error: 1 });
     }
   }
 
@@ -4942,7 +4925,7 @@ app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) =
     const config = {
       document: {
         fileType: ext,
-        key: `file_${file.id}`,
+        key: buildDocumentKey(file.id, file.content_hash),
         title: file.name,
         url: `${internalAppUrl}/api/eurooffice/download/${file.id}?token=${token}`
       },
