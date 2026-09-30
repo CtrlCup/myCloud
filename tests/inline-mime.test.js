@@ -80,3 +80,39 @@ test('svg: image/svg+xml, nosniff, sandbox CSP', async () => {
   assert.strictEqual(res.headers.get('x-content-type-options'), 'nosniff');
   assert.match(res.headers.get('content-security-policy'), /sandbox/);
 });
+
+async function upload(name, content, type, field = 'file', path = '/api/files/upload') {
+  const fd = new FormData();
+  fd.append(field, new Blob([content], { type }), name);
+  return fetch(BASE + path, { method: 'POST', headers: { cookie }, body: fd });
+}
+
+test('pdf: application/pdf, nosniff, no sandbox CSP', async () => {
+  const up = await upload('t.pdf', '%PDF-1.4\n%%EOF\n', 'application/pdf');
+  assert.ok(up.ok, 'upload ' + up.status);
+  const f = await up.json();
+  const res = await api(`/api/files/download/${(f.file || f).id}?inline=true`);
+  assert.strictEqual(res.status, 200);
+  assert.match(res.headers.get('content-type'), /^application\/pdf/);
+  assert.strictEqual(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.ok(!/sandbox/.test(res.headers.get('content-security-policy') || ''));
+});
+
+test('copy of .html keeps text/plain', async () => {
+  const res = await api('/api/files/copy-multiple', {
+    method: 'POST',
+    body: JSON.stringify({ ids: [fileId], fileIds: [fileId], targetFolderId: null }),
+  });
+  assert.ok(res.ok, 'copy ' + res.status);
+  const list = await (await api('/api/files/list')).json();
+  const items = Array.isArray(list) ? list : (list.files || list.items || []);
+  const copy = items.find(x => /Kopie/.test(x.name) && x.name.endsWith('.html'));
+  assert.ok(copy, 'copy not found');
+  assert.strictEqual(copy.mime_type, 'text/plain');
+});
+
+test('branding upload with .html is rejected (admin only, else skipped)', async (t) => {
+  const res = await upload('x.html', '<script>1</script>', 'text/html', 'icon', '/api/settings/admin/icon');
+  if (res.status === 403) return t.skip('test user is not admin');
+  assert.strictEqual(res.status, 400);
+});

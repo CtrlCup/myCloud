@@ -287,9 +287,11 @@ function fixUploadFilenameEncoding(req, res, next) {
 // req.file.mimetype) — trusting it let an uploader store e.g. a .txt file with mimetype
 // "text/html", which was then served with that same Content-Type on inline view/download,
 // letting the browser render it as HTML/script (stored XSS). Deriving the type from the file
-// extension instead means we always decide what gets served how, never the uploader. Anything
-// not explicitly listed (notably html/xhtml, which a browser can execute; svg is image/svg+xml, only safe because file delivery adds a sandbox CSP) falls back to
-// application/octet-stream, which browsers download rather than render.
+// extension instead means we always decide what gets served how, never the uploader.
+// html/htm/xhtml/xml are mapped to text/plain. svg stays image/svg+xml (the UI shows it via
+// <img>) and is only safe because file delivery adds a sandbox CSP (see setFileServeHeaders).
+// Anything not explicitly listed falls back to application/octet-stream, which browsers
+// download rather than render.
 const SAFE_MIME_TYPES = {
   txt: 'text/plain', csv: 'text/csv', md: 'text/markdown', log: 'text/plain',
   json: 'application/json', xml: 'text/plain',
@@ -318,18 +320,36 @@ function getSafeMimeType(filename) {
 
 // Protective headers for every user-file delivery (inline and download). The Content-Type is
 // always derived from the file name via getSafeMimeType (never from the DB column). nosniff stops
-// the browser from second-guessing it; the CSP keeps any document that still gets rendered
-// (text, xml, json ...) inert: sandbox = opaque origin, no scripts, default-src 'none'.
-// Passive viewer types (pdf/image/video/audio) skip `sandbox` because browsers' built-in PDF
-// and media viewers do not work inside a sandboxed document; they still get default-src 'none'.
+// the browser from second-guessing it. Passive types (pdf, raster images, video, audio) get only
+// nosniff, so native browser viewers keep working on top-level opens. Everything else (text,
+// json, svg, unknown) additionally gets a CSP that keeps a rendered document inert: sandbox =
+// opaque origin, no scripts, default-src 'none'.
 function setFileServeHeaders(res, filename) {
   const mime = getSafeMimeType(filename);
-  // SVG is shown via <img> in the UI (no scripts run there) but must stay sandboxed top-level.
   const passive = mime === 'application/pdf' || (/^(image|video|audio)\//.test(mime) && mime !== 'image/svg+xml');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', passive
-    ? "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
-    : "default-src 'none'; sandbox");
+  if (!passive) res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+}
+
+// Branding assets (icon, SEO image, backgrounds): the stored path comes from the settings table,
+// so resolve it and make sure it stays inside UPLOADS_DIR before sending; headers as for files.
+const BRANDING_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'svg'];
+function sendBrandingFile(res, relPath) {
+  if (!relPath) return false;
+  const root = path.resolve(UPLOADS_DIR);
+  const filePath = path.resolve(root, relPath);
+  if (!filePath.startsWith(root + path.sep) || !fs.existsSync(filePath)) return false;
+  setFileServeHeaders(res, filePath);
+  res.sendFile(filePath, { headers: { 'Content-Type': getSafeMimeType(filePath) } });
+  return true;
+}
+// Rejects (400) and deletes an uploaded branding file whose extension is not an image type.
+function rejectNonImageBranding(req, res) {
+  const ext = (req.file.originalname.split('.').pop() || '').toLowerCase();
+  if (BRANDING_IMAGE_EXTS.includes(ext) && req.file.filename.toLowerCase().endsWith('.' + ext)) return false;
+  try { fs.unlinkSync(req.file.path); } catch {}
+  res.status(400).json({ error: 'Nur Bilddateien (png, jpg, jpeg, gif, webp, ico, svg) sind erlaubt.' });
+  return true;
 }
 
 const pdfParse = require('pdf-parse');
@@ -3625,6 +3645,7 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     // reused/overwritten), so it's safe to cache aggressively client-side.
     const thumbPath = await generateThumbnail(file.path, ext);
     if (thumbPath && fs.existsSync(thumbPath)) {
+      setFileServeHeaders(res, thumbPath);
       return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
     }
 
@@ -3633,6 +3654,7 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     // XML format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
     // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
     if (WEB_IMAGE_EXTS.includes(ext)) {
+      setFileServeHeaders(res, file.name);
       return res.sendFile(filePath);
     }
 
@@ -4118,6 +4140,7 @@ app.get('/api/eurooffice/download/:id', async (req, res) => {
       return res.status(404).json({ error: 'Physical file not found' });
     }
 
+    setFileServeHeaders(res, file.name);
     res.sendFile(filePath);
   } catch (err) {
     console.error('Office download error:', err);
@@ -4248,10 +4271,7 @@ app.get('/api/public/branding/icon', async (req, res) => {
   try {
     const iconPath = await getSetting('cloud_icon_path');
     if (iconPath) {
-      const filePath = path.join(UPLOADS_DIR, iconPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, iconPath)) return;
     }
     res.status(404).send('Icon not found');
   } catch (err) {
@@ -4265,10 +4285,7 @@ app.get('/api/public/branding/seo-image', async (req, res) => {
   try {
     const imgPath = (await getSetting('seo_image_path')) || (await getSetting('cloud_icon_path'));
     if (imgPath) {
-      const filePath = path.join(UPLOADS_DIR, imgPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, imgPath)) return;
     }
     res.status(404).send('Image not found');
   } catch (err) {
@@ -4282,10 +4299,7 @@ app.get('/api/public/branding/dashboard-bg', async (req, res) => {
     const key = req.query.variant === 'light' ? 'dashboard_bg_image_light' : 'dashboard_bg_image';
     const bgPath = await getSetting(key);
     if (bgPath) {
-      const filePath = path.join(UPLOADS_DIR, bgPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, bgPath)) return;
     }
     res.status(404).send('Background not found');
   } catch (err) {
@@ -4299,10 +4313,7 @@ app.get('/api/public/branding/login-bg', async (req, res) => {
     const key = req.query.variant === 'light' ? 'login_bg_image_light' : 'login_bg_image';
     const bgPath = await getSetting(key);
     if (bgPath) {
-      const filePath = path.join(UPLOADS_DIR, bgPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, bgPath)) return;
     }
     res.status(404).send('Background not found');
   } catch (err) {
@@ -4315,6 +4326,7 @@ app.post('/api/settings/admin/icon', requireAdmin, uploadSingle('icon'), async (
   if (!req.file) {
     return res.status(400).json({ error: 'No icon file provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
 
   try {
     const oldIcon = await getSetting('cloud_icon_path');
@@ -4342,6 +4354,7 @@ app.post('/api/settings/admin/seo-image', requireAdmin, uploadSingle('image'), a
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
 
   try {
     const oldImg = await getSetting('seo_image_path');
@@ -4387,6 +4400,7 @@ app.post('/api/settings/admin/dashboard-bg', requireAdmin, uploadSingle('image')
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
   try {
     const key = req.query.variant === 'light' ? 'dashboard_bg_image_light' : 'dashboard_bg_image';
     const oldBg = await getSetting(key);
@@ -4430,6 +4444,7 @@ app.post('/api/settings/admin/login-bg', requireAdmin, uploadSingle('image'), as
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
   try {
     const key = req.query.variant === 'light' ? 'login_bg_image_light' : 'login_bg_image';
     const oldBg = await getSetting(key);
@@ -4947,6 +4962,7 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     // reused/overwritten), so it's safe to cache aggressively client-side.
     const thumbPath = await generateThumbnail(file.path, ext);
     if (thumbPath && fs.existsSync(thumbPath)) {
+      setFileServeHeaders(res, thumbPath);
       return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
     }
 
@@ -4955,6 +4971,7 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     // XML format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
     // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
     if (WEB_IMAGE_EXTS.includes(ext)) {
+      setFileServeHeaders(res, file.name);
       return res.sendFile(filePath);
     }
 
@@ -5964,6 +5981,12 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
         return res.status(400).json({ error: 'Der Aussteller (iss) muss eine gültige HTTPS-URL sein.' });
       }
     }
+
+    // File-path settings are only ever set by the branding upload routes — accepting them here
+    // would let an admin point the public branding routes at an arbitrary path.
+    const PROTECTED_KEYS = ['cloud_icon_path', 'seo_image_path', 'dashboard_bg_image', 'dashboard_bg_image_light', 'login_bg_image', 'login_bg_image_light'];
+    const badKey = Object.keys(configs).find(k => PROTECTED_KEYS.includes(k) || k.startsWith('reset_'));
+    if (badKey) return res.status(400).json({ error: 'Diese Einstellung kann nicht direkt gesetzt werden.' });
 
     const keysChanged = Object.keys(configs);
     const smtpKeys = ['email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from', 'email_from_name'];
