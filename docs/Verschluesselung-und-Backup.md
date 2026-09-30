@@ -126,13 +126,15 @@ per HKDF aus dem Master-Key abgeleitet (Kontext `"mycloud-column-v1"`).
 | Spalte | Warum | Folgen |
 |---|---|---|
 | `users.totp_secret` | TOTP-Seed = zweiter Faktor | keine |
-| `settings.email_smtp_pass`, `settings.sso_client_secret` | Zugangsdaten Dritter | Beim Zurückschreiben in `.env` bleibt der Klartext dort, siehe offene Frage F3 |
+| `settings.email_smtp_pass`, `settings.sso_client_secret` | Zugangsdaten Dritter | Das Zurückschreiben in `.env` entfällt (Entscheidung F3) |
 | `file_versions.content` | Vollständige alte Dateiinhalte | keine (wird nur einzeln gelesen) |
 | `shares.message` | Freitext an Empfänger | keine |
-| `files.content` (Volltext-Index) | enthält Textauszüge **aller** Dokumente | ⚠️ **Tiefensuche per `ILIKE` geht dann nicht mehr**, siehe F1 |
 
-**Nicht** verschlüsselt: `files.name`, Ordnerstruktur, Größen, Zeitstempel. Sie werden für Sortierung,
-Namenssuche (Trigram-Index) und Konfliktprüfung gebraucht. Schutz über die Volume-Verschlüsselung.
+**Nicht** app-seitig verschlüsselt, Schutz über die Volume-Verschlüsselung (Abschnitt 9):
+- `files.content` (Volltext-Index): Die Tiefensuche per `ILIKE`/Trigram bleibt wie heute
+  (Entscheidung F1).
+- `files.name`, Ordnerstruktur, Größen, Zeitstempel: für Sortierung, Namenssuche
+  (Trigram-Index) und Konfliktprüfung.
 
 Passwort-Hashes (bcrypt) und API-Key-Hashes bleiben, wie sie sind: Sie sind bereits Einweg-Hashes.
 
@@ -247,10 +249,11 @@ IdP ggf. anpassen. Nutzer müssen sich neu einloggen.
 |---|---|---|
 | **P1** | `crypto-store.js` (Format v1, Stream-/Range-Entschlüsselung), Master-Key-Laden, Key-Check, `scripts/keys.js init` | – |
 | **P2** | Alle Lese- und Schreibstellen auf `crypto-store` umstellen, Copy-on-Write, Temp-Klartext über tmpfs, Thumbnails, Migration bestehender Dateien, Admin-Anzeige | P1 |
-| **P3** | Spaltenverschlüsselung (Abschnitt 4) inkl. Migration, Entscheidung F1 umsetzen | P1 |
+| **P3** | Spaltenverschlüsselung (Abschnitt 4) inkl. Migration; `.env`-Rückschreiben der Secrets entfernen (F3) | P1 |
 | **P4** | Backup: Format, `scripts/backup.js create/verify`, Konsistenz-Flag, Admin-UI, Zeitplan und Aufbewahrung | P1 (P2 für Copy-on-Write-Konsistenz) |
 | **P5** | Restore-CLI, Kompatibilitätsprüfungen, Doku im README | P4 |
 | **P6** | Schlüsselrotation | P2, P3 |
+| **P7** | Keine Klartext-Passwörter mehr: Docker-Secrets für Startgeheimnisse, Reset-Tokens nur gehasht (Abschnitt 12) | P1, P3 |
 
 Jede Phase ist für sich auslieferbar. Ohne Master-Key bleibt das Verhalten unverändert.
 
@@ -322,16 +325,57 @@ und Ports). Jede Phase gilt erst als fertig, wenn ihre Tests grün sind.
 - B8 Aufbewahrung: Bei „letzte 3 Backups behalten“ bleiben nach 5 Läufen genau 3 Dateien übrig.
 - B9 Backup-Download und -Löschen im Admin-Bereich nur für Admins (Nicht-Admin: 403).
 
-## 11. Offene Entscheidungen
+## 11. Entscheidungen
 
-- **F1 Tiefensuche vs. Verschlüsselung von `files.content`:**
-  (a) `files.content` unverschlüsselt lassen, Schutz nur über die Volume-Verschlüsselung;
-  Tiefensuche bleibt wie heute. Das ist die Empfehlung für den Anfang.
-  (b) Verschlüsseln, Tiefensuche entfällt oder nutzt einen Blind-Index (Aufwand hoch).
-  (c) Verschlüsseln und Volltextsuche nur über Dateinamen.
+Entschieden am 2026-10-01 von @CtrlCup:
+
+- **F1 Tiefensuche vs. Verschlüsselung von `files.content`:** ✅ **Variante (a).** `files.content`
+  bleibt unverschlüsselt, Schutz über die Volume-Verschlüsselung (Abschnitt 9). Die Tiefensuche
+  bleibt unverändert.
+- **F3 `.env`-Rückschreiben von SMTP/SSO-Secrets:** ✅ **Entfällt.** `updateEnvFile()` in
+  `server.js` schreibt keine Secrets mehr. Übergeordnetes Ziel: **keine Klartext-Passwörter mehr
+  in `.env`, im Repository oder in der Datenbank**, siehe Abschnitt 12.
+
+Noch offen:
+
 - **F2 Dateinamen verschlüsseln?** Empfehlung: nein (Sortierung, Namenssuche, Konfliktprüfung).
   Schutz über die Volume-Verschlüsselung.
-- **F3 `.env`-Rückschreiben von SMTP/SSO-Secrets:** Die App schreibt diese Werte heute im
-  Klartext zurück in `.env`. Mit Spaltenverschlüsselung sollte das entfallen: Secrets nur noch
-  verschlüsselt in der DB, `.env` nur noch für den Erststart.
 - **F4 Automatische Backups nach extern** (S3, rclone/pCloud): eigene Phase nach P5?
+
+## 12. Keine Klartext-Passwörter mehr (Phase P7)
+
+Ziel (Entscheidung F3): Weder `.env` noch Repository noch Datenbank enthalten Passwörter oder
+Tokens im Klartext.
+
+**Was technisch nicht vermeidbar ist:** Ein paar **Startgeheimnisse** muss der Container beim
+Start lesen können: Master-Key, Datenbank-Passwort und Session-Secret. Diese liegen nicht mehr in
+`.env`, sondern als **Docker-Secrets**: je eine eigene Datei pro Geheimnis, Modus 0400, außerhalb
+des Repos, nicht in Backups (außer dem verschlüsselten Master-Key, Abschnitt 6.1). Im Container
+erscheinen sie unter `/run/secrets/…`, nicht als Umgebungsvariable (die sonst per
+`docker inspect` und in `/proc/*/environ` sichtbar wäre).
+
+| Geheimnis | Heute | Künftig |
+|---|---|---|
+| `SESSION_SECRET` | `.env` | Secret-Datei `session_secret` → `SESSION_SECRET_FILE` |
+| `DB_PASSWORD` | `.env`, in `DATABASE_URL` eingebettet | Secret-Datei `db_password`; Postgres liest `POSTGRES_PASSWORD_FILE`, die App baut die Verbindung aus `DB_PASSWORD_FILE` |
+| Master-Key | – | Secret-Datei `master_key` → `MYCLOUD_MASTER_KEY_FILE` (P1) |
+| SMTP-Passwort, SSO-Client-Secret | `.env` + DB-Klartext + Rückschreiben | **nur** verschlüsselt in der DB (P3), gepflegt über die Admin-UI. `.env`-Variablen nur noch einmalig zum Erststart übernehmen und danach ignorieren (Warnung im Log, solange sie noch gesetzt sind) |
+| Backup-Passphrase | – | Secret-Datei → `MYCLOUD_BACKUP_PASSPHRASE_FILE` (P4) |
+| Passwort-Reset-Tokens | Klartext in `settings` | nur als SHA-256-Hash speichern (wie die API-Keys), eigene Tabelle mit Ablauf |
+
+Umsetzung:
+- Hilfsfunktion `readSecret(name)`: liest `NAME_FILE`, sonst (übergangsweise, mit Warnung) `NAME`.
+- `docker-compose.example.yml`: `secrets:`-Block, `.env.example` ohne Passwort-Beispiele.
+- `scripts/keys.js init` erzeugt alle Secret-Dateien mit zufälligen Werten.
+- `updateEnvFile()` entfernen (bzw. nur noch für nicht-geheime Werte behalten).
+- Migration bestehender Instanzen: Beim Start mit gesetzten Klartext-Variablen eine Warnung
+  ausgeben und in der Admin-UI einen Hinweis „Klartext-Secrets in .env gefunden“ anzeigen. Das
+  README bekommt eine Schritt-für-Schritt-Umzugsanleitung.
+
+**Tests (S1–S4):**
+- S1 Mit Secret-Dateien und ohne jede Passwort-Variable in `.env` startet der Stack und
+  Login, Upload und Freigaben funktionieren.
+- S2 Nach dem Speichern von SMTP-/SSO-Einstellungen in der Admin-UI enthält `.env` keinen dieser
+  Werte, und in der DB beginnen sie mit `enc:v1:`.
+- S3 Ein Passwort-Reset-Token steht nirgends im Klartext in der DB. Der Reset per Link funktioniert.
+- S4 `docker inspect` des App-Containers zeigt keine Passwörter in den Umgebungsvariablen.
