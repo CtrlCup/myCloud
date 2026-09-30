@@ -2753,20 +2753,20 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
 
 // Recursive copy helper for files and folders
 async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
-  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fileId, userId]);
+  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [fileId, userId]);
   if (fileRes.rows.length === 0) return;
   const file = fileRes.rows[0];
 
   if (file.is_folder) {
     const folderName = `${file.name} (Kopie)`;
     const newFolderRes = await pool.query(
-      `INSERT INTO files (name, is_folder, parent_id, owner_id) 
-       VALUES ($1, true, $2, $3) RETURNING *`,
+      `INSERT INTO files (name, path, is_folder, parent_id, owner_id)
+       VALUES ($1, 'folder', true, $2, $3) RETURNING *`,
       [folderName, targetFolderId, userId]
     );
     const newFolder = newFolderRes.rows[0];
 
-    const childrenRes = await pool.query('SELECT id FROM files WHERE parent_id = $1 AND owner_id = $2', [file.id, userId]);
+    const childrenRes = await pool.query('SELECT id FROM files WHERE parent_id = $1 AND owner_id = $2 AND deleted_at IS NULL', [file.id, userId]);
     for (const child of childrenRes.rows) {
       await copyFileOrFolderRecursive(child.id, newFolder.id, userId);
     }
@@ -2796,11 +2796,11 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
 async function calculateCopySize(fileIds, userId) {
   const result = await pool.query(
     `WITH RECURSIVE subtree AS (
-       SELECT id, size, is_folder FROM files WHERE id = ANY($1) AND owner_id = $2
+       SELECT id, size, is_folder FROM files WHERE id = ANY($1) AND owner_id = $2 AND deleted_at IS NULL
        UNION ALL
        SELECT f.id, f.size, f.is_folder FROM files f
        JOIN subtree s ON f.parent_id = s.id
-       WHERE f.owner_id = $2
+       WHERE f.owner_id = $2 AND f.deleted_at IS NULL
      )
      SELECT COALESCE(SUM(size), 0) as total FROM subtree WHERE is_folder = false`,
     [fileIds, userId]
@@ -5327,8 +5327,13 @@ app.post('/api/public/shares/:slug/paste', async (req, res) => {
       return res.status(403).json({ error: 'Access denied.' });
     }
 
+    // Target must not be the folder itself or one of its descendants (parent_id cycle / endless copy).
+    if (fid === targetFolderId || await isDescendantOf(targetFolderId, fid)) {
+      return res.status(400).json({ error: 'Ein Ordner kann nicht in sich selbst oder einen seiner Unterordner eingefügt werden.' });
+    }
+
     if (action === 'cut') {
-      await pool.query('UPDATE files SET parent_id = $1 WHERE id = $2 AND owner_id = $3', [targetFolderId, fid, baseFile.owner_id]);
+      await pool.query('UPDATE files SET parent_id = $1 WHERE id = $2 AND owner_id = $3 AND deleted_at IS NULL', [targetFolderId, fid, baseFile.owner_id]);
     } else {
       await copyFileOrFolderRecursive(fid, targetFolderId, baseFile.owner_id);
     }

@@ -106,3 +106,36 @@ test('trashed share root yields no content', async () => {
   assert.strictEqual((await pub('')).status, 404);
   assert.strictEqual((await pub(`/meta/${fileId}`)).status, 404);
 });
+
+test('owner copy of a folder does not resurrect individually trashed files', async () => {
+  const src = await mkdir('copysrc', null);
+  const keep = await upload('keep.txt', src);
+  const gone = await upload('gone.txt', src);
+  assert.strictEqual((await trash(gone)).status, 200);
+  const dst = await mkdir('copydst', null);
+  const res = await api('POST', '/api/files/copy-multiple', { fileIds: [src], targetFolderId: dst });
+  assert.strictEqual(res.status, 200);
+  const list = await (await api('GET', '/api/files/list?parentId=' + dst)).json();
+  const copy = (list.files || list).find(f => f.is_folder);
+  assert.ok(copy, 'copied folder exists');
+  const inner = await (await api('GET', '/api/files/list?parentId=' + copy.id)).json();
+  const names = (inner.files || inner).map(f => f.name);
+  assert.ok(names.some(n => n.startsWith('keep')), 'kept file copied');
+  assert.ok(!names.some(n => n.startsWith('gone')), 'trashed file not copied');
+  assert.ok(keep);
+});
+
+test('guest paste (cut) of a folder into its own subfolder is rejected (400)', async () => {
+  const root = await mkdir('wroot', null);
+  const a = await mkdir('a', root);
+  const b = await mkdir('b', a);
+  const sh = await api('POST', '/api/shares', { fileId: root, canWrite: true });
+  const wslug = (await sh.json()).slug;
+  assert.ok(wslug);
+  const paste = (fileId, targetParentId) => fetch(`${BASE}/api/public/shares/${wslug}/paste`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileId, targetParentId, action: 'cut' }),
+  });
+  assert.strictEqual((await paste(a, b)).status, 400);
+  assert.strictEqual((await paste(a, a)).status, 400);
+});
