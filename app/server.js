@@ -5535,9 +5535,9 @@ app.get('/api/users/:id/avatar', requireAuth, async (req, res) => {
     if (user.avatar_path) {
       const filePath = path.join(UPLOADS_DIR, user.avatar_path);
       const ext = path.extname(user.avatar_path).slice(1).toLowerCase();
-      // Legacy avatars with a non-image extension (e.g. .html/.svg) are never served actively
-      if (!AVATAR_EXTS.includes(ext)) return res.status(404).send('Not found');
-      if (fs.existsSync(filePath)) {
+      // Legacy avatars with a non-image extension (e.g. .html/.svg) are never served actively;
+      // they fall through to the generated initials avatar below.
+      if (AVATAR_EXTS.includes(ext) && fs.existsSync(filePath)) {
         setFileServeHeaders(res, user.avatar_path);
         return res.sendFile(filePath, { headers: { 'Content-Type': getSafeMimeType(user.avatar_path) } });
       }
