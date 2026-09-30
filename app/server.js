@@ -7,6 +7,7 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const archiver = require('archiver');
 const crypto = require('crypto');
+const { findOrCreateSsoUser, SsoUserError } = require('./sso-user');
 const swaggerUi = require('swagger-ui-express');
 const yaml = require('js-yaml');
 const compression = require('compression');
@@ -743,26 +744,8 @@ app.use(async (req, res, next) => {
       algorithms: ['RS256', 'ES256', 'PS256'], // asymmetric only — never accept an HMAC or "none" alg here
     });
 
-    const ssoId = payload.sub;
-    const username = payload.preferred_username || payload.username || (payload.email ? payload.email.split('@')[0] : null);
-    if (!ssoId || !username) return next();
-
-    let userRes = await pool.query('SELECT * FROM users WHERE sso_id = $1 AND sso_provider = $2', [ssoId, 'authentik']);
-    if (userRes.rows.length === 0) {
-      const checkUsernameRes = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-      let finalUsername = username;
-      if (checkUsernameRes.rows.length > 0) {
-        finalUsername = `${username}_${crypto.randomBytes(3).toString('hex')}`;
-      }
-      const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
-      const role = parseInt(userCountRes.rows[0].count) === 0 ? 'admin' : 'user';
-      userRes = await pool.query(
-        'INSERT INTO users (username, role, sso_id, sso_provider) VALUES ($1, $2, $3, $4) RETURNING *',
-        [finalUsername, role, ssoId, 'authentik']
-      );
-    }
-
-    const user = userRes.rows[0];
+    // Keine automatische E-Mail-Verknüpfung: Forward-Auth liefert keinen email_verified-Nachweis.
+    const { user } = await findOrCreateSsoUser(pool, payload, { allowEmailLinking: false });
     if (user.is_active === false) return next(); // show the regular login rather than an opaque error
 
     await regenerateSession(req);
@@ -1574,6 +1557,15 @@ app.get('/auth/sso', async (req, res) => {
   }
 });
 
+// Kleine deutsche Fehlerseite mit Link zurück zum Login
+function ssoErrorPage(res, status, message) {
+  res.status(status).type('html').send(
+    '<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SSO-Fehler</title></head>' +
+    '<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">' +
+    `<h2>SSO-Anmeldung fehlgeschlagen</h2><p>${message}</p><p><a href="/">Zurück zum Login</a></p></body></html>`
+  );
+}
+
 // SSO Callback
 app.get('/auth/sso/callback', async (req, res) => {
   const { code, state } = req.query;
@@ -1623,31 +1615,7 @@ app.get('/auth/sso/callback', async (req, res) => {
     }
 
     const userInfo = await userResponse.json();
-    const ssoId = userInfo.sub;
-    const username = userInfo.preferred_username || userInfo.username || userInfo.email.split('@')[0];
-
-    // Find or create SSO user
-    let userRes = await pool.query('SELECT * FROM users WHERE sso_id = $1 AND sso_provider = $2', [ssoId, 'authentik']);
-    
-    if (userRes.rows.length === 0) {
-      // Check if username already exists
-      let checkUsernameRes = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-      let finalUsername = username;
-      if (checkUsernameRes.rows.length > 0) {
-        finalUsername = `${username}_${crypto.randomBytes(3).toString('hex')}`;
-      }
-
-      // Check if this is the first user
-      const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
-      const role = parseInt(userCountRes.rows[0].count) === 0 ? 'admin' : 'user';
-
-      userRes = await pool.query(
-        'INSERT INTO users (username, role, sso_id, sso_provider) VALUES ($1, $2, $3, $4) RETURNING *',
-        [finalUsername, role, ssoId, 'authentik']
-      );
-    }
-
-    const user = userRes.rows[0];
+    const { user } = await findOrCreateSsoUser(pool, userInfo, { allowEmailLinking: false });
     if (user.is_active === false) {
       return res.status(403).send('Ihr Account wurde gesperrt. Bitte wenden Sie sich an einen Administrator.');
     }
@@ -1660,7 +1628,10 @@ app.get('/auth/sso/callback', async (req, res) => {
     res.redirect('/');
   } catch (err) {
     console.error('SSO Callback error:', err);
-    res.status(500).send('SSO Authentication Failed.');
+    if (err instanceof SsoUserError) {
+      return ssoErrorPage(res, 400, 'Anmeldung nicht möglich: Der SSO-Anbieter hat weder einen Benutzernamen noch eine E-Mail-Adresse geliefert. Bitte wende dich an einen Administrator.');
+    }
+    ssoErrorPage(res, 500, 'Die SSO-Anmeldung ist fehlgeschlagen. Bitte versuche es erneut.');
   }
 });
 
@@ -5732,7 +5703,8 @@ app.post('/api/settings/profile', requireAuth, denyApiKey, async (req, res) => {
 
     const result = await pool.query(
       `UPDATE users
-       SET first_name = $1, last_name = $2, username = $3, email = $4, display_real_name = $5
+       SET profile_overridden = profile_overridden OR first_name IS DISTINCT FROM $1 OR last_name IS DISTINCT FROM $2 OR email IS DISTINCT FROM $4,
+           first_name = $1, last_name = $2, username = $3, email = $4, display_real_name = $5
        WHERE id = $6 RETURNING id, username, role, email, first_name, last_name, display_real_name`,
       [first_name || null, last_name || null, cleanUsername, email, !!display_real_name, userId]
     );
