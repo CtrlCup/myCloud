@@ -5445,7 +5445,7 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
    ========================================================================== */
 
 // Avatar type detection by magic bytes; returns the enforced file extension or null.
-const AVATAR_EXTS = ['png', 'jpg', 'gif', 'webp'];
+const AVATAR_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
 function detectAvatarImageExt(filePath) {
   const buf = Buffer.alloc(12);
   let fd;
@@ -5502,10 +5502,10 @@ app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req
 
     // Delete old avatar file from disk if it exists
     if (oldAvatarPath) {
-      const oldFilePath = path.join(UPLOADS_DIR, oldAvatarPath);
-      if (fs.existsSync(oldFilePath)) {
-        fs.unlinkSync(oldFilePath);
-      }
+      // Avatars live flat in UPLOADS_DIR; basename keeps this inside it. A failed cleanup must not
+      // turn an already-saved upload into a 500.
+      const oldFilePath = path.join(UPLOADS_DIR, path.basename(oldAvatarPath));
+      try { if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath); } catch (e) { console.error('Old avatar cleanup failed:', e.message); }
     }
 
     res.json({ success: true, avatarUrl: `/api/users/${userId}/avatar?t=${Date.now()}` });
