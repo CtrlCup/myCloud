@@ -568,7 +568,56 @@ const sessionMiddleware = session({
     sameSite: 'lax',
   }
 });
-app.use(sessionMiddleware);
+// API-Key Authentication (Bearer token, for external/app clients)
+// Stateless: runs BEFORE the session middleware and checks the key on every request. On success
+// a request-local session-like object (same fields every route reads: userId/username/role) is
+// attached and the real session middleware is skipped, so no session row and no Set-Cookie
+// ever come out of a key-authenticated request — revoking the key therefore revokes all access.
+// An invalid/revoked mcld_ key (or the kill switch being off) is a hard 401, never silent anonymity.
+const noopSessionCb = function (cb) { if (typeof cb === 'function') cb(); };
+app.use(async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return next();
+  const token = authHeader.slice(7).trim();
+  if (!token.startsWith('mcld_')) return next();
+
+  try {
+    // Instance-wide kill switch (Admin-Einstellungen → Registrierung & SSO → API-Zugriff).
+    // Checked per-request rather than cached, so disabling it takes effect immediately.
+    if ((await getSetting('api_key_auth_enabled')) === 'false') {
+      return res.status(401).json({ error: 'API-Key-Zugriff ist deaktiviert' });
+    }
+
+    const keyHash = crypto.createHash('sha256').update(token).digest('hex');
+    const result = await pool.query(
+      `SELECT ak.id AS key_id, u.id AS user_id, u.username, u.role
+       FROM api_keys ak JOIN users u ON ak.user_id = u.id
+       WHERE ak.key_hash = $1`,
+      [keyHash]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Ungültiger oder widerrufener API-Key' });
+
+    const row = result.rows[0];
+    req.session = {
+      userId: row.user_id,
+      username: row.username,
+      role: row.role,
+      isApiKey: true,
+      save: noopSessionCb,
+      regenerate: noopSessionCb,
+      destroy: noopSessionCb,
+      touch: noopSessionCb,
+      reload: noopSessionCb,
+    };
+    req.apiKeyAuthed = true;
+    pool.query('UPDATE api_keys SET last_used_at = NOW() WHERE id = $1', [row.key_id]).catch(() => {});
+    next();
+  } catch (err) {
+    console.error('API key auth error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.use((req, res, next) => (req.apiKeyAuthed ? next() : sessionMiddleware(req, res, next)));
 
 // Regenerates the session ID before granting an authenticated identity, so a session ID an
 // attacker planted before login (session fixation — e.g. via a shared/kiosk browser or a cookie
@@ -628,43 +677,6 @@ app.use('/pdfjs', express.static(path.join(__dirname, 'node_modules/pdfjs-dist')
 // so those tools are hand-rolled on a canvas rather than going through pdf.js's ink/highlight
 // editors, and need a separate library to bake the result back into PDF bytes on save.
 app.use('/pdf-lib', express.static(path.join(__dirname, 'node_modules/pdf-lib/dist')));
-
-// API-Key Authentication (Bearer token, for external/app clients)
-// Populates req.session.userId/.username/.role from a personal API key, exactly like a browser
-// login would — every existing route below reads those three session fields, so this lets the
-// entire API work for token-authenticated clients without touching any individual route handler.
-app.use(async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (req.session.userId || !authHeader || !authHeader.startsWith('Bearer ')) return next();
-
-  const token = authHeader.slice(7).trim();
-  if (!token.startsWith('mcld_')) return next();
-
-  try {
-    // Instance-wide kill switch (Admin-Einstellungen → Registrierung & SSO → API-Zugriff).
-    // Checked per-request rather than cached, so disabling it takes effect immediately for
-    // every subsequent request without needing a restart.
-    if ((await getSetting('api_key_auth_enabled')) === 'false') return next();
-
-    const keyHash = crypto.createHash('sha256').update(token).digest('hex');
-    const result = await pool.query(
-      `SELECT ak.id AS key_id, u.id AS user_id, u.username, u.role
-       FROM api_keys ak JOIN users u ON ak.user_id = u.id
-       WHERE ak.key_hash = $1`,
-      [keyHash]
-    );
-    if (result.rows.length > 0) {
-      const row = result.rows[0];
-      req.session.userId = row.user_id;
-      req.session.username = row.username;
-      req.session.role = row.role;
-      pool.query('UPDATE api_keys SET last_used_at = NOW() WHERE id = $1', [row.key_id]).catch(() => {});
-    }
-  } catch (err) {
-    console.error('API key auth error:', err);
-  }
-  next();
-});
 
 // Forward-Auth SSO (Authentik behind a reverse proxy's forward_auth gate, e.g. Caddy)
 // Populates req.session.userId/.username/.role from a cryptographically verified JWT that the
