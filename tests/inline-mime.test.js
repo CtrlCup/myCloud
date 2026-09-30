@@ -65,3 +65,18 @@ test('public share inline: text/plain, nosniff, sandbox CSP', async () => {
   assert.strictEqual(res.headers.get('x-content-type-options'), 'nosniff');
   assert.match(res.headers.get('content-security-policy'), /sandbox/);
 });
+
+test('svg: image/svg+xml, nosniff, sandbox CSP', async () => {
+  const res0 = await api('/api/files/create-empty', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'test.svg', type: 'txt', parentId: null }),
+  });
+  assert.ok(res0.ok);
+  const f = await res0.json();
+  assert.strictEqual(f.mime_type, 'image/svg+xml');
+  const res = await api(`/api/files/download/${f.id}?inline=true`);
+  assert.strictEqual(res.status, 200);
+  assert.match(res.headers.get('content-type'), /^image\/svg\+xml/);
+  assert.strictEqual(res.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(res.headers.get('content-security-policy'), /sandbox/);
+});

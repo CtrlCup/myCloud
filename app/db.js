@@ -201,6 +201,7 @@ async function initDb() {
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS faststart_processed_at TIMESTAMP');
     // Normalise legacy rows that stored an active document type (see getSafeMimeType in server.js).
     await client.query("UPDATE files SET mime_type = 'text/plain' WHERE is_folder = false AND mime_type ~* '(html|xml|svg|javascript)' AND mime_type NOT LIKE 'application/vnd.%'");
+    await client.query("UPDATE files SET mime_type = 'image/svg+xml' WHERE is_folder = false AND name ILIKE '%.svg'");
     await client.query('CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at) WHERE deleted_at IS NOT NULL');
     // The listing query filters owner_id + parent_id + deleted_at IS NULL together on every
     // folder navigation; the single-column indexes above don't serve that combination directly.

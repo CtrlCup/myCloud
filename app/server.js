@@ -288,12 +288,12 @@ function fixUploadFilenameEncoding(req, res, next) {
 // "text/html", which was then served with that same Content-Type on inline view/download,
 // letting the browser render it as HTML/script (stored XSS). Deriving the type from the file
 // extension instead means we always decide what gets served how, never the uploader. Anything
-// not explicitly listed (notably svg/html/xhtml, which a browser can execute) falls back to
+// not explicitly listed (notably html/xhtml, which a browser can execute; svg is image/svg+xml, only safe because file delivery adds a sandbox CSP) falls back to
 // application/octet-stream, which browsers download rather than render.
 const SAFE_MIME_TYPES = {
   txt: 'text/plain', csv: 'text/csv', md: 'text/markdown', log: 'text/plain',
   json: 'application/json', xml: 'text/plain',
-  html: 'text/plain', htm: 'text/plain', xhtml: 'text/plain', svg: 'text/plain', yaml: 'text/plain', yml: 'text/plain',
+  html: 'text/plain', htm: 'text/plain', xhtml: 'text/plain', svg: 'image/svg+xml', yaml: 'text/plain', yml: 'text/plain',
   js: 'text/plain', mjs: 'text/plain', ts: 'text/plain', css: 'text/plain', py: 'text/plain',
   java: 'text/plain', c: 'text/plain', cpp: 'text/plain', h: 'text/plain', go: 'text/plain',
   rs: 'text/plain', sh: 'text/plain', sql: 'text/plain', php: 'text/plain', rb: 'text/plain',
@@ -324,7 +324,8 @@ function getSafeMimeType(filename) {
 // and media viewers do not work inside a sandboxed document; they still get default-src 'none'.
 function setFileServeHeaders(res, filename) {
   const mime = getSafeMimeType(filename);
-  const passive = mime === 'application/pdf' || /^(image|video|audio)\//.test(mime);
+  // SVG is shown via <img> in the UI (no scripts run there) but must stay sandboxed top-level.
+  const passive = mime === 'application/pdf' || (/^(image|video|audio)\//.test(mime) && mime !== 'image/svg+xml');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', passive
     ? "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
