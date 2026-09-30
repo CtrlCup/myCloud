@@ -68,6 +68,23 @@ test('kill switch: 401 immediately, works again when re-enabled', async () => {
   assert.strictEqual(ok.status, 200);
 });
 
+test('key bearer cannot manage account security (403), session still can', async () => {
+  const k2 = await (await fetch(BASE + '/api/settings/api-keys', {
+    method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'sec' }),
+  })).json();
+  const h = { ...bearer(k2.key), 'Content-Type': 'application/json' };
+  for (const [method, path] of [
+    ['POST', '/api/settings/api-keys'], ['GET', '/api/settings/api-keys'],
+    ['POST', '/api/settings/2fa/totp/disable'], ['POST', '/api/settings/password'],
+  ]) {
+    const res = await fetch(BASE + path, { method, headers: h, body: method === 'POST' ? '{}' : undefined });
+    assert.strictEqual(res.status, 403, method + ' ' + path);
+  }
+  const ok = await fetch(BASE + '/api/settings/api-keys', { headers: { cookie } });
+  assert.strictEqual(ok.status, 200);
+  await fetch(`${BASE}/api/settings/api-keys/${k2.id}`, { method: 'DELETE', headers: { cookie } });
+});
+
 test('revoked key: 401', async () => {
   const del = await fetch(`${BASE}/api/settings/api-keys/${keyId}`, { method: 'DELETE', headers: { cookie } });
   assert.strictEqual(del.status, 200);

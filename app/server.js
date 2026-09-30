@@ -800,6 +800,16 @@ async function refreshSessionIdentity(req) {
   return true;
 }
 
+// Account-security changes (API keys, 2FA, passkeys, password, e-mail) need a real browser
+// session: otherwise a leaked API key could plant its own persistence that outlives revocation.
+// Place after requireAuth.
+function denyApiKey(req, res, next) {
+  if (req.session && req.session.isApiKey) {
+    return res.status(403).json({ error: 'Diese Aktion ist mit einem API-Key nicht erlaubt.' });
+  }
+  next();
+}
+
 // Authentication Middleware
 async function requireAuth(req, res, next) {
   if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
@@ -1322,7 +1332,7 @@ app.post('/api/auth/logout', (req, res) => {
    ========================================================================== */
 
 // 1. Registration Options
-app.post('/api/auth/passkey/register-options', requireAuth, async (req, res) => {
+app.post('/api/auth/passkey/register-options', requireAuth, denyApiKey, async (req, res) => {
   try {
     const userId = req.session.userId;
     const userRes = await pool.query('SELECT id, username FROM users WHERE id = $1', [userId]);
@@ -1361,7 +1371,7 @@ app.post('/api/auth/passkey/register-options', requireAuth, async (req, res) => 
 });
 
 // 2. Verify Registration
-app.post('/api/auth/passkey/register-verify', requireAuth, async (req, res) => {
+app.post('/api/auth/passkey/register-verify', requireAuth, denyApiKey, async (req, res) => {
   const { credential, name } = req.body;
   const userId = req.session.userId;
   const expectedChallenge = req.session.currentChallenge;
@@ -5611,7 +5621,7 @@ app.get('/api/settings', requireAuth, async (req, res) => {
 /* ─── API Keys (personal access tokens for external/app clients) ─── */
 
 // List the current user's API keys (never returns the actual key, only metadata)
-app.get('/api/settings/api-keys', requireAuth, async (req, res) => {
+app.get('/api/settings/api-keys', requireAuth, denyApiKey, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT id, name, key_prefix, created_at, last_used_at FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC',
@@ -5625,7 +5635,7 @@ app.get('/api/settings/api-keys', requireAuth, async (req, res) => {
 });
 
 // Create a new API key. The full key is only ever returned here — only its hash is stored.
-app.post('/api/settings/api-keys', requireAuth, async (req, res) => {
+app.post('/api/settings/api-keys', requireAuth, denyApiKey, async (req, res) => {
   const name = (req.body.name || '').trim().slice(0, 100) || 'API-Key';
   try {
     const token = `mcld_${crypto.randomBytes(24).toString('hex')}`;
@@ -5646,7 +5656,7 @@ app.post('/api/settings/api-keys', requireAuth, async (req, res) => {
 });
 
 // Revoke (delete) one of the current user's API keys
-app.delete('/api/settings/api-keys/:id', requireAuth, async (req, res) => {
+app.delete('/api/settings/api-keys/:id', requireAuth, denyApiKey, async (req, res) => {
   try {
     const result = await pool.query(
       'DELETE FROM api_keys WHERE id = $1 AND user_id = $2 RETURNING id',
@@ -5695,7 +5705,7 @@ app.get('/api/users/storage', requireAuth, async (req, res) => {
 });
 
 // Update Profile details
-app.post('/api/settings/profile', requireAuth, async (req, res) => {
+app.post('/api/settings/profile', requireAuth, denyApiKey, async (req, res) => {
   const userId = req.session.userId;
   const { first_name, last_name, username, email, display_real_name } = req.body;
 
@@ -5758,7 +5768,7 @@ app.post('/api/settings/theme', requireAuth, async (req, res) => {
 
 // Post settings email
 // Toggle Email 2FA
-app.post('/api/settings/2fa/email', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/email', requireAuth, denyApiKey, async (req, res) => {
   const { enabled } = req.body;
   try {
     // Check if email is set
@@ -5782,7 +5792,7 @@ app.post('/api/settings/2fa/email', requireAuth, async (req, res) => {
 });
 
 // Setup TOTP 2FA (returns secret + qr-code url)
-app.post('/api/settings/2fa/totp/setup', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/totp/setup', requireAuth, denyApiKey, async (req, res) => {
   const speakeasy = require('speakeasy');
   try {
     const userRes = await pool.query('SELECT username FROM users WHERE id = $1', [req.session.userId]);
@@ -5807,7 +5817,7 @@ app.post('/api/settings/2fa/totp/setup', requireAuth, async (req, res) => {
 });
 
 // Confirm TOTP 2FA setup
-app.post('/api/settings/2fa/totp/confirm', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/totp/confirm', requireAuth, denyApiKey, async (req, res) => {
   const { code } = req.body;
   const tempSecret = req.session.tempTotpSecret;
 
@@ -5840,7 +5850,7 @@ app.post('/api/settings/2fa/totp/confirm', requireAuth, async (req, res) => {
 });
 
 // Disable TOTP 2FA
-app.post('/api/settings/2fa/totp/disable', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/totp/disable', requireAuth, denyApiKey, async (req, res) => {
   try {
     await pool.query(
       'UPDATE users SET two_factor_totp = false, totp_secret = null WHERE id = $1',
@@ -5853,7 +5863,7 @@ app.post('/api/settings/2fa/totp/disable', requireAuth, async (req, res) => {
 });
 
 // Change password
-app.post('/api/settings/password', requireAuth, async (req, res) => {
+app.post('/api/settings/password', requireAuth, denyApiKey, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   const userId = req.session.userId;
 
@@ -5881,7 +5891,7 @@ app.post('/api/settings/password', requireAuth, async (req, res) => {
 });
 
 // Delete user passkey
-app.delete('/api/settings/passkeys/:id', requireAuth, async (req, res) => {
+app.delete('/api/settings/passkeys/:id', requireAuth, denyApiKey, async (req, res) => {
   const passkeyId = req.params.id;
   const userId = req.session.userId;
 
