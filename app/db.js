@@ -199,6 +199,8 @@ async function initDb() {
     // automatically; this also drives the admin-triggered backfill over files uploaded before
     // that existed — NULL there just means "not processed yet", not "processing failed".
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS faststart_processed_at TIMESTAMP');
+    // Normalise legacy rows that stored an active document type (see getSafeMimeType in server.js).
+    await client.query("UPDATE files SET mime_type = 'text/plain' WHERE is_folder = false AND mime_type ~* '(html|xml|svg|javascript)' AND mime_type NOT LIKE 'application/vnd.%'");
     await client.query('CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at) WHERE deleted_at IS NOT NULL');
     // The listing query filters owner_id + parent_id + deleted_at IS NULL together on every
     // folder navigation; the single-column indexes above don't serve that combination directly.

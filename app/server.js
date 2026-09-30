@@ -292,7 +292,8 @@ function fixUploadFilenameEncoding(req, res, next) {
 // application/octet-stream, which browsers download rather than render.
 const SAFE_MIME_TYPES = {
   txt: 'text/plain', csv: 'text/csv', md: 'text/markdown', log: 'text/plain',
-  json: 'application/json', xml: 'application/xml', yaml: 'text/plain', yml: 'text/plain',
+  json: 'application/json', xml: 'text/plain',
+  html: 'text/plain', htm: 'text/plain', xhtml: 'text/plain', svg: 'text/plain', yaml: 'text/plain', yml: 'text/plain',
   js: 'text/plain', mjs: 'text/plain', ts: 'text/plain', css: 'text/plain', py: 'text/plain',
   java: 'text/plain', c: 'text/plain', cpp: 'text/plain', h: 'text/plain', go: 'text/plain',
   rs: 'text/plain', sh: 'text/plain', sql: 'text/plain', php: 'text/plain', rb: 'text/plain',
@@ -313,6 +314,21 @@ const SAFE_MIME_TYPES = {
 function getSafeMimeType(filename) {
   const ext = (filename.split('.').pop() || '').toLowerCase();
   return SAFE_MIME_TYPES[ext] || 'application/octet-stream';
+}
+
+// Protective headers for every user-file delivery (inline and download). The Content-Type is
+// always derived from the file name via getSafeMimeType (never from the DB column). nosniff stops
+// the browser from second-guessing it; the CSP keeps any document that still gets rendered
+// (text, xml, json ...) inert: sandbox = opaque origin, no scripts, default-src 'none'.
+// Passive viewer types (pdf/image/video/audio) skip `sandbox` because browsers' built-in PDF
+// and media viewers do not work inside a sandboxed document; they still get default-src 'none'.
+function setFileServeHeaders(res, filename) {
+  const mime = getSafeMimeType(filename);
+  const passive = mime === 'application/pdf' || /^(image|video|audio)\//.test(mime);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', passive
+    ? "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'"
+    : "default-src 'none'; sandbox");
 }
 
 const pdfParse = require('pdf-parse');
@@ -2317,20 +2333,11 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
       return res.status(404).json({ error: 'Physical file not found on disk' });
     }
 
+    setFileServeHeaders(res, file.name);
     if (req.query.inline === 'true') {
-      let mimeType = file.mime_type;
-      if (!mimeType) {
-        const ext = file.name.split('.').pop().toLowerCase();
-        if (ext === 'pdf') {
-          mimeType = 'application/pdf';
-        } else {
-          mimeType = 'application/octet-stream';
-        }
-      }
-
       return res.sendFile(filePath, {
         headers: {
-          'Content-Type': mimeType,
+          'Content-Type': getSafeMimeType(file.name),
           'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
         }
       });
@@ -2733,7 +2740,7 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
     await pool.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, $3, $4, false, $5, $6, $7)`,
-      [newName, newRelativePath, file.mime_type, file.size, targetFolderId, userId, file.content]
+      [newName, newRelativePath, getSafeMimeType(newName), file.size, targetFolderId, userId, file.content]
     );
   }
 }
@@ -3039,6 +3046,9 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     if (!finalName.toLowerCase().endsWith(ext)) {
       finalName += ext;
     }
+
+    // Never trust the ad-hoc mapping above: derive the stored type from the final name.
+    if (type === 'txt' || type === 'codex' || type === 'other') mimeType = getSafeMimeType(finalName);
 
     // The physical on-disk extension must go through the same allowlist as uploads/copies
     // (see safeFileExtension above) — `ext` above can come straight from the user-supplied
@@ -4986,20 +4996,11 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
       }
     }
 
+    setFileServeHeaders(res, file.name);
     if (req.query.inline === 'true') {
-      let mimeType = file.mime_type;
-      if (!mimeType) {
-        const ext = file.name.split('.').pop().toLowerCase();
-        if (ext === 'pdf') {
-          mimeType = 'application/pdf';
-        } else {
-          mimeType = 'application/octet-stream';
-        }
-      }
-
       return res.sendFile(filePath, {
         headers: {
-          'Content-Type': mimeType,
+          'Content-Type': getSafeMimeType(file.name),
           'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
         }
       });
