@@ -5444,6 +5444,27 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
    SETTINGS & ADMIN PANEL ROUTES
    ========================================================================== */
 
+// Avatar type detection by magic bytes; returns the enforced file extension or null.
+const AVATAR_EXTS = ['png', 'jpg', 'gif', 'webp'];
+function detectAvatarImageExt(filePath) {
+  const buf = Buffer.alloc(12);
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buf, 0, 12, 0);
+  } catch (e) {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  const head = buf.subarray(0, 6).toString('latin1');
+  if (head === 'GIF87a' || head === 'GIF89a') return 'gif';
+  if (buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return null;
+}
+
 // Upload Avatar
 app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req, res) => {
   if (!req.file) {
@@ -5452,20 +5473,26 @@ app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req
 
   const userId = req.session.userId;
 
-  // Verify it is an image
-  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif'];
-  if (!allowedMimeTypes.includes(req.file.mimetype)) {
+  // Verify it is an image by magic bytes (the client-reported mimetype/filename is not trusted)
+  const avatarExt = detectAvatarImageExt(req.file.path);
+  if (!avatarExt) {
     fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: 'Only JPEG, PNG, or GIF images are allowed.' });
+    return res.status(400).json({ error: 'Nur JPEG-, PNG-, GIF- oder WebP-Bilder sind erlaubt.' });
   }
 
   // Max size 2MB
   if (req.file.size > 2 * 1024 * 1024) {
     fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: 'Image size must be less than 2 MB.' });
+    return res.status(400).json({ error: 'Das Bild muss kleiner als 2 MB sein.' });
   }
 
   try {
+    // Force the stored extension from the detected type (never from the original name)
+    const avatarFilename = path.basename(req.file.filename, path.extname(req.file.filename)) + '.' + avatarExt;
+    fs.renameSync(req.file.path, path.join(path.dirname(req.file.path), avatarFilename));
+    req.file.path = path.join(path.dirname(req.file.path), avatarFilename);
+    req.file.filename = avatarFilename;
+
     // Get old avatar path
     const oldAvatarRes = await pool.query('SELECT avatar_path FROM users WHERE id = $1', [userId]);
     const oldAvatarPath = oldAvatarRes.rows[0]?.avatar_path;
@@ -5507,13 +5534,17 @@ app.get('/api/users/:id/avatar', requireAuth, async (req, res) => {
     const user = userRes.rows[0];
     if (user.avatar_path) {
       const filePath = path.join(UPLOADS_DIR, user.avatar_path);
+      const ext = path.extname(user.avatar_path).slice(1).toLowerCase();
+      // Legacy avatars with a non-image extension (e.g. .html/.svg) are never served actively
+      if (!AVATAR_EXTS.includes(ext)) return res.status(404).send('Not found');
       if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
+        setFileServeHeaders(res, user.avatar_path);
+        return res.sendFile(filePath, { headers: { 'Content-Type': getSafeMimeType(user.avatar_path) } });
       }
     }
 
     // Fallback: Generate Initial SVG Avatar using Accent colors from CSS
-    const initials = user.username.charAt(0).toUpperCase();
+    const initials = user.username.charAt(0).toUpperCase().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
       <rect width="100" height="100" fill="#161f30" rx="50"/>
       <text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" font-family="'Outfit', sans-serif" font-size="45" font-weight="700" fill="#00d2ff">${initials}</text>
