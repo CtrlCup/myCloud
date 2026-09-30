@@ -25,9 +25,11 @@ const { version: APP_VERSION } = require('./package.json');
 const { getVersionStatus, logVersionStatus, checkForUpdate, GITHUB_REPO } = require('./version');
 
 require('dotenv').config();
+const { parseTrustProxy } = require('./trust-proxy');
 
 const app = express();
-app.set('trust proxy', true);
+// req.ip (Rate-Limits) und req.protocol hängen daran; siehe TRUST_PROXY in .env.example.
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 const PORT = process.env.PORT || 3000;
 
 // Setup directories

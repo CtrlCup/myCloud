@@ -30,5 +30,7 @@ services:
       SESSION_SECRET: test-only-session-secret-not-for-production
       REGISTRATION_ENABLED: "true"
       APP_URL: http://localhost:3099
+      # Test-Client kommt vom Docker-Gateway (privat); ohne dies würde XFF vertraut (tests/zz-trust-proxy.test.js).
+      TRUST_PROXY: "false"
     # Die App startet vor Postgres, wenn sie keinen Retry hat — daher einfacher Neustart.
     restart: on-failure
