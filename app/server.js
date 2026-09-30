@@ -630,6 +630,7 @@ function regenerateSession(req) {
 }
 
 // Helper to recursively check if a fileId is a descendant of ancestorId using a CTE.
+// Trashed items (deleted_at) break the chain, so anything in or below the trash is never a descendant.
 // This replaces O(N) sequential database queries in loops with a single efficient index-backed query.
 async function isDescendantOf(fileId, ancestorId) {
   if (fileId === ancestorId) return true;
@@ -637,9 +638,10 @@ async function isDescendantOf(fileId, ancestorId) {
   try {
     const res = await pool.query(
       `WITH RECURSIVE file_path AS (
-        SELECT id, parent_id FROM files WHERE id = $1
+        SELECT id, parent_id FROM files WHERE id = $1 AND deleted_at IS NULL
         UNION ALL
         SELECT f.id, f.parent_id FROM files f JOIN file_path fp ON f.id = fp.parent_id
+        WHERE f.deleted_at IS NULL
       )
       SELECT EXISTS(SELECT 1 FROM file_path WHERE id = $2) AS is_descendant`,
       [fileId, ancestorId]
@@ -2399,11 +2401,11 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
 async function addFolderToZip(zip, folderId, currentPath, userId) {
   const subtreeRes = await pool.query(
     `WITH RECURSIVE subtree AS (
-       SELECT id, name, parent_id, is_folder, path FROM files WHERE id = $1 AND owner_id = $2
+       SELECT id, name, parent_id, is_folder, path FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
        UNION ALL
        SELECT f.id, f.name, f.parent_id, f.is_folder, f.path FROM files f
        JOIN subtree s ON f.parent_id = s.id
-       WHERE f.owner_id = $2
+       WHERE f.owner_id = $2 AND f.deleted_at IS NULL
      )
      SELECT id, name, parent_id, is_folder, path FROM subtree WHERE id != $1`,
     [folderId, userId]
@@ -4522,7 +4524,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
     }
 
     // Get the base file/folder shared
-    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size, is_one_time_note FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size, is_one_time_note FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
     if (baseFileRes.rows.length === 0) {
       return res.status(404).json({ error: 'Shared content no longer exists.' });
     }
@@ -4750,13 +4752,14 @@ async function verifyPublicShareAccess(slug, fileId, req) {
   }
 
   // Verify fileId is either the shared file/folder or a descendant
-  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [parseInt(fileId)]);
+  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND deleted_at IS NULL', [parseInt(fileId)]);
   if (fileRes.rows.length === 0) return { error: 'File not found.', status: 404 };
 
   const file = fileRes.rows[0];
   const isValid = await isDescendantOf(file.id, share.file_id);
 
-  if (!isValid) return { error: 'Access denied.', status: 403 };
+  // 404 (not 403) so a file sitting in a trashed subfolder is indistinguishable from a missing one.
+  if (!isValid) return { error: 'File not found.', status: 404 };
 
   return { file, share };
 }
@@ -5126,8 +5129,12 @@ app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilen
     }
 
     // Verify parentId is descendant of shared folder
-    const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
     const baseFile = baseFileRes.rows[0];
+    if (!baseFile) {
+      fs.unlinkSync(currentPhysicalPath);
+      return res.status(404).json({ error: 'Shared content no longer exists.' });
+    }
 
     let targetFolderId = parentId !== null ? parentId : baseFile.id;
     if (!await isDescendantOf(targetFolderId, baseFile.id)) {
@@ -5199,7 +5206,7 @@ async function verifyPublicWriteAccess(slug, req) {
   if (!share.can_write) return { error: 'Write permissions denied.', status: 403 };
   const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
   if (share.password_hash && !isUnlocked) return { error: 'Password required.', status: 401 };
-  const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1', [share.file_id]);
+  const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
   if (baseFileRes.rows.length === 0) return { error: 'Shared content no longer exists.', status: 404 };
   return { share, baseFile: baseFileRes.rows[0] };
 }
@@ -5291,7 +5298,7 @@ app.delete('/api/public/shares/:slug/files/:fileId', async (req, res) => {
     if (fid === baseFile.id) return res.status(403).json({ error: 'Cannot delete the shared root.' });
     if (!(await isWithinSharedFolder(fid, baseFile.id))) return res.status(403).json({ error: 'Access denied.' });
 
-    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fid, baseFile.owner_id]);
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [fid, baseFile.owner_id]);
     if (fileRes.rows.length === 0) return res.status(404).json({ error: 'Not found.' });
 
     // Soft-delete into the owner's trash, same as an owner-initiated delete — a
@@ -5374,7 +5381,7 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     });
     archive.pipe(res);
 
-    const baseFileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
     const ownerId = baseFileRes.rows[0].owner_id;
 
     await addFolderToZip(archive, targetFolder.id, '', ownerId);
@@ -5439,7 +5446,7 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
     archive.pipe(res);
 
     for (const id of ids) {
-      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [id, baseFile.owner_id]);
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [id, baseFile.owner_id]);
       if (fileRes.rows.length === 0) continue;
       const file = fileRes.rows[0];
       if (!(await isWithinSharedFolder(file.id, baseFile.id))) continue;
