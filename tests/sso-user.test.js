@@ -59,6 +59,19 @@ test('setup: Stack erreichbar', async () => {
   setupOk = true;
 });
 
+test('verifizierte E-Mail: bestehendes Konto wird verknüpft', async (t) => {
+  if (!setupOk) return t.skip();
+  const email = `link${RUN}@example.test`;
+  const local = await register(email);
+  const before = count();
+  const r = sso({ sub: 'sub-link-' + RUN, email: email.toUpperCase(), email_verified: true, preferred_username: 'other' }, { allowEmailLinking: true });
+  assert.strictEqual(r.user.id, local.id);
+  assert.strictEqual(r.linked, true);
+  assert.strictEqual(r.created, false);
+  assert.strictEqual(count(), before);
+  assert.strictEqual(psql(`SELECT sso_id FROM users WHERE id=${local.id}`), 'sub-link-' + RUN);
+});
+
 test('nicht verifiziert (false, String, fehlend) oder allowEmailLinking=false: kein Link, neues Konto', async (t) => {
   if (!setupOk) return t.skip();
   const email = `nolink${RUN}@example.test`;
@@ -156,4 +169,23 @@ test('Profil speichern setzt profile_overridden nur bei Änderung von E-Mail/Nam
   assert.strictEqual(psql(`SELECT profile_overridden FROM users WHERE id=${me.user.id}`), 'f');
   assert.ok((await save({ ...base, first_name: 'Neu' })).ok);
   assert.strictEqual(psql(`SELECT profile_overridden FROM users WHERE id=${me.user.id}`), 't');
+});
+
+test('manuelle Verknüpfung: ohne email_verified, belegte sso_id und fremde Identität werden abgelehnt', async (t) => {
+  if (!setupOk) return t.skip();
+  const u1 = localUser('man1' + RUN, `man1${RUN}@example.test`);
+  const u2 = localUser('man2' + RUN, `man2${RUN}@example.test`);
+  const sub = 'sub-man-' + RUN;
+  const ok = sso({ sub }, null, { fn: 'link', userId: u1.id });
+  assert.strictEqual(ok.user.id, u1.id);
+  assert.strictEqual(psql(`SELECT sso_id FROM users WHERE id=${u1.id}`), sub);
+  assert.strictEqual(sso({ sub }, null, { fn: 'link', userId: u1.id }).user.id, u1.id); // idempotent
+  assert.strictEqual(sso({ sub }, null, { fn: 'link', userId: u2.id }).err, 'ALREADY_LINKED_OTHER');
+  assert.strictEqual(sso({ sub: sub + 'x' }, null, { fn: 'link', userId: u1.id }).err, 'USER_LINKED_ELSEWHERE');
+  assert.strictEqual(psql(`SELECT sso_id IS NULL FROM users WHERE id=${u2.id}`), 't');
+});
+
+test('HTTP: /auth/sso/link braucht Login; Status ohne SSO liefert ssoLinkable=false', async () => {
+  const res = await fetch(BASE + '/auth/sso/link', { redirect: 'manual' });
+  assert.strictEqual(res.status, 401);
 });

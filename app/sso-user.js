@@ -44,6 +44,13 @@ function pickUsernameBase(claims) {
   return '';
 }
 
+// email_verified zählt nur als strikt boolesches true. Der String "true" (manche IdPs liefern so etwas)
+// wird bewusst NICHT akzeptiert: eine automatische Kontoverknüpfung ist eine Übernahme-Entscheidung,
+// da gilt im Zweifel "nicht verknüpfen". Verknüpfen kann der Nutzer dann manuell in den Einstellungen.
+function isEmailVerified(claims) {
+  return claims.email_verified === true;
+}
+
 async function uniqueUsername(pool, base) {
   let candidate = base;
   for (let i = 0; i < 10; i++) {
@@ -122,7 +129,7 @@ async function createUser(pool, claims, provider) {
 }
 
 // Ergebnis: { user, created, linked }. Wirft SsoUserError('MISSING_CLAIMS').
-async function findOrCreateSsoUser(pool, claims, { provider = 'authentik' } = {}) {
+async function findOrCreateSsoUser(pool, claims, { provider = 'authentik', allowEmailLinking = true } = {}) {
   if (!claims || !claims.sub) throw new SsoUserError('MISSING_CLAIMS', 'Die SSO-Antwort enthält keine Benutzerkennung.');
 
   const found = await pool.query('SELECT * FROM users WHERE sso_id = $1 AND sso_provider = $2', [claims.sub, provider]);
@@ -130,7 +137,38 @@ async function findOrCreateSsoUser(pool, claims, { provider = 'authentik' } = {}
     return { user: await refreshProfile(pool, found.rows[0], claims), created: false, linked: false };
   }
 
+  const email = normalizeEmail(claims.email);
+  if (allowEmailLinking && email && isEmailVerified(claims)) {
+    const cand = await pool.query('SELECT id, sso_id FROM users WHERE LOWER(email) = $1', [email]);
+    if (cand.rows.length === 1 && !cand.rows[0].sso_id) {
+      const upd = await pool.query(
+        'UPDATE users SET sso_id = $1, sso_provider = $2 WHERE id = $3 AND sso_id IS NULL RETURNING *',
+        [claims.sub, provider, cand.rows[0].id]
+      );
+      if (upd.rows.length > 0) return { user: await refreshProfile(pool, upd.rows[0], claims), created: false, linked: true };
+    }
+    // mehrere Treffer oder Konto hängt schon an einer anderen SSO-Identität: nicht verknüpfen
+  }
+
   return { user: await createUser(pool, claims, provider), created: true, linked: false };
 }
 
-module.exports = { findOrCreateSsoUser, sanitizeUsername, pickUsernameBase, SsoUserError, USERNAME_MAX };
+// Manuelle Verknüpfung durch einen eingeloggten Nutzer (kein email_verified nötig).
+// Wirft SsoUserError('ALREADY_LINKED_OTHER') / ('USER_LINKED_ELSEWHERE').
+async function linkSsoToUser(pool, userId, claims, provider = 'authentik') {
+  if (!claims || !claims.sub) throw new SsoUserError('MISSING_CLAIMS', 'Die SSO-Antwort enthält keine Benutzerkennung.');
+  const owner = await pool.query('SELECT id FROM users WHERE sso_id = $1 AND sso_provider = $2', [claims.sub, provider]);
+  if (owner.rows.length > 0 && owner.rows[0].id !== userId) {
+    throw new SsoUserError('ALREADY_LINKED_OTHER', 'Dieses SSO-Konto ist bereits mit einem anderen Benutzer verknüpft.');
+  }
+  const upd = await pool.query(
+    'UPDATE users SET sso_id = $1, sso_provider = $2 WHERE id = $3 AND (sso_id IS NULL OR (sso_id = $1 AND sso_provider = $2)) RETURNING *',
+    [claims.sub, provider, userId]
+  );
+  if (upd.rows.length === 0) {
+    throw new SsoUserError('USER_LINKED_ELSEWHERE', 'Dein Konto ist bereits mit einer anderen SSO-Identität verknüpft.');
+  }
+  return upd.rows[0];
+}
+
+module.exports = { findOrCreateSsoUser, linkSsoToUser, sanitizeUsername, pickUsernameBase, isEmailVerified, SsoUserError, USERNAME_MAX };

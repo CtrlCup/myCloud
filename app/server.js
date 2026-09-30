@@ -7,7 +7,7 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const archiver = require('archiver');
 const crypto = require('crypto');
-const { findOrCreateSsoUser, SsoUserError } = require('./sso-user');
+const { findOrCreateSsoUser, linkSsoToUser, SsoUserError } = require('./sso-user');
 const swaggerUi = require('swagger-ui-express');
 const yaml = require('js-yaml');
 const compression = require('compression');
@@ -885,11 +885,15 @@ const getExpectedOrigin = (req) => {
 app.get('/api/auth/status', async (req, res) => {
   if (req.session.userId) {
     try {
-      const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, theme_preference FROM users WHERE id = $1', [req.session.userId]);
+      const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, theme_preference, sso_id FROM users WHERE id = $1', [req.session.userId]);
       if (userRes.rows.length > 0) {
+        const { sso_id: ssoId, ...user } = userRes.rows[0];
+        // ssoLinkable: Schaltfläche "Mit SSO verknüpfen" in den Einstellungen
+        const ssoLinkable = !ssoId && !req.session.isApiKey && (await getSetting('sso_enabled')) === 'true';
         return res.json({
           loggedIn: true,
-          user: userRes.rows[0]
+          user,
+          ssoLinkable
         });
       }
     } catch (e) {
@@ -1542,6 +1546,8 @@ app.get('/auth/sso', async (req, res) => {
 
     const state = crypto.randomBytes(16).toString('hex');
     req.session.ssoState = state;
+    // Link-Modus nur über /auth/sso/link (setzt ssoLinkUserId); ein normaler Login-Start beendet ihn.
+    if (req.query.link !== '1') delete req.session.ssoLinkUserId;
 
     const authUrl = `${discovery.authorization_endpoint}?` +
       `client_id=${encodeURIComponent(clientId)}&` +
@@ -1557,12 +1563,18 @@ app.get('/auth/sso', async (req, res) => {
   }
 });
 
+// Startet den SSO-Flow im Link-Modus für den eingeloggten Nutzer (kein API-Key).
+app.get('/auth/sso/link', requireAuth, denyApiKey, (req, res) => {
+  req.session.ssoLinkUserId = req.session.userId;
+  res.redirect('/auth/sso?link=1');
+});
+
 // Kleine deutsche Fehlerseite mit Link zurück zum Login
-function ssoErrorPage(res, status, message) {
+function ssoErrorPage(res, status, message, backHref = '/', backText = 'Zurück zum Login') {
   res.status(status).type('html').send(
     '<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SSO-Fehler</title></head>' +
     '<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">' +
-    `<h2>SSO-Anmeldung fehlgeschlagen</h2><p>${message}</p><p><a href="/">Zurück zum Login</a></p></body></html>`
+    `<h2>SSO-Anmeldung fehlgeschlagen</h2><p>${message}</p><p><a href="${backHref}">${backText}</a></p></body></html>`
   );
 }
 
@@ -1576,6 +1588,9 @@ app.get('/auth/sso/callback', async (req, res) => {
   }
   
   delete req.session.ssoState;
+  // Vor dem session.regenerate() unten lesen, danach wäre es weg.
+  const linkUserId = req.session.ssoLinkUserId;
+  delete req.session.ssoLinkUserId;
 
   try {
     const clientId = await getSetting('sso_client_id');
@@ -1615,7 +1630,17 @@ app.get('/auth/sso/callback', async (req, res) => {
     }
 
     const userInfo = await userResponse.json();
-    const { user } = await findOrCreateSsoUser(pool, userInfo, { allowEmailLinking: false });
+    let user, linked = false, manualLink = false;
+    if (linkUserId) {
+      // Manuelle Verknüpfung: nur für die noch eingeloggte Sitzung, die den Link-Modus gestartet hat.
+      if (linkUserId !== req.session.userId) {
+        return ssoErrorPage(res, 400, 'Die Sitzung ist abgelaufen. Bitte melde dich an und starte die Verknüpfung erneut.');
+      }
+      user = await linkSsoToUser(pool, linkUserId, userInfo);
+      manualLink = true;
+    } else {
+      ({ user, linked } = await findOrCreateSsoUser(pool, userInfo, { allowEmailLinking: true }));
+    }
     if (user.is_active === false) {
       return res.status(403).send('Ihr Account wurde gesperrt. Bitte wenden Sie sich an einen Administrator.');
     }
@@ -1625,9 +1650,13 @@ app.get('/auth/sso/callback', async (req, res) => {
     req.session.role = user.role;
     await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
 
-    res.redirect('/');
+    if (manualLink) return res.redirect('/?sso=linked_manual#settings');
+    res.redirect(linked ? '/?sso=linked' : '/');
   } catch (err) {
     console.error('SSO Callback error:', err);
+    if (err instanceof SsoUserError && linkUserId && err.code !== 'MISSING_CLAIMS') {
+      return ssoErrorPage(res, 409, err.message, '/#settings', 'Zurück zu den Einstellungen');
+    }
     if (err instanceof SsoUserError) {
       return ssoErrorPage(res, 400, 'Anmeldung nicht möglich: Der SSO-Anbieter hat weder einen Benutzernamen noch eine E-Mail-Adresse geliefert. Bitte wende dich an einen Administrator.');
     }
