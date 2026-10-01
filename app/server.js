@@ -1632,9 +1632,10 @@ app.get('/auth/sso/callback', async (req, res) => {
     const userInfo = await userResponse.json();
     let user, linked = false, manualLink = false;
     if (linkUserId) {
-      // Manuelle Verknüpfung: nur für die noch eingeloggte Sitzung, die den Link-Modus gestartet hat.
-      if (linkUserId !== req.session.userId) {
-        return ssoErrorPage(res, 400, 'Die Sitzung ist abgelaufen. Bitte melde dich an und starte die Verknüpfung erneut.');
+      // Manuelle Verknüpfung: der Nutzer, der den Link-Modus gestartet hat, muss noch existieren und aktiv sein.
+      const linkUser = await pool.query('SELECT is_active FROM users WHERE id = $1', [linkUserId]);
+      if (linkUser.rows.length === 0 || linkUser.rows[0].is_active === false) {
+        return ssoErrorPage(res, 400, 'Die Verknüpfung ist nicht mehr möglich, da das Konto nicht mehr existiert oder gesperrt ist.');
       }
       user = await linkSsoToUser(pool, linkUserId, userInfo);
       manualLink = true;
@@ -5704,7 +5705,8 @@ app.get('/api/users/storage', requireAuth, async (req, res) => {
 // Update Profile details
 app.post('/api/settings/profile', requireAuth, denyApiKey, async (req, res) => {
   const userId = req.session.userId;
-  const { first_name, last_name, username, email, display_real_name } = req.body;
+  const { first_name, last_name, username, display_real_name } = req.body;
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
   if (!username || !email) {
     return res.status(400).json({ error: 'Benutzername und E-Mail sind erforderlich.' });
@@ -5722,7 +5724,7 @@ app.post('/api/settings/profile', requireAuth, denyApiKey, async (req, res) => {
   try {
     // Check conflicts
     const conflictRes = await pool.query(
-      'SELECT id FROM users WHERE (username = $1 OR email = $2) AND id != $3',
+      'SELECT id FROM users WHERE (username = $1 OR LOWER(email) = $2) AND id != $3',
       [cleanUsername, email, userId]
     );
 

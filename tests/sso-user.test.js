@@ -126,22 +126,39 @@ test('zweiter Login aktualisiert E-Mail/Name; Kollision crasht nicht; profile_ov
   const sub = 'sub-upd-' + RUN;
   const r1 = sso({ sub, preferred_username: 'upd' + RUN, email: `upd${RUN}@example.test`, given_name: 'A', family_name: 'B' }, {});
   const id = r1.user.id;
-  const r2 = sso({ sub, preferred_username: 'upd' + RUN, email: `upd2${RUN}@example.test`, given_name: 'C', family_name: 'D' }, {});
+  const r2 = sso({ sub, preferred_username: 'upd' + RUN, email: `upd2${RUN}@example.test`, email_verified: true, given_name: 'C', family_name: 'D' }, {});
   assert.strictEqual(r2.user.id, id);
   assert.strictEqual(r2.user.email, `upd2${RUN}@example.test`);
   assert.strictEqual(r2.user.first_name, 'C');
   // E-Mail eines anderen Kontos: unverändert, kein Fehler, Name wird trotzdem aktualisiert
   const other = `upd-other${RUN}@example.test`;
   localUser('updother' + RUN, other);
-  const r3 = sso({ sub, preferred_username: 'upd' + RUN, email: other, given_name: 'E', family_name: 'F' }, {});
+  const r3 = sso({ sub, preferred_username: 'upd' + RUN, email: other, email_verified: true, given_name: 'E', family_name: 'F' }, {});
   assert.strictEqual(r3.err, undefined);
   assert.strictEqual(r3.user.email, `upd2${RUN}@example.test`);
   assert.strictEqual(r3.user.first_name, 'E');
   // lokal überschrieben: keine Aktualisierung mehr
   psql(`UPDATE users SET profile_overridden = true WHERE id=${id}`);
-  const r4 = sso({ sub, preferred_username: 'upd' + RUN, email: `upd4${RUN}@example.test`, given_name: 'G' }, {});
+  const r4 = sso({ sub, preferred_username: 'upd' + RUN, email: `upd4${RUN}@example.test`, email_verified: true, given_name: 'G' }, {});
   assert.strictEqual(r4.user.email, `upd2${RUN}@example.test`);
   assert.strictEqual(r4.user.first_name, 'E');
+});
+
+test('refreshProfile: E-Mail nur bei email_verified === true, Name immer', async (t) => {
+  if (!setupOk) return t.skip();
+  const sub = 'sub-ver-' + RUN;
+  const mail = `ver${RUN}@example.test`;
+  const id = sso({ sub, preferred_username: 'ver' + RUN, email: mail }, {}).user.id;
+  const upd = (claims) => sso({ sub, preferred_username: 'ver' + RUN, ...claims }, {}).user;
+  let u = upd({ email: `ver-a${RUN}@example.test`, given_name: 'N1' });
+  assert.strictEqual(u.id, id);
+  assert.strictEqual(u.email, mail);
+  assert.strictEqual(u.first_name, 'N1');
+  u = upd({ email: `ver-b${RUN}@example.test`, email_verified: 'true', given_name: 'N2' });
+  assert.strictEqual(u.email, mail);
+  assert.strictEqual(u.first_name, 'N2');
+  u = upd({ email: `ver-c${RUN}@example.test`, email_verified: true });
+  assert.strictEqual(u.email, `ver-c${RUN}@example.test`);
 });
 
 test('Profil speichern setzt profile_overridden nur bei Änderung von E-Mail/Name', async (t) => {
@@ -161,6 +178,9 @@ test('Profil speichern setzt profile_overridden nur bei Änderung von E-Mail/Nam
   assert.strictEqual(psql(`SELECT profile_overridden FROM users WHERE id=${me.user.id}`), 'f');
   assert.ok((await save({ ...base, first_name: 'Neu' })).ok);
   assert.strictEqual(psql(`SELECT profile_overridden FROM users WHERE id=${me.user.id}`), 't');
+  // gemischt geschriebene E-Mail wird kleingeschrieben gespeichert
+  assert.ok((await save({ ...base, first_name: 'Neu', email: `Prof-Mixed${RUN}@Example.TEST` })).ok);
+  assert.strictEqual(psql(`SELECT email FROM users WHERE id=${me.user.id}`), `prof-mixed${RUN}@example.test`);
 });
 
 test('manuelle Verknüpfung: ohne email_verified, belegte sso_id und fremde Identität werden abgelehnt', async (t) => {

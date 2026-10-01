@@ -68,9 +68,10 @@ async function emailTakenByOther(pool, email, userId) {
 
 // Name/E-Mail aus den Claims übernehmen, außer der Nutzer hat sie lokal überschrieben (profile_overridden).
 // Eine bereits von einem anderen Konto benutzte E-Mail bleibt unverändert (kein Fehler).
+// Die E-Mail wird nur bei verifizierter Adresse (email_verified === true) übernommen.
 async function refreshProfile(pool, user, claims) {
   if (user.profile_overridden) return user;
-  const email = normalizeEmail(claims.email);
+  const email = isEmailVerified(claims) ? normalizeEmail(claims.email) : null;
   const first = cleanName(claims.given_name);
   const last = cleanName(claims.family_name);
   const sets = [];
