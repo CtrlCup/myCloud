@@ -662,7 +662,17 @@ async function isDescendantOf(fileId, ancestorId) {
 // filter already skips binary formats (zip/images/video/pdf) via their Content-Type, and skips
 // anything that already has a Content-Encoding, so this doesn't double-compress file downloads.
 app.use(compression());
-app.use(express.json());
+// Global JSON limit stays at the 100 KB default; only the two text-editor save routes (owner and
+// writable public share) send a whole file as JSON and get a bigger limit. One middleware picks
+// the parser per request, since an earlier global parser would otherwise reject the body first.
+const smallJsonParser = express.json();
+const EDITOR_CONTENT_LIMIT = '20mb';
+const editorJsonParser = express.json({ limit: EDITOR_CONTENT_LIMIT });
+const EDITOR_CONTENT_ROUTE = /^\/api\/(files\/content\/[^/]+|public\/shares\/[^/]+\/content\/[^/]+)$/;
+app.use((req, res, next) => {
+  const parser = req.method === 'PUT' && EDITOR_CONTENT_ROUTE.test(req.path) ? editorJsonParser : smallJsonParser;
+  parser(req, res, next);
+});
 app.use(express.urlencoded({ extended: true }));
 // index: false — index.html needs SEO tags injected per-request (see renderAppShell below),
 // so it must never be served as-is by the static middleware's automatic directory index.
@@ -6614,6 +6624,13 @@ app.use((err, req, res, next) => {
       return res.status(413).json({ error: 'File is too large.' });
     }
     return res.status(400).json({ error: err.message });
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Der Inhalt ist zu groß, um ihn zu speichern.' });
+  }
+  next(err);
+});
+
   }
   next(err);
 });
