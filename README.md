@@ -22,7 +22,9 @@ myCloud ist ein Node/Express-Monolith mit schlankem Vanilla-JS-Frontend — kein
 - [Schnellstart](#schnellstart)
 - [Konfiguration](#konfiguration-umgebungsvariablen)
 - [API & KI-Zugriff](#api--ki-zugriff)
+- [Update-Hinweise](#update-hinweise)
 - [Versionierung](#versionierung)
+- [Tests](#tests)
 - [Screenshots](#screenshots)
 - [Tech-Stack](#tech-stack)
 
@@ -37,8 +39,11 @@ myCloud ist ein Node/Express-Monolith mit schlankem Vanilla-JS-Frontend — kein
 
 ### Freigabe & Sicherheit
 - Freigabe-Links mit granularen Rechten (Lesen, Schreiben/Upload, Download, ZIP-Export), Passwortschutz, Ablaufdatum, Download-Limit
+- Reine **Download-Freigaben** („Nur Herunterladen“): Der Empfänger kann die Datei laden, aber nicht in der Vorschau öffnen
 - Selbstzerstörende Einmalnachrichten (inkl. Datei-Anhängen)
 - Mehrstufige Authentifizierung: Passwort, **Passkeys** (WebAuthn), **SSO/OIDC** (Authentik-kompatibel) — inklusive automatischer Weiterleitung und optionalem "Nur SSO"-Modus
+- Bestehende Konten lassen sich mit SSO **verknüpfen** (automatisch bei vom Provider bestätigter E-Mail, sonst manuell unter *Einstellungen → Mit SSO verknüpfen*)
+- Gehärtete Datei-Auslieferung: Dateitypen werden serverseitig bestimmt (aktive Inhalte wie HTML werden nie als Webseite ausgeliefert), Avatare per Magic-Bytes geprüft, Dateien im Papierkorb sind auch über Freigaben nicht erreichbar
 - Rollenbasierte Berechtigungen mit Speicherkontingenten pro Nutzer oder Gruppe
 
 ### Admin-Konsole
@@ -95,6 +100,7 @@ Alle Variablen sind optional und lassen sich alternativ bequem über die **Admin
 | `SESSION_SECRET` | Zufälliger, sicherer String zur Session-Absicherung | — |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | PostgreSQL-Zugangsdaten | `mycloud` |
 | `REGISTRATION_ENABLED` | Selbstregistrierung über die Anmeldeseite erlauben | `true` |
+| `TRUST_PROXY` | Welchen Reverse-Proxys die App bei `X-Forwarded-For`/`-Proto` vertraut, siehe [Reverse-Proxy](#reverse-proxy-trust_proxy) | `loopback, linklocal, uniquelocal` |
 
 </details>
 
@@ -126,6 +132,23 @@ Redirect-URI im OIDC-Provider (z. B. Authentik) hinterlegt sein.
 
 </details>
 
+### Reverse-Proxy (`TRUST_PROXY`)
+
+Die App leitet die Client-IP (u. a. für das Registrierungs-Limit) aus `X-Forwarded-For` ab. Damit
+niemand diesen Header fälschen kann, vertraut sie **nur Proxys aus lokalen oder privaten Netzen**
+(Loopback, Link-Local, private Adressbereiche). Das passt für Caddy/Nginx auf demselben Host oder
+im Docker-Netz, ohne dass du etwas einstellen musst.
+
+| Setup | Empfohlener Wert |
+|---|---|
+| Proxy auf demselben Host / im Docker-Netz | nichts setzen (Standard) |
+| Proxy oder CDN mit **öffentlicher** Adresse (z. B. Cloudflare, externer Load-Balancer) | `TRUST_PROXY=<IP/CIDR-Liste>` oder die Anzahl der Proxy-Hops, z. B. `1` |
+| App direkt ohne Proxy erreichbar (Port frei veröffentlicht) | `TRUST_PROXY=false` oder den Port nur an `127.0.0.1` binden |
+
+`TRUST_PROXY=true` vertraut jeder Quelle und macht Client-IPs fälschbar — nicht empfohlen. Die Variable
+muss in `docker-compose.yml` unter `app.environment` durchgereicht werden (siehe
+`docker-compose.example.yml`, dort auskommentiert vorbereitet).
+
 ## API & KI-Zugriff
 
 myCloud hat keine separate "App-API" — dieselbe REST-API, die auch das Web-UI (`app.js`) antreibt,
@@ -136,12 +159,36 @@ lässt sich vollständig extern nutzen:
 - **Authentifizierung per API-Key:** In den persönlichen Einstellungen lässt sich ein Key
   (`Authorization: Bearer mcld_...`) erzeugen, der einem externen Client exakt dieselben Rechte wie
   dem erstellenden Benutzer gibt — bei Admins also auch Zugriff auf alle Admin-Funktionen.
+  Ausnahme: Funktionen, die das Konto selbst absichern (API-Keys verwalten, 2FA, Passkeys, Passwort,
+  Profil), sind mit einem Key bewusst gesperrt und nur im Browser möglich. Die Key-Authentifizierung
+  ist zustandslos: Es entsteht keine Session und kein Cookie, ein widerrufener Key verliert sofort
+  jeden Zugriff.
 - **Für KI-Agenten:** [`docs/KI-Zugriff.md`](docs/KI-Zugriff.md) beschreibt, wie sich die eigene
   Instanz per KI-Assistent (Claude, ChatGPT & Co.) einrichten, personalisieren und im Alltag
   bedienen lässt.
 - **Global abschaltbar:** Ein Admin kann API-Key-Authentifizierung instanzweit deaktivieren
   (**Admin-Einstellungen → Registrierung & SSO → API-Zugriff**), ohne bestehende Keys zu löschen —
   Session-Cookie-Logins im Browser bleiben davon unberührt.
+
+## Update-Hinweise
+
+Wichtige Änderungen, die beim Aktualisieren relevant sein können (Details jeweils in den Commits und Issues):
+
+### 0.4.30
+- **Datenbank-Start:** Die App wartet beim Start auf PostgreSQL (10 Versuche mit Backoff) und beendet sich nicht mehr beim ersten Versuch. In `docker-compose.example.yml` gibt es zusätzlich einen optionalen Healthcheck für die Datenbank.
+- **E-Mail-Adressen** werden klein geschrieben gespeichert und beim Login ohne Rücksicht auf die Schreibweise verglichen. Beim Start werden bestehende Adressen einmalig normalisiert; Konten mit nur in der Schreibweise abweichenden Adressen bleiben unangetastet und werden im Log gemeldet.
+- **SSO:** Neue SSO-Nutzer erhalten die eingestellte Standardrolle sowie E-Mail und Name vom Provider. Bestehende Konten werden bei einer vom Provider als verifiziert gemeldeten E-Mail automatisch verknüpft.
+- **Office-Speichern** (EuroOffice) schreibt wieder zuverlässig zurück; der Dokument-Schlüssel wechselt nach jedem Speichern.
+- Textdateien über 100 KB lassen sich im Editor speichern (bis 20 MB), ZIP-Downloads enthalten keine Papierkorb-Dateien mehr, „Nur Herunterladen“-Freigaben funktionieren, Ordner lassen sich kopieren.
+
+### 0.4.29 — Sicherheits-Härtung
+- **Neuer Standard bei `TRUST_PROXY`:** Es werden nur noch Proxys aus privaten oder lokalen Netzen vertraut. **Hinter einem öffentlich erreichbaren Proxy oder CDN musst du `TRUST_PROXY` setzen**, sonst sieht die App nur die Proxy-IP (siehe [Reverse-Proxy](#reverse-proxy-trust_proxy)).
+- Hochgeladene Dateien werden nie mit aktivem Inhaltstyp (HTML/XML) ausgeliefert, SVG nur in einer Sandbox. Bereits gespeicherte Dateien werden beim Start entsprechend korrigiert.
+- Avatare müssen echte Bilder (PNG, JPEG, GIF, WebP) sein.
+- API-Keys erzeugen keine Browser-Session mehr (siehe [API & KI-Zugriff](#api--ki-zugriff)).
+- Dateien im Papierkorb sind über Freigabe-Links nicht mehr abrufbar.
+
+Beide Versionen erfordern **keine** Änderung an `.env` oder `docker-compose.yml`.
 
 ## Versionierung
 
@@ -154,6 +201,19 @@ myCloud versioniert drei Dinge unabhängig voneinander:
 | **`docker-compose.yml`** | `COMPOSE_VERSION`-Kommentar in der Datei | erwartete Version in `app/version.js` |
 
 Die Admin-Konsole zeigt alle drei an und warnt (im Log beim Start sowie sichtbar in den Systemeinstellungen), sobald `.env` oder `docker-compose.yml` älter sind als der Softwarestand erwartet — inklusive eines manuellen "Jetzt prüfen"-Buttons für Software-Updates auf GitHub.
+
+## Tests
+
+Es gibt keine Build- oder Lint-Schritte, aber automatisierte Tests unter [`tests/`](tests/) (`node:test`) gegen einen
+isolierten Test-Stack mit eigener Datenbank im RAM und Port `3099` — die echte Entwicklungs-DB bleibt unberührt:
+
+```bash
+docker compose -p mycloudtest -f tests/docker-compose.test.yml up --build -d
+./tests/run-all.sh      # startet die App vor jeder Testdatei neu, Exit-Code 0 = alles grün
+docker compose -p mycloudtest -f tests/docker-compose.test.yml down -v
+```
+
+`run-all.sh` ist nötig, weil das Registrierungs-Limit (5 pro Stunde) im Speicher des App-Prozesses liegt und sonst nach wenigen Testdateien greift.
 
 ## Screenshots
 

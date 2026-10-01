@@ -7,9 +7,11 @@ myCloud-Instanz per KI einzurichten, zu personalisieren (Branding, Rollen, SMTP,
 …) oder im Alltag zu bedienen (Dateien verwalten, Freigaben erstellen …), ohne dass die KI eigene,
 gesondert eingeschränkte Zugänge bräuchte.
 
-> Kurzfassung: **Ein API-Key = exakt die Rechte des Benutzers, der ihn erstellt hat.** Es gibt kein
-> separates Berechtigungsmodell für Keys. Erstellt ein Admin einen Key, kann jeder Client, der
-> diesen Key kennt (also auch eine KI), alles tun, was der Admin im Browser auch könnte.
+> Kurzfassung: **Ein API-Key = die Rechte des Benutzers, der ihn erstellt hat — mit Ausnahme der
+> Konto-Absicherung.** Es gibt kein separates Berechtigungsmodell für Keys. Erstellt ein Admin einen
+> Key, kann jeder Client, der diesen Key kennt (also auch eine KI), fast alles tun, was der Admin im
+> Browser auch könnte. Nur Funktionen, die das Konto selbst absichern, bleiben dem Browser vorbehalten
+> (API-Keys verwalten, 2FA, Passkeys, Passwort, Profil).
 
 ## Wie es funktioniert
 
@@ -33,8 +35,11 @@ Das bedeutet konkret:
 
 - Ist der Ersteller des Keys ein normaler Benutzer, kann die KI über den Key alles tun, was dieser
   Benutzer im Web-UI auch tun kann (Dateien hoch-/herunterladen, verschieben, löschen, Freigaben
-  erstellen, eigene Profileinstellungen ändern, eigene Passkeys/2FA verwalten, eigene weitere
-  API-Keys erzeugen/widerrufen, …).
+  erstellen, …). **Nicht** möglich mit einem Key (HTTP 403): API-Keys erzeugen oder widerrufen,
+  2FA und Passkeys ändern, Passwort und Profil ändern — das geht nur im Browser. So kann ein
+  abhandengekommener Key keine weiteren Zugänge anlegen, die seinen Widerruf überleben.
+- Die Key-Authentifizierung ist zustandslos: Es entsteht weder eine Session noch ein Cookie. Wird
+  ein Key widerrufen, verliert er sofort jeden Zugriff (HTTP 401).
 - Ist der Ersteller **Admin** (Rolle `admin` oder eine Rolle mit der Berechtigung `admin: true`),
   kann die KI zusätzlich alle `/api/settings/admin/...`-Endpunkte nutzen: Branding (Name, Farben,
   Icon, Hintergründe), SEO-Einstellungen, SMTP-Konfiguration inkl. Testversand, Benutzerverwaltung
