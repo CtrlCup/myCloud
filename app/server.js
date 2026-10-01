@@ -4703,7 +4703,7 @@ app.post('/api/public/shares/:slug/unlock', async (req, res) => {
 
 
 // Helper for public share validation
-async function verifyPublicShareAccess(slug, fileId, req) {
+async function verifyPublicShareAccess(slug, fileId, req, { requireRead = true } = {}) {
   const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
   if (shareRes.rows.length === 0) return { error: 'Share link not found.', status: 404 };
 
@@ -4730,7 +4730,7 @@ async function verifyPublicShareAccess(slug, fileId, req) {
     return { error: 'Password required.', status: 401 };
   }
 
-  if (!share.can_read) {
+  if (requireRead && !share.can_read) {
     return { error: 'Read access denied.', status: 403 };
   }
 
@@ -5002,7 +5002,7 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
   const { slug, fileId } = req.params;
 
   try {
-    const access = await verifyPublicShareAccess(slug, fileId, req);
+    const access = await verifyPublicShareAccess(slug, fileId, req, { requireRead: false });
     if (access.error) return res.status(access.status).json({ error: access.error });
 
     const { file, share } = access;
