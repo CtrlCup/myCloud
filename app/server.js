@@ -2766,13 +2766,14 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
 });
 
 // Recursive copy helper for files and folders
-async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
+// Only the top-level item gets the " (Kopie)" suffix; its descendants land in the fresh copy and keep their names.
+async function copyFileOrFolderRecursive(fileId, targetFolderId, userId, isRoot = true) {
   const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [fileId, userId]);
   if (fileRes.rows.length === 0) return;
   const file = fileRes.rows[0];
 
   if (file.is_folder) {
-    const folderName = `${file.name} (Kopie)`;
+    const folderName = isRoot ? await generateUniqueName(userId, targetFolderId, `${file.name} (Kopie)`, true) : file.name;
     const newFolderRes = await pool.query(
       `INSERT INTO files (name, path, is_folder, parent_id, owner_id)
        VALUES ($1, 'folder', true, $2, $3) RETURNING *`,
@@ -2782,7 +2783,7 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
 
     const childrenRes = await pool.query('SELECT id FROM files WHERE parent_id = $1 AND owner_id = $2 AND deleted_at IS NULL', [file.id, userId]);
     for (const child of childrenRes.rows) {
-      await copyFileOrFolderRecursive(child.id, newFolder.id, userId);
+      await copyFileOrFolderRecursive(child.id, newFolder.id, userId, false);
     }
   } else {
     const oldPath = path.join(UPLOADS_DIR, file.path);
@@ -2792,7 +2793,7 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
     const newRelativePath = `${userId}/${newFilename}`;
     fs.copyFileSync(oldPath, path.join(ensureUserUploadDir(userId), newFilename));
 
-    const newName = file.name.includes('.')
+    const newName = !isRoot ? file.name : file.name.includes('.')
       ? file.name.replace(/(\.[^.]+)$/, ' (Kopie)$1')
       : `${file.name} (Kopie)`;
 
@@ -2841,6 +2842,14 @@ app.post('/api/files/copy-multiple', requireAuth, async (req, res) => {
     // Enforce the same per-user and per-group storage quota as uploads (see /api/files/upload) —
     // copying creates new physical files/rows too, so it must count against quota just the same.
     const parsedIds = fileIds.map(id => parseInt(id));
+    // Copying a folder into itself or one of its own subfolders would recurse endlessly.
+    if (targetFolderId !== null) {
+      for (const id of parsedIds) {
+        if (await isDescendantOf(Number(targetFolderId), id)) {
+          return res.status(400).json({ error: 'Ein Ordner kann nicht in sich selbst oder einen seiner Unterordner kopiert werden.' });
+        }
+      }
+    }
     const copySize = await calculateCopySize(parsedIds, userId);
     if (copySize > 0) {
       const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [userId]);
