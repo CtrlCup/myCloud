@@ -31,20 +31,36 @@ async function initDb() {
     // Add email column if not exists
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)');
 
+    // Emails are compared case-insensitively (login, reset, uniqueness), so they are stored as
+    // trim()+lowercase. Normalize existing rows, but only those whose normalized form is unique:
+    // accounts that collide (same LOWER(email)) are left untouched and reported, never merged.
+    // Idempotent — already-normalized rows are not touched again.
+    await client.query(`
+      UPDATE users SET email = LOWER(TRIM(email))
+      WHERE email IS NOT NULL AND email != LOWER(TRIM(email))
+        AND LOWER(TRIM(email)) NOT IN (
+          SELECT LOWER(TRIM(email)) FROM users WHERE email IS NOT NULL AND email != ''
+          GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1
+        )`);
+
     // Login and password-reset both look users up by email as if it were unique, but nothing
     // enforced that at the DB level — two accounts could end up sharing an email, and login-by-
     // email would then always resolve to whichever row Postgres happens to return first.
     // Skip (rather than fail startup) if a deployment already has duplicate/empty-string data;
     // the CREATE INDEX is retried on every boot, so it takes effect as soon as that's resolved.
     const dupEmailsRes = await client.query(
-      `SELECT email FROM users WHERE email IS NOT NULL AND email != '' GROUP BY email HAVING COUNT(*) > 1`
+      `SELECT LOWER(TRIM(email)) AS email FROM users WHERE email IS NOT NULL AND email != '' GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1`
     );
     if (dupEmailsRes.rows.length === 0) {
-      await client.query(
-        `CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx ON users (email) WHERE email IS NOT NULL AND email != ''`
-      );
+      try {
+        await client.query(
+          `CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique_idx ON users (LOWER(email)) WHERE email IS NOT NULL AND email != ''`
+        );
+      } catch (err) {
+        console.warn('Skipping unique email index:', err.message);
+      }
     } else {
-      console.warn(`Skipping unique email index: ${dupEmailsRes.rows.length} duplicate email(s) already exist in the users table.`);
+      console.warn(`Skipping unique email index: ${dupEmailsRes.rows.length} email(s) exist more than once (ignoring case) in the users table: ${dupEmailsRes.rows.map(r => r.email).join(', ')}`);
     }
     // Add verification and 2FA columns
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT TRUE');
@@ -55,6 +71,8 @@ async function initDb() {
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS has_custom_username BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(100)');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name VARCHAR(100)');
+    // Gesetzt, sobald der Nutzer E-Mail/Name im Profil selbst ändert; SSO-Logins überschreiben sie dann nicht mehr
+    await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_overridden BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS display_real_name BOOLEAN DEFAULT FALSE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE');
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_quota BIGINT DEFAULT NULL');
@@ -199,6 +217,11 @@ async function initDb() {
     // automatically; this also drives the admin-triggered backfill over files uploaded before
     // that existed — NULL there just means "not processed yet", not "processing failed".
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS faststart_processed_at TIMESTAMP');
+    // Normalise legacy rows that stored an active document type (see getSafeMimeType in server.js).
+    // Order matters: first everything html/xml/svg/javascript -> text/plain (office types excluded),
+    // then .svg files -> image/svg+xml. IS DISTINCT FROM keeps reboots from rewriting unchanged rows.
+    await client.query("UPDATE files SET mime_type = 'text/plain' WHERE is_folder = false AND mime_type ~* '(html|xml|svg|javascript)' AND mime_type NOT LIKE 'application/vnd.%' AND mime_type IS DISTINCT FROM 'text/plain'");
+    await client.query("UPDATE files SET mime_type = 'image/svg+xml' WHERE is_folder = false AND name ILIKE '%.svg' AND mime_type IS DISTINCT FROM 'image/svg+xml'");
     await client.query('CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at) WHERE deleted_at IS NOT NULL');
     // The listing query filters owner_id + parent_id + deleted_at IS NULL together on every
     // folder navigation; the single-column indexes above don't serve that combination directly.

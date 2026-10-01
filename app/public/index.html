@@ -485,6 +485,16 @@
 
             <!-- Section 2: Sicherheit -->
             <section id="security-settings" class="settings-section">
+              <div class="card" id="sso-link-card" style="display: none; background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;">
+                  <div>
+                    <h3>Single Sign-On</h3>
+                    <p style="font-size: 0.9rem; color: var(--color-text-muted); margin: 0.5rem 0 0 0;">Verknüpfe dieses Konto mit deinem SSO-Login, damit du dich künftig darüber in genau dieses Konto anmeldest.</p>
+                  </div>
+                  <a class="btn btn-primary" href="/auth/sso/link"><i data-lucide="link"></i> Mit SSO verknüpfen</a>
+                </div>
+              </div>
+
               <div class="card" style="background: rgba(0,0,0,0.15); margin-bottom: 2rem;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                   <h3>Passkeys (Passwortloses Login)</h3>

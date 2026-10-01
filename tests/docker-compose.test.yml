@@ -1,0 +1,36 @@
+# Isolierter Test-Stack für automatisierte Tests unter tests/ (node:test), siehe
+# docs/Verschluesselung-und-Backup.md Abschnitt 10. Eigenes Compose-Projekt, DB im tmpfs und
+# eigener Port 3099 — berührt die echte Entwicklungs-DB (mycloud_db_data) und deren Uploads nicht.
+#
+#   docker compose -p mycloudtest -f tests/docker-compose.test.yml up --build -d
+#   node --test tests/
+#   docker compose -p mycloudtest -f tests/docker-compose.test.yml down -v
+#
+# EuroOffice ist bewusst nicht enthalten (groß, für die Tests nicht nötig).
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: mycloud
+      POSTGRES_PASSWORD: testpw
+      POSTGRES_DB: mycloud
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  app:
+    build:
+      context: ../app
+      dockerfile: Dockerfile
+    ports:
+      - "3099:3000"
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql://mycloud:testpw@db:5432/mycloud
+      SESSION_SECRET: test-only-session-secret-not-for-production
+      REGISTRATION_ENABLED: "true"
+      APP_URL: http://localhost:3099
+      # Test-Client kommt vom Docker-Gateway (privat); ohne dies würde XFF vertraut (tests/zz-trust-proxy.test.js).
+      TRUST_PROXY: "false"
+    # Die App startet vor Postgres, wenn sie keinen Retry hat — daher einfacher Neustart.
+    restart: on-failure

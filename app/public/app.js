@@ -347,6 +347,17 @@ async function checkAuthStatus() {
       updateDisplayNameUI();
       resolveAndApplyVisualTheme();
 
+      const ssoLinkCard = document.getElementById('sso-link-card');
+      if (ssoLinkCard) ssoLinkCard.style.display = data.ssoLinkable ? '' : 'none';
+
+      // Einmalige Hinweise nach der SSO-Verknüpfung (Query-Parameter wird sofort entfernt)
+      const ssoNotice = new URLSearchParams(window.location.search).get('sso');
+      if (ssoNotice) {
+        if (ssoNotice === 'linked') showToast('Dein bestehendes Konto wurde mit SSO verknüpft.');
+        else if (ssoNotice === 'linked_manual') showToast('Dein Konto wurde mit SSO verknüpft.');
+        window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+      }
+
       // Set nav avatar
       document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${Date.now()}`;
       

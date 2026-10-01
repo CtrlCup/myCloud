@@ -15,6 +15,11 @@ services:
       POSTGRES_DB: ${DB_NAME:-mycloud}
     volumes:
       - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - mycloud_network
 
@@ -30,6 +35,9 @@ services:
     # auskommentieren und den expose-Block darunter aktivieren.
     ports:
       - "${PORT:-3000}:3000"
+      # Läuft der Reverse-Proxy auf demselben Host, nur an localhost binden, damit die App
+      # nicht am Proxy vorbei erreichbar ist (und X-Forwarded-For nicht direkt gefälscht wird):
+      # - "127.0.0.1:${PORT:-3000}:3000"
     # expose:
     #   - "3000"
     volumes:
@@ -37,11 +45,14 @@ services:
       - ./.env:/usr/src/app/.env
       - ./docker-compose.yml:/usr/src/app/docker-compose.yml:ro
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${DB_USER:-mycloud}:${DB_PASSWORD:-mycloud_secure_password}@db:5432/${DB_NAME:-mycloud}
       SESSION_SECRET: ${SESSION_SECRET:-change_this_to_a_long_random_string}
       REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      # Optional, siehe .env.example (Standard: nur lokalen/privaten Proxys vertrauen):
+      # TRUST_PROXY: ${TRUST_PROXY}
       EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST}
       EMAIL_SMTP_PORT: ${EMAIL_SMTP_PORT}
       EMAIL_SMTP_USER: ${EMAIL_SMTP_USER}

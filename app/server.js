@@ -7,6 +7,7 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const archiver = require('archiver');
 const crypto = require('crypto');
+const { findOrCreateSsoUser, linkSsoToUser, SsoUserError } = require('./sso-user');
 const swaggerUi = require('swagger-ui-express');
 const yaml = require('js-yaml');
 const compression = require('compression');
@@ -19,15 +20,19 @@ const {
 } = require('@simplewebauthn/server');
 const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
+const { withDbRetry } = require('./db-retry');
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail, renderEmailTemplate, getEmailBranding, applyConditionalBlock } = require('./email');
 const { version: APP_VERSION } = require('./package.json');
 const { getVersionStatus, logVersionStatus, checkForUpdate, GITHUB_REPO } = require('./version');
 
 require('dotenv').config();
+const { parseTrustProxy } = require('./trust-proxy');
+const { buildDocumentKey, saveDownloadedFile } = require('./office-save');
 
 const app = express();
-app.set('trust proxy', true);
+// req.ip (Rate-Limits) und req.protocol hängen daran; siehe TRUST_PROXY in .env.example.
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 const PORT = process.env.PORT || 3000;
 
 // Setup directories
@@ -287,12 +292,15 @@ function fixUploadFilenameEncoding(req, res, next) {
 // req.file.mimetype) — trusting it let an uploader store e.g. a .txt file with mimetype
 // "text/html", which was then served with that same Content-Type on inline view/download,
 // letting the browser render it as HTML/script (stored XSS). Deriving the type from the file
-// extension instead means we always decide what gets served how, never the uploader. Anything
-// not explicitly listed (notably svg/html/xhtml, which a browser can execute) falls back to
-// application/octet-stream, which browsers download rather than render.
+// extension instead means we always decide what gets served how, never the uploader.
+// html/htm/xhtml/xml are mapped to text/plain. svg stays image/svg+xml (the UI shows it via
+// <img>) and is only safe because file delivery adds a sandbox CSP (see setFileServeHeaders).
+// Anything not explicitly listed falls back to application/octet-stream, which browsers
+// download rather than render.
 const SAFE_MIME_TYPES = {
   txt: 'text/plain', csv: 'text/csv', md: 'text/markdown', log: 'text/plain',
-  json: 'application/json', xml: 'application/xml', yaml: 'text/plain', yml: 'text/plain',
+  json: 'application/json', xml: 'text/plain',
+  html: 'text/plain', htm: 'text/plain', xhtml: 'text/plain', svg: 'image/svg+xml', yaml: 'text/plain', yml: 'text/plain',
   js: 'text/plain', mjs: 'text/plain', ts: 'text/plain', css: 'text/plain', py: 'text/plain',
   java: 'text/plain', c: 'text/plain', cpp: 'text/plain', h: 'text/plain', go: 'text/plain',
   rs: 'text/plain', sh: 'text/plain', sql: 'text/plain', php: 'text/plain', rb: 'text/plain',
@@ -313,6 +321,40 @@ const SAFE_MIME_TYPES = {
 function getSafeMimeType(filename) {
   const ext = (filename.split('.').pop() || '').toLowerCase();
   return SAFE_MIME_TYPES[ext] || 'application/octet-stream';
+}
+
+// Protective headers for every user-file delivery (inline and download). The Content-Type is
+// always derived from the file name via getSafeMimeType (never from the DB column). nosniff stops
+// the browser from second-guessing it. Passive types (pdf, raster images, video, audio) get only
+// nosniff, so native browser viewers keep working on top-level opens. Everything else (text,
+// json, svg, unknown) additionally gets a CSP that keeps a rendered document inert: sandbox =
+// opaque origin, no scripts, default-src 'none'.
+function setFileServeHeaders(res, filename) {
+  const mime = getSafeMimeType(filename);
+  const passive = mime === 'application/pdf' || (/^(image|video|audio)\//.test(mime) && mime !== 'image/svg+xml');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  if (!passive) res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+}
+
+// Branding assets (icon, SEO image, backgrounds): the stored path comes from the settings table,
+// so resolve it and make sure it stays inside UPLOADS_DIR before sending; headers as for files.
+const BRANDING_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'svg'];
+function sendBrandingFile(res, relPath) {
+  if (!relPath) return false;
+  const root = path.resolve(UPLOADS_DIR);
+  const filePath = path.resolve(root, relPath);
+  if (!filePath.startsWith(root + path.sep) || !fs.existsSync(filePath)) return false;
+  setFileServeHeaders(res, filePath);
+  res.sendFile(filePath, { headers: { 'Content-Type': getSafeMimeType(filePath) } });
+  return true;
+}
+// Rejects (400) and deletes an uploaded branding file whose extension is not an image type.
+function rejectNonImageBranding(req, res) {
+  const ext = (req.file.originalname.split('.').pop() || '').toLowerCase();
+  if (BRANDING_IMAGE_EXTS.includes(ext) && req.file.filename.toLowerCase().endsWith('.' + ext)) return false;
+  try { fs.unlinkSync(req.file.path); } catch {}
+  res.status(400).json({ error: 'Nur Bilddateien (png, jpg, jpeg, gif, webp, ico, svg) sind erlaubt.' });
+  return true;
 }
 
 const pdfParse = require('pdf-parse');
@@ -531,7 +573,56 @@ const sessionMiddleware = session({
     sameSite: 'lax',
   }
 });
-app.use(sessionMiddleware);
+// API-Key Authentication (Bearer token, for external/app clients)
+// Stateless: runs BEFORE the session middleware and checks the key on every request. On success
+// a request-local session-like object (same fields every route reads: userId/username/role) is
+// attached and the real session middleware is skipped, so no session row and no Set-Cookie
+// ever come out of a key-authenticated request — revoking the key therefore revokes all access.
+// An invalid/revoked mcld_ key (or the kill switch being off) is a hard 401, never silent anonymity.
+const noopSessionCb = function (cb) { if (typeof cb === 'function') cb(); };
+app.use(async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return next();
+  const token = authHeader.slice(7).trim();
+  if (!token.startsWith('mcld_')) return next();
+
+  try {
+    // Instance-wide kill switch (Admin-Einstellungen → Registrierung & SSO → API-Zugriff).
+    // Checked per-request rather than cached, so disabling it takes effect immediately.
+    if ((await getSetting('api_key_auth_enabled')) === 'false') {
+      return res.status(401).json({ error: 'API-Key-Zugriff ist deaktiviert' });
+    }
+
+    const keyHash = crypto.createHash('sha256').update(token).digest('hex');
+    const result = await pool.query(
+      `SELECT ak.id AS key_id, u.id AS user_id, u.username, u.role
+       FROM api_keys ak JOIN users u ON ak.user_id = u.id
+       WHERE ak.key_hash = $1`,
+      [keyHash]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Ungültiger oder widerrufener API-Key' });
+
+    const row = result.rows[0];
+    req.session = {
+      userId: row.user_id,
+      username: row.username,
+      role: row.role,
+      isApiKey: true,
+      save: noopSessionCb,
+      regenerate: noopSessionCb,
+      destroy: noopSessionCb,
+      touch: noopSessionCb,
+      reload: noopSessionCb,
+    };
+    req.apiKeyAuthed = true;
+    pool.query('UPDATE api_keys SET last_used_at = NOW() WHERE id = $1', [row.key_id]).catch(() => {});
+    next();
+  } catch (err) {
+    console.error('API key auth error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+app.use((req, res, next) => (req.apiKeyAuthed ? next() : sessionMiddleware(req, res, next)));
 
 // Regenerates the session ID before granting an authenticated identity, so a session ID an
 // attacker planted before login (session fixation — e.g. via a shared/kiosk browser or a cookie
@@ -544,6 +635,7 @@ function regenerateSession(req) {
 }
 
 // Helper to recursively check if a fileId is a descendant of ancestorId using a CTE.
+// Trashed items (deleted_at) break the chain, so anything in or below the trash is never a descendant.
 // This replaces O(N) sequential database queries in loops with a single efficient index-backed query.
 async function isDescendantOf(fileId, ancestorId) {
   if (fileId === ancestorId) return true;
@@ -551,9 +643,10 @@ async function isDescendantOf(fileId, ancestorId) {
   try {
     const res = await pool.query(
       `WITH RECURSIVE file_path AS (
-        SELECT id, parent_id FROM files WHERE id = $1
+        SELECT id, parent_id FROM files WHERE id = $1 AND deleted_at IS NULL
         UNION ALL
         SELECT f.id, f.parent_id FROM files f JOIN file_path fp ON f.id = fp.parent_id
+        WHERE f.deleted_at IS NULL
       )
       SELECT EXISTS(SELECT 1 FROM file_path WHERE id = $2) AS is_descendant`,
       [fileId, ancestorId]
@@ -570,7 +663,17 @@ async function isDescendantOf(fileId, ancestorId) {
 // filter already skips binary formats (zip/images/video/pdf) via their Content-Type, and skips
 // anything that already has a Content-Encoding, so this doesn't double-compress file downloads.
 app.use(compression());
-app.use(express.json());
+// Global JSON limit stays at the 100 KB default; only the two text-editor save routes (owner and
+// writable public share) send a whole file as JSON and get a bigger limit. One middleware picks
+// the parser per request, since an earlier global parser would otherwise reject the body first.
+const smallJsonParser = express.json();
+const EDITOR_CONTENT_LIMIT = '20mb';
+const editorJsonParser = express.json({ limit: EDITOR_CONTENT_LIMIT });
+const EDITOR_CONTENT_ROUTE = /^\/api\/(files\/content\/[^/]+|public\/shares\/[^/]+\/content\/[^/]+)$/;
+app.use((req, res, next) => {
+  const parser = req.method === 'PUT' && EDITOR_CONTENT_ROUTE.test(req.path) ? editorJsonParser : smallJsonParser;
+  parser(req, res, next);
+});
 app.use(express.urlencoded({ extended: true }));
 // index: false — index.html needs SEO tags injected per-request (see renderAppShell below),
 // so it must never be served as-is by the static middleware's automatic directory index.
@@ -591,43 +694,6 @@ app.use('/pdfjs', express.static(path.join(__dirname, 'node_modules/pdfjs-dist')
 // so those tools are hand-rolled on a canvas rather than going through pdf.js's ink/highlight
 // editors, and need a separate library to bake the result back into PDF bytes on save.
 app.use('/pdf-lib', express.static(path.join(__dirname, 'node_modules/pdf-lib/dist')));
-
-// API-Key Authentication (Bearer token, for external/app clients)
-// Populates req.session.userId/.username/.role from a personal API key, exactly like a browser
-// login would — every existing route below reads those three session fields, so this lets the
-// entire API work for token-authenticated clients without touching any individual route handler.
-app.use(async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (req.session.userId || !authHeader || !authHeader.startsWith('Bearer ')) return next();
-
-  const token = authHeader.slice(7).trim();
-  if (!token.startsWith('mcld_')) return next();
-
-  try {
-    // Instance-wide kill switch (Admin-Einstellungen → Registrierung & SSO → API-Zugriff).
-    // Checked per-request rather than cached, so disabling it takes effect immediately for
-    // every subsequent request without needing a restart.
-    if ((await getSetting('api_key_auth_enabled')) === 'false') return next();
-
-    const keyHash = crypto.createHash('sha256').update(token).digest('hex');
-    const result = await pool.query(
-      `SELECT ak.id AS key_id, u.id AS user_id, u.username, u.role
-       FROM api_keys ak JOIN users u ON ak.user_id = u.id
-       WHERE ak.key_hash = $1`,
-      [keyHash]
-    );
-    if (result.rows.length > 0) {
-      const row = result.rows[0];
-      req.session.userId = row.user_id;
-      req.session.username = row.username;
-      req.session.role = row.role;
-      pool.query('UPDATE api_keys SET last_used_at = NOW() WHERE id = $1', [row.key_id]).catch(() => {});
-    }
-  } catch (err) {
-    console.error('API key auth error:', err);
-  }
-  next();
-});
 
 // Forward-Auth SSO (Authentik behind a reverse proxy's forward_auth gate, e.g. Caddy)
 // Populates req.session.userId/.username/.role from a cryptographically verified JWT that the
@@ -689,26 +755,8 @@ app.use(async (req, res, next) => {
       algorithms: ['RS256', 'ES256', 'PS256'], // asymmetric only — never accept an HMAC or "none" alg here
     });
 
-    const ssoId = payload.sub;
-    const username = payload.preferred_username || payload.username || (payload.email ? payload.email.split('@')[0] : null);
-    if (!ssoId || !username) return next();
-
-    let userRes = await pool.query('SELECT * FROM users WHERE sso_id = $1 AND sso_provider = $2', [ssoId, 'authentik']);
-    if (userRes.rows.length === 0) {
-      const checkUsernameRes = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-      let finalUsername = username;
-      if (checkUsernameRes.rows.length > 0) {
-        finalUsername = `${username}_${crypto.randomBytes(3).toString('hex')}`;
-      }
-      const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
-      const role = parseInt(userCountRes.rows[0].count) === 0 ? 'admin' : 'user';
-      userRes = await pool.query(
-        'INSERT INTO users (username, role, sso_id, sso_provider) VALUES ($1, $2, $3, $4) RETURNING *',
-        [finalUsername, role, ssoId, 'authentik']
-      );
-    }
-
-    const user = userRes.rows[0];
+    // Keine automatische E-Mail-Verknüpfung: Forward-Auth liefert keinen email_verified-Nachweis.
+    const { user } = await findOrCreateSsoUser(pool, payload, { allowEmailLinking: false });
     if (user.is_active === false) return next(); // show the regular login rather than an opaque error
 
     await regenerateSession(req);
@@ -749,6 +797,16 @@ async function refreshSessionIdentity(req) {
   if (result.rows.length === 0 || result.rows[0].is_active === false) return false;
   req.session.role = result.rows[0].role;
   return true;
+}
+
+// Account-security changes (API keys, 2FA, passkeys, password, e-mail) need a real browser
+// session: otherwise a leaked API key could plant its own persistence that outlives revocation.
+// Place after requireAuth.
+function denyApiKey(req, res, next) {
+  if (req.session && req.session.isApiKey) {
+    return res.status(403).json({ error: 'Diese Aktion ist mit einem API-Key nicht erlaubt.' });
+  }
+  next();
 }
 
 // Authentication Middleware
@@ -838,11 +896,15 @@ const getExpectedOrigin = (req) => {
 app.get('/api/auth/status', async (req, res) => {
   if (req.session.userId) {
     try {
-      const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, theme_preference FROM users WHERE id = $1', [req.session.userId]);
+      const userRes = await pool.query('SELECT id, username, role, email, first_name, last_name, display_real_name, theme_preference, sso_id FROM users WHERE id = $1', [req.session.userId]);
       if (userRes.rows.length > 0) {
+        const { sso_id: ssoId, ...user } = userRes.rows[0];
+        // ssoLinkable: Schaltfläche "Mit SSO verknüpfen" in den Einstellungen
+        const ssoLinkable = !ssoId && !req.session.isApiKey && (await getSetting('sso_enabled')) === 'true';
         return res.json({
           loggedIn: true,
-          user: userRes.rows[0]
+          user,
+          ssoLinkable
         });
       }
     } catch (e) {
@@ -1079,7 +1141,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 
   try {
-    const result = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
+    const result = await pool.query('SELECT * FROM users WHERE username = $1 OR LOWER(email) = LOWER($1)', [username.trim()]);
     if (result.rows.length === 0) {
       recordFailedLoginAttempt(loginKey);
       return res.status(401).json({ error: 'Ungültiger Benutzername oder E-Mail oder Passwort.' });
@@ -1273,7 +1335,7 @@ app.post('/api/auth/logout', (req, res) => {
    ========================================================================== */
 
 // 1. Registration Options
-app.post('/api/auth/passkey/register-options', requireAuth, async (req, res) => {
+app.post('/api/auth/passkey/register-options', requireAuth, denyApiKey, async (req, res) => {
   try {
     const userId = req.session.userId;
     const userRes = await pool.query('SELECT id, username FROM users WHERE id = $1', [userId]);
@@ -1312,7 +1374,7 @@ app.post('/api/auth/passkey/register-options', requireAuth, async (req, res) => 
 });
 
 // 2. Verify Registration
-app.post('/api/auth/passkey/register-verify', requireAuth, async (req, res) => {
+app.post('/api/auth/passkey/register-verify', requireAuth, denyApiKey, async (req, res) => {
   const { credential, name } = req.body;
   const userId = req.session.userId;
   const expectedChallenge = req.session.currentChallenge;
@@ -1495,6 +1557,8 @@ app.get('/auth/sso', async (req, res) => {
 
     const state = crypto.randomBytes(16).toString('hex');
     req.session.ssoState = state;
+    // Link-Modus nur über /auth/sso/link (setzt ssoLinkUserId); ein normaler Login-Start beendet ihn.
+    if (req.query.link !== '1') delete req.session.ssoLinkUserId;
 
     const authUrl = `${discovery.authorization_endpoint}?` +
       `client_id=${encodeURIComponent(clientId)}&` +
@@ -1510,6 +1574,21 @@ app.get('/auth/sso', async (req, res) => {
   }
 });
 
+// Startet den SSO-Flow im Link-Modus für den eingeloggten Nutzer (kein API-Key).
+app.get('/auth/sso/link', requireAuth, denyApiKey, (req, res) => {
+  req.session.ssoLinkUserId = req.session.userId;
+  res.redirect('/auth/sso?link=1');
+});
+
+// Kleine deutsche Fehlerseite mit Link zurück zum Login
+function ssoErrorPage(res, status, message, backHref = '/', backText = 'Zurück zum Login') {
+  res.status(status).type('html').send(
+    '<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SSO-Fehler</title></head>' +
+    '<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">' +
+    `<h2>SSO-Anmeldung fehlgeschlagen</h2><p>${message}</p><p><a href="${backHref}">${backText}</a></p></body></html>`
+  );
+}
+
 // SSO Callback
 app.get('/auth/sso/callback', async (req, res) => {
   const { code, state } = req.query;
@@ -1520,6 +1599,9 @@ app.get('/auth/sso/callback', async (req, res) => {
   }
   
   delete req.session.ssoState;
+  // Vor dem session.regenerate() unten lesen, danach wäre es weg.
+  const linkUserId = req.session.ssoLinkUserId;
+  delete req.session.ssoLinkUserId;
 
   try {
     const clientId = await getSetting('sso_client_id');
@@ -1559,31 +1641,18 @@ app.get('/auth/sso/callback', async (req, res) => {
     }
 
     const userInfo = await userResponse.json();
-    const ssoId = userInfo.sub;
-    const username = userInfo.preferred_username || userInfo.username || userInfo.email.split('@')[0];
-
-    // Find or create SSO user
-    let userRes = await pool.query('SELECT * FROM users WHERE sso_id = $1 AND sso_provider = $2', [ssoId, 'authentik']);
-    
-    if (userRes.rows.length === 0) {
-      // Check if username already exists
-      let checkUsernameRes = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-      let finalUsername = username;
-      if (checkUsernameRes.rows.length > 0) {
-        finalUsername = `${username}_${crypto.randomBytes(3).toString('hex')}`;
+    let user, linked = false, manualLink = false;
+    if (linkUserId) {
+      // Manuelle Verknüpfung: der Nutzer, der den Link-Modus gestartet hat, muss noch existieren und aktiv sein.
+      const linkUser = await pool.query('SELECT is_active FROM users WHERE id = $1', [linkUserId]);
+      if (linkUser.rows.length === 0 || linkUser.rows[0].is_active === false) {
+        return ssoErrorPage(res, 400, 'Die Verknüpfung ist nicht mehr möglich, da das Konto nicht mehr existiert oder gesperrt ist.');
       }
-
-      // Check if this is the first user
-      const userCountRes = await pool.query('SELECT COUNT(*) FROM users');
-      const role = parseInt(userCountRes.rows[0].count) === 0 ? 'admin' : 'user';
-
-      userRes = await pool.query(
-        'INSERT INTO users (username, role, sso_id, sso_provider) VALUES ($1, $2, $3, $4) RETURNING *',
-        [finalUsername, role, ssoId, 'authentik']
-      );
+      user = await linkSsoToUser(pool, linkUserId, userInfo);
+      manualLink = true;
+    } else {
+      ({ user, linked } = await findOrCreateSsoUser(pool, userInfo, { allowEmailLinking: true }));
     }
-
-    const user = userRes.rows[0];
     if (user.is_active === false) {
       return res.status(403).send('Ihr Account wurde gesperrt. Bitte wenden Sie sich an einen Administrator.');
     }
@@ -1593,10 +1662,17 @@ app.get('/auth/sso/callback', async (req, res) => {
     req.session.role = user.role;
     await pool.query('UPDATE users SET last_login_at = NOW(), last_failed_login_at = NULL WHERE id = $1', [user.id]);
 
-    res.redirect('/');
+    if (manualLink) return res.redirect('/?sso=linked_manual#settings');
+    res.redirect(linked ? '/?sso=linked' : '/');
   } catch (err) {
     console.error('SSO Callback error:', err);
-    res.status(500).send('SSO Authentication Failed.');
+    if (err instanceof SsoUserError && linkUserId && err.code !== 'MISSING_CLAIMS') {
+      return ssoErrorPage(res, 409, err.message, '/#settings', 'Zurück zu den Einstellungen');
+    }
+    if (err instanceof SsoUserError) {
+      return ssoErrorPage(res, 400, 'Anmeldung nicht möglich: Der SSO-Anbieter hat weder einen Benutzernamen noch eine E-Mail-Adresse geliefert. Bitte wende dich an einen Administrator.');
+    }
+    ssoErrorPage(res, 500, 'Die SSO-Anmeldung ist fehlgeschlagen. Bitte versuche es erneut.');
   }
 });
 
@@ -1638,7 +1714,7 @@ app.post('/api/auth/reset-password-request', async (req, res) => {
   }
 
   try {
-    const userRes = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
+    const userRes = await pool.query('SELECT * FROM users WHERE username = $1 OR LOWER(email) = LOWER($1)', [username.trim()]);
     if (userRes.rows.length === 0) {
       // Do not disclose whether user exists
       return res.json({ success: true, message: 'Falls der Benutzer existiert, wurde ein Reset-Link gesendet.' });
@@ -2317,20 +2393,11 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
       return res.status(404).json({ error: 'Physical file not found on disk' });
     }
 
+    setFileServeHeaders(res, file.name);
     if (req.query.inline === 'true') {
-      let mimeType = file.mime_type;
-      if (!mimeType) {
-        const ext = file.name.split('.').pop().toLowerCase();
-        if (ext === 'pdf') {
-          mimeType = 'application/pdf';
-        } else {
-          mimeType = 'application/octet-stream';
-        }
-      }
-
       return res.sendFile(filePath, {
         headers: {
-          'Content-Type': mimeType,
+          'Content-Type': getSafeMimeType(file.name),
           'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
         }
       });
@@ -2349,11 +2416,11 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
 async function addFolderToZip(zip, folderId, currentPath, userId) {
   const subtreeRes = await pool.query(
     `WITH RECURSIVE subtree AS (
-       SELECT id, name, parent_id, is_folder, path FROM files WHERE id = $1 AND owner_id = $2
+       SELECT id, name, parent_id, is_folder, path FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
        UNION ALL
        SELECT f.id, f.name, f.parent_id, f.is_folder, f.path FROM files f
        JOIN subtree s ON f.parent_id = s.id
-       WHERE f.owner_id = $2
+       WHERE f.owner_id = $2 AND f.deleted_at IS NULL
      )
      SELECT id, name, parent_id, is_folder, path FROM subtree WHERE id != $1`,
     [folderId, userId]
@@ -2700,23 +2767,24 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
 });
 
 // Recursive copy helper for files and folders
-async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
-  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fileId, userId]);
+// Only the top-level item gets the " (Kopie)" suffix; its descendants land in the fresh copy and keep their names.
+async function copyFileOrFolderRecursive(fileId, targetFolderId, userId, isRoot = true) {
+  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [fileId, userId]);
   if (fileRes.rows.length === 0) return;
   const file = fileRes.rows[0];
 
   if (file.is_folder) {
-    const folderName = `${file.name} (Kopie)`;
+    const folderName = isRoot ? await generateUniqueName(userId, targetFolderId, `${file.name} (Kopie)`, true) : file.name;
     const newFolderRes = await pool.query(
-      `INSERT INTO files (name, is_folder, parent_id, owner_id) 
-       VALUES ($1, true, $2, $3) RETURNING *`,
+      `INSERT INTO files (name, path, is_folder, parent_id, owner_id)
+       VALUES ($1, 'folder', true, $2, $3) RETURNING *`,
       [folderName, targetFolderId, userId]
     );
     const newFolder = newFolderRes.rows[0];
 
-    const childrenRes = await pool.query('SELECT id FROM files WHERE parent_id = $1 AND owner_id = $2', [file.id, userId]);
+    const childrenRes = await pool.query('SELECT id FROM files WHERE parent_id = $1 AND owner_id = $2 AND deleted_at IS NULL', [file.id, userId]);
     for (const child of childrenRes.rows) {
-      await copyFileOrFolderRecursive(child.id, newFolder.id, userId);
+      await copyFileOrFolderRecursive(child.id, newFolder.id, userId, false);
     }
   } else {
     const oldPath = path.join(UPLOADS_DIR, file.path);
@@ -2726,14 +2794,14 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
     const newRelativePath = `${userId}/${newFilename}`;
     fs.copyFileSync(oldPath, path.join(ensureUserUploadDir(userId), newFilename));
 
-    const newName = file.name.includes('.')
+    const newName = !isRoot ? file.name : file.name.includes('.')
       ? file.name.replace(/(\.[^.]+)$/, ' (Kopie)$1')
       : `${file.name} (Kopie)`;
 
     await pool.query(
       `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
        VALUES ($1, $2, $3, $4, false, $5, $6, $7)`,
-      [newName, newRelativePath, file.mime_type, file.size, targetFolderId, userId, file.content]
+      [newName, newRelativePath, getSafeMimeType(newName), file.size, targetFolderId, userId, file.content]
     );
   }
 }
@@ -2744,11 +2812,11 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId) {
 async function calculateCopySize(fileIds, userId) {
   const result = await pool.query(
     `WITH RECURSIVE subtree AS (
-       SELECT id, size, is_folder FROM files WHERE id = ANY($1) AND owner_id = $2
+       SELECT id, size, is_folder FROM files WHERE id = ANY($1) AND owner_id = $2 AND deleted_at IS NULL
        UNION ALL
        SELECT f.id, f.size, f.is_folder FROM files f
        JOIN subtree s ON f.parent_id = s.id
-       WHERE f.owner_id = $2
+       WHERE f.owner_id = $2 AND f.deleted_at IS NULL
      )
      SELECT COALESCE(SUM(size), 0) as total FROM subtree WHERE is_folder = false`,
     [fileIds, userId]
@@ -2775,6 +2843,14 @@ app.post('/api/files/copy-multiple', requireAuth, async (req, res) => {
     // Enforce the same per-user and per-group storage quota as uploads (see /api/files/upload) —
     // copying creates new physical files/rows too, so it must count against quota just the same.
     const parsedIds = fileIds.map(id => parseInt(id));
+    // Copying a folder into itself or one of its own subfolders would recurse endlessly.
+    if (targetFolderId !== null) {
+      for (const id of parsedIds) {
+        if (await isDescendantOf(Number(targetFolderId), id)) {
+          return res.status(400).json({ error: 'Ein Ordner kann nicht in sich selbst oder einen seiner Unterordner kopiert werden.' });
+        }
+      }
+    }
     const copySize = await calculateCopySize(parsedIds, userId);
     if (copySize > 0) {
       const userRes = await pool.query('SELECT storage_quota, role FROM users WHERE id = $1', [userId]);
@@ -3039,6 +3115,9 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     if (!finalName.toLowerCase().endsWith(ext)) {
       finalName += ext;
     }
+
+    // Never trust the ad-hoc mapping above: derive the stored type from the final name.
+    if (type === 'txt' || type === 'codex' || type === 'other') mimeType = getSafeMimeType(finalName);
 
     // The physical on-disk extension must go through the same allowlist as uploads/copies
     // (see safeFileExtension above) — `ext` above can come straight from the user-supplied
@@ -3614,6 +3693,7 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     // reused/overwritten), so it's safe to cache aggressively client-side.
     const thumbPath = await generateThumbnail(file.path, ext);
     if (thumbPath && fs.existsSync(thumbPath)) {
+      setFileServeHeaders(res, thumbPath);
       return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
     }
 
@@ -3622,6 +3702,7 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     // XML format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
     // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
     if (WEB_IMAGE_EXTS.includes(ext)) {
+      setFileServeHeaders(res, file.name);
       return res.sendFile(filePath);
     }
 
@@ -3827,7 +3908,10 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
        SET slug = $1, can_read = $2, can_write = $3, can_download = $4, can_zip = $5, expires_at = $6,
            password_hash = $7, max_downloads = $8, only_upload = $9, can_collab = $10, message = $11
        WHERE id = $12 RETURNING *`,
-      [slug, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt,
+      [slug, canRead !== undefined ? canRead !== false : share.can_read,
+       canWrite !== undefined ? canWrite === true : share.can_write,
+       canDownload !== undefined ? canDownload !== false : share.can_download,
+       canZip !== undefined ? canZip !== false : share.can_zip, expiresAt,
        passwordHash, maxDownloadsVal, onlyUploadVal, canCollabVal, messageVal, shareId]
     );
 
@@ -4049,7 +4133,7 @@ app.get('/api/eurooffice/config/:id', async (req, res) => {
     const config = {
       document: {
         fileType: ext,
-        key: `file_${file.id}`,
+        key: buildDocumentKey(file.id, file.content_hash),
         title: file.name,
         url: `${internalAppUrl}/api/eurooffice/download/${file.id}?token=${token}`
       },
@@ -4107,6 +4191,7 @@ app.get('/api/eurooffice/download/:id', async (req, res) => {
       return res.status(404).json({ error: 'Physical file not found' });
     }
 
+    setFileServeHeaders(res, file.name);
     res.sendFile(filePath);
   } catch (err) {
     console.error('Office download error:', err);
@@ -4160,36 +4245,18 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
       const file = fileRes.rows[0];
       const filePath = path.join(UPLOADS_DIR, file.path);
 
-      const http = require('http');
-      const https = require('https');
-      const downloadClient = url.startsWith('https') ? https : http;
-
-      downloadClient.get(url, (downloadRes) => {
-        if (downloadRes.statusCode === 200) {
-          const fileStream = fs.createWriteStream(filePath);
-          downloadRes.pipe(fileStream);
-
-          fileStream.on('finish', async () => {
-            fileStream.close();
-            
-            const stats = fs.statSync(filePath);
-            const textContent = await extractTextContent(filePath, file.mime_type, file.name);
-            await pool.query(
-              'UPDATE files SET size = $1, content = $2, updated_at = NOW() WHERE id = $3',
-              [stats.size, textContent, fileId]
-            );
-
-            console.log(`Office document ${fileId} successfully saved. New size: ${stats.size} bytes.`);
-          });
-        } else {
-          console.error(`Failed to download edited file from EuroOffice: status ${downloadRes.statusCode}`);
-        }
-      }).on('error', (err) => {
-        console.error('Error downloading file from EuroOffice callback:', err);
-      });
-
+      // Download into a temp file, rename over the old one only when complete; size/content/hash
+      // are updated afterwards so an aborted download leaves the previous file + index intact.
+      const saved = await saveDownloadedFile(url, filePath);
+      const textContent = await extractTextContent(filePath, file.mime_type, file.name);
+      await pool.query(
+        'UPDATE files SET size = $1, content = $2, content_hash = $3 WHERE id = $4',
+        [saved.size, textContent, saved.hash, fileId]
+      );
+      console.log(`Office document ${fileId} successfully saved. New size: ${saved.size} bytes.`);
     } catch (err) {
       console.error('Callback save error:', err);
+      return res.json({ error: 1 });
     }
   }
 
@@ -4237,10 +4304,7 @@ app.get('/api/public/branding/icon', async (req, res) => {
   try {
     const iconPath = await getSetting('cloud_icon_path');
     if (iconPath) {
-      const filePath = path.join(UPLOADS_DIR, iconPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, iconPath)) return;
     }
     res.status(404).send('Icon not found');
   } catch (err) {
@@ -4254,10 +4318,7 @@ app.get('/api/public/branding/seo-image', async (req, res) => {
   try {
     const imgPath = (await getSetting('seo_image_path')) || (await getSetting('cloud_icon_path'));
     if (imgPath) {
-      const filePath = path.join(UPLOADS_DIR, imgPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, imgPath)) return;
     }
     res.status(404).send('Image not found');
   } catch (err) {
@@ -4271,10 +4332,7 @@ app.get('/api/public/branding/dashboard-bg', async (req, res) => {
     const key = req.query.variant === 'light' ? 'dashboard_bg_image_light' : 'dashboard_bg_image';
     const bgPath = await getSetting(key);
     if (bgPath) {
-      const filePath = path.join(UPLOADS_DIR, bgPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, bgPath)) return;
     }
     res.status(404).send('Background not found');
   } catch (err) {
@@ -4288,10 +4346,7 @@ app.get('/api/public/branding/login-bg', async (req, res) => {
     const key = req.query.variant === 'light' ? 'login_bg_image_light' : 'login_bg_image';
     const bgPath = await getSetting(key);
     if (bgPath) {
-      const filePath = path.join(UPLOADS_DIR, bgPath);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
-      }
+      if (sendBrandingFile(res, bgPath)) return;
     }
     res.status(404).send('Background not found');
   } catch (err) {
@@ -4304,6 +4359,7 @@ app.post('/api/settings/admin/icon', requireAdmin, uploadSingle('icon'), async (
   if (!req.file) {
     return res.status(400).json({ error: 'No icon file provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
 
   try {
     const oldIcon = await getSetting('cloud_icon_path');
@@ -4331,6 +4387,7 @@ app.post('/api/settings/admin/seo-image', requireAdmin, uploadSingle('image'), a
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
 
   try {
     const oldImg = await getSetting('seo_image_path');
@@ -4376,6 +4433,7 @@ app.post('/api/settings/admin/dashboard-bg', requireAdmin, uploadSingle('image')
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
   try {
     const key = req.query.variant === 'light' ? 'dashboard_bg_image_light' : 'dashboard_bg_image';
     const oldBg = await getSetting(key);
@@ -4419,6 +4477,7 @@ app.post('/api/settings/admin/login-bg', requireAdmin, uploadSingle('image'), as
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
+  if (rejectNonImageBranding(req, res)) return;
   try {
     const key = req.query.variant === 'light' ? 'login_bg_image_light' : 'login_bg_image';
     const oldBg = await getSetting(key);
@@ -4474,7 +4533,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
     }
 
     // Get the base file/folder shared
-    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size, is_one_time_note FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT id, name, is_folder, owner_id, size, is_one_time_note FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
     if (baseFileRes.rows.length === 0) {
       return res.status(404).json({ error: 'Shared content no longer exists.' });
     }
@@ -4664,7 +4723,7 @@ app.post('/api/public/shares/:slug/unlock', async (req, res) => {
 
 
 // Helper for public share validation
-async function verifyPublicShareAccess(slug, fileId, req) {
+async function verifyPublicShareAccess(slug, fileId, req, { requireRead = true } = {}) {
   const shareRes = await pool.query('SELECT * FROM shares WHERE slug = $1', [slug]);
   if (shareRes.rows.length === 0) return { error: 'Share link not found.', status: 404 };
 
@@ -4691,7 +4750,7 @@ async function verifyPublicShareAccess(slug, fileId, req) {
     return { error: 'Password required.', status: 401 };
   }
 
-  if (!share.can_read) {
+  if (requireRead && !share.can_read) {
     return { error: 'Read access denied.', status: 403 };
   }
 
@@ -4702,13 +4761,14 @@ async function verifyPublicShareAccess(slug, fileId, req) {
   }
 
   // Verify fileId is either the shared file/folder or a descendant
-  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [parseInt(fileId)]);
+  const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND deleted_at IS NULL', [parseInt(fileId)]);
   if (fileRes.rows.length === 0) return { error: 'File not found.', status: 404 };
 
   const file = fileRes.rows[0];
   const isValid = await isDescendantOf(file.id, share.file_id);
 
-  if (!isValid) return { error: 'Access denied.', status: 403 };
+  // 404 (not 403) so a file sitting in a trashed subfolder is indistinguishable from a missing one.
+  if (!isValid) return { error: 'File not found.', status: 404 };
 
   return { file, share };
 }
@@ -4730,14 +4790,19 @@ app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     // Atomic increment bounded by max_downloads, done before reading/sending content so two
     // concurrent views of a one-time note can't both succeed before either's increment runs
     // (mirrors the fix applied to the file/ZIP download routes for the same race).
-    const incRes = await pool.query(
-      `UPDATE shares SET download_count = download_count + 1
-       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
-       RETURNING *`,
-      [share.id]
-    );
-    if (incRes.rows.length === 0) {
-      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    // One-time notes are already counted by the confirmed open (GET /api/public/shares/:slug),
+    // counting again here would lock the reader out of their own note (same exception as the
+    // download route).
+    if (!file.is_one_time_note) {
+      const incRes = await pool.query(
+        `UPDATE shares SET download_count = download_count + 1
+         WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+         RETURNING *`,
+        [share.id]
+      );
+      if (incRes.rows.length === 0) {
+        return res.status(410).json({ error: 'This share has reached its download limit.' });
+      }
     }
 
     const content = fs.readFileSync(filePath, 'utf8');
@@ -4889,7 +4954,7 @@ app.get('/api/public/shares/:slug/eurooffice/config/:fileId', async (req, res) =
     const config = {
       document: {
         fileType: ext,
-        key: `file_${file.id}`,
+        key: buildDocumentKey(file.id, file.content_hash),
         title: file.name,
         url: `${internalAppUrl}/api/eurooffice/download/${file.id}?token=${token}`
       },
@@ -4936,6 +5001,7 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     // reused/overwritten), so it's safe to cache aggressively client-side.
     const thumbPath = await generateThumbnail(file.path, ext);
     if (thumbPath && fs.existsSync(thumbPath)) {
+      setFileServeHeaders(res, thumbPath);
       return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
     }
 
@@ -4944,6 +5010,7 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     // XML format that can embed <script>, and res.sendFile would serve it as image/svg+xml,
     // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
     if (WEB_IMAGE_EXTS.includes(ext)) {
+      setFileServeHeaders(res, file.name);
       return res.sendFile(filePath);
     }
 
@@ -4960,7 +5027,7 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
   const { slug, fileId } = req.params;
 
   try {
-    const access = await verifyPublicShareAccess(slug, fileId, req);
+    const access = await verifyPublicShareAccess(slug, fileId, req, { requireRead: false });
     if (access.error) return res.status(access.status).json({ error: access.error });
 
     const { file, share } = access;
@@ -4986,20 +5053,11 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
       }
     }
 
+    setFileServeHeaders(res, file.name);
     if (req.query.inline === 'true') {
-      let mimeType = file.mime_type;
-      if (!mimeType) {
-        const ext = file.name.split('.').pop().toLowerCase();
-        if (ext === 'pdf') {
-          mimeType = 'application/pdf';
-        } else {
-          mimeType = 'application/octet-stream';
-        }
-      }
-
       return res.sendFile(filePath, {
         headers: {
-          'Content-Type': mimeType,
+          'Content-Type': getSafeMimeType(file.name),
           'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
         }
       });
@@ -5085,8 +5143,12 @@ app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilen
     }
 
     // Verify parentId is descendant of shared folder
-    const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
     const baseFile = baseFileRes.rows[0];
+    if (!baseFile) {
+      fs.unlinkSync(currentPhysicalPath);
+      return res.status(404).json({ error: 'Shared content no longer exists.' });
+    }
 
     let targetFolderId = parentId !== null ? parentId : baseFile.id;
     if (!await isDescendantOf(targetFolderId, baseFile.id)) {
@@ -5158,7 +5220,7 @@ async function verifyPublicWriteAccess(slug, req) {
   if (!share.can_write) return { error: 'Write permissions denied.', status: 403 };
   const isUnlocked = req.session.unlockedShares && req.session.unlockedShares[slug];
   if (share.password_hash && !isUnlocked) return { error: 'Password required.', status: 401 };
-  const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1', [share.file_id]);
+  const baseFileRes = await pool.query('SELECT id, owner_id FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
   if (baseFileRes.rows.length === 0) return { error: 'Shared content no longer exists.', status: 404 };
   return { share, baseFile: baseFileRes.rows[0] };
 }
@@ -5250,7 +5312,7 @@ app.delete('/api/public/shares/:slug/files/:fileId', async (req, res) => {
     if (fid === baseFile.id) return res.status(403).json({ error: 'Cannot delete the shared root.' });
     if (!(await isWithinSharedFolder(fid, baseFile.id))) return res.status(403).json({ error: 'Access denied.' });
 
-    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [fid, baseFile.owner_id]);
+    const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [fid, baseFile.owner_id]);
     if (fileRes.rows.length === 0) return res.status(404).json({ error: 'Not found.' });
 
     // Soft-delete into the owner's trash, same as an owner-initiated delete — a
@@ -5279,8 +5341,13 @@ app.post('/api/public/shares/:slug/paste', async (req, res) => {
       return res.status(403).json({ error: 'Access denied.' });
     }
 
+    // Target must not be the folder itself or one of its descendants (parent_id cycle / endless copy).
+    if (fid === targetFolderId || await isDescendantOf(targetFolderId, fid)) {
+      return res.status(400).json({ error: 'Ein Ordner kann nicht in sich selbst oder einen seiner Unterordner eingefügt werden.' });
+    }
+
     if (action === 'cut') {
-      await pool.query('UPDATE files SET parent_id = $1 WHERE id = $2 AND owner_id = $3', [targetFolderId, fid, baseFile.owner_id]);
+      await pool.query('UPDATE files SET parent_id = $1 WHERE id = $2 AND owner_id = $3 AND deleted_at IS NULL', [targetFolderId, fid, baseFile.owner_id]);
     } else {
       await copyFileOrFolderRecursive(fid, targetFolderId, baseFile.owner_id);
     }
@@ -5333,7 +5400,7 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     });
     archive.pipe(res);
 
-    const baseFileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1', [share.file_id]);
+    const baseFileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
     const ownerId = baseFileRes.rows[0].owner_id;
 
     await addFolderToZip(archive, targetFolder.id, '', ownerId);
@@ -5398,7 +5465,7 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
     archive.pipe(res);
 
     for (const id of ids) {
-      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2', [id, baseFile.owner_id]);
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [id, baseFile.owner_id]);
       if (fileRes.rows.length === 0) continue;
       const file = fileRes.rows[0];
       if (!(await isWithinSharedFolder(file.id, baseFile.id))) continue;
@@ -5425,6 +5492,27 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
    SETTINGS & ADMIN PANEL ROUTES
    ========================================================================== */
 
+// Avatar type detection by magic bytes; returns the enforced file extension or null.
+const AVATAR_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+function detectAvatarImageExt(filePath) {
+  const buf = Buffer.alloc(12);
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buf, 0, 12, 0);
+  } catch (e) {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  const head = buf.subarray(0, 6).toString('latin1');
+  if (head === 'GIF87a' || head === 'GIF89a') return 'gif';
+  if (buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  return null;
+}
+
 // Upload Avatar
 app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req, res) => {
   if (!req.file) {
@@ -5433,20 +5521,26 @@ app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req
 
   const userId = req.session.userId;
 
-  // Verify it is an image
-  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif'];
-  if (!allowedMimeTypes.includes(req.file.mimetype)) {
+  // Verify it is an image by magic bytes (the client-reported mimetype/filename is not trusted)
+  const avatarExt = detectAvatarImageExt(req.file.path);
+  if (!avatarExt) {
     fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: 'Only JPEG, PNG, or GIF images are allowed.' });
+    return res.status(400).json({ error: 'Nur JPEG-, PNG-, GIF- oder WebP-Bilder sind erlaubt.' });
   }
 
   // Max size 2MB
   if (req.file.size > 2 * 1024 * 1024) {
     fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: 'Image size must be less than 2 MB.' });
+    return res.status(400).json({ error: 'Das Bild muss kleiner als 2 MB sein.' });
   }
 
   try {
+    // Force the stored extension from the detected type (never from the original name)
+    const avatarFilename = path.basename(req.file.filename, path.extname(req.file.filename)) + '.' + avatarExt;
+    fs.renameSync(req.file.path, path.join(path.dirname(req.file.path), avatarFilename));
+    req.file.path = path.join(path.dirname(req.file.path), avatarFilename);
+    req.file.filename = avatarFilename;
+
     // Get old avatar path
     const oldAvatarRes = await pool.query('SELECT avatar_path FROM users WHERE id = $1', [userId]);
     const oldAvatarPath = oldAvatarRes.rows[0]?.avatar_path;
@@ -5456,10 +5550,10 @@ app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req
 
     // Delete old avatar file from disk if it exists
     if (oldAvatarPath) {
-      const oldFilePath = path.join(UPLOADS_DIR, oldAvatarPath);
-      if (fs.existsSync(oldFilePath)) {
-        fs.unlinkSync(oldFilePath);
-      }
+      // Avatars live flat in UPLOADS_DIR; basename keeps this inside it. A failed cleanup must not
+      // turn an already-saved upload into a 500.
+      const oldFilePath = path.join(UPLOADS_DIR, path.basename(oldAvatarPath));
+      try { if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath); } catch (e) { console.error('Old avatar cleanup failed:', e.message); }
     }
 
     res.json({ success: true, avatarUrl: `/api/users/${userId}/avatar?t=${Date.now()}` });
@@ -5488,13 +5582,17 @@ app.get('/api/users/:id/avatar', requireAuth, async (req, res) => {
     const user = userRes.rows[0];
     if (user.avatar_path) {
       const filePath = path.join(UPLOADS_DIR, user.avatar_path);
-      if (fs.existsSync(filePath)) {
-        return res.sendFile(filePath);
+      const ext = path.extname(user.avatar_path).slice(1).toLowerCase();
+      // Legacy avatars with a non-image extension (e.g. .html/.svg) are never served actively;
+      // they fall through to the generated initials avatar below.
+      if (AVATAR_EXTS.includes(ext) && fs.existsSync(filePath)) {
+        setFileServeHeaders(res, user.avatar_path);
+        return res.sendFile(filePath, { headers: { 'Content-Type': getSafeMimeType(user.avatar_path) } });
       }
     }
 
     // Fallback: Generate Initial SVG Avatar using Accent colors from CSS
-    const initials = user.username.charAt(0).toUpperCase();
+    const initials = user.username.charAt(0).toUpperCase().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
       <rect width="100" height="100" fill="#161f30" rx="50"/>
       <text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" font-family="'Outfit', sans-serif" font-size="45" font-weight="700" fill="#00d2ff">${initials}</text>
@@ -5549,7 +5647,7 @@ app.get('/api/settings', requireAuth, async (req, res) => {
 /* ─── API Keys (personal access tokens for external/app clients) ─── */
 
 // List the current user's API keys (never returns the actual key, only metadata)
-app.get('/api/settings/api-keys', requireAuth, async (req, res) => {
+app.get('/api/settings/api-keys', requireAuth, denyApiKey, async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT id, name, key_prefix, created_at, last_used_at FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC',
@@ -5563,7 +5661,7 @@ app.get('/api/settings/api-keys', requireAuth, async (req, res) => {
 });
 
 // Create a new API key. The full key is only ever returned here — only its hash is stored.
-app.post('/api/settings/api-keys', requireAuth, async (req, res) => {
+app.post('/api/settings/api-keys', requireAuth, denyApiKey, async (req, res) => {
   const name = (req.body.name || '').trim().slice(0, 100) || 'API-Key';
   try {
     const token = `mcld_${crypto.randomBytes(24).toString('hex')}`;
@@ -5584,7 +5682,7 @@ app.post('/api/settings/api-keys', requireAuth, async (req, res) => {
 });
 
 // Revoke (delete) one of the current user's API keys
-app.delete('/api/settings/api-keys/:id', requireAuth, async (req, res) => {
+app.delete('/api/settings/api-keys/:id', requireAuth, denyApiKey, async (req, res) => {
   try {
     const result = await pool.query(
       'DELETE FROM api_keys WHERE id = $1 AND user_id = $2 RETURNING id',
@@ -5633,9 +5731,10 @@ app.get('/api/users/storage', requireAuth, async (req, res) => {
 });
 
 // Update Profile details
-app.post('/api/settings/profile', requireAuth, async (req, res) => {
+app.post('/api/settings/profile', requireAuth, denyApiKey, async (req, res) => {
   const userId = req.session.userId;
-  const { first_name, last_name, username, email, display_real_name } = req.body;
+  const { first_name, last_name, username, display_real_name } = req.body;
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
   if (!username || !email) {
     return res.status(400).json({ error: 'Benutzername und E-Mail sind erforderlich.' });
@@ -5653,7 +5752,7 @@ app.post('/api/settings/profile', requireAuth, async (req, res) => {
   try {
     // Check conflicts
     const conflictRes = await pool.query(
-      'SELECT id FROM users WHERE (username = $1 OR email = $2) AND id != $3',
+      'SELECT id FROM users WHERE (username = $1 OR LOWER(email) = $2) AND id != $3',
       [cleanUsername, email, userId]
     );
 
@@ -5663,7 +5762,8 @@ app.post('/api/settings/profile', requireAuth, async (req, res) => {
 
     const result = await pool.query(
       `UPDATE users
-       SET first_name = $1, last_name = $2, username = $3, email = $4, display_real_name = $5
+       SET profile_overridden = profile_overridden OR first_name IS DISTINCT FROM $1 OR last_name IS DISTINCT FROM $2 OR email IS DISTINCT FROM $4,
+           first_name = $1, last_name = $2, username = $3, email = $4, display_real_name = $5
        WHERE id = $6 RETURNING id, username, role, email, first_name, last_name, display_real_name`,
       [first_name || null, last_name || null, cleanUsername, email, !!display_real_name, userId]
     );
@@ -5696,7 +5796,7 @@ app.post('/api/settings/theme', requireAuth, async (req, res) => {
 
 // Post settings email
 // Toggle Email 2FA
-app.post('/api/settings/2fa/email', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/email', requireAuth, denyApiKey, async (req, res) => {
   const { enabled } = req.body;
   try {
     // Check if email is set
@@ -5720,7 +5820,7 @@ app.post('/api/settings/2fa/email', requireAuth, async (req, res) => {
 });
 
 // Setup TOTP 2FA (returns secret + qr-code url)
-app.post('/api/settings/2fa/totp/setup', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/totp/setup', requireAuth, denyApiKey, async (req, res) => {
   const speakeasy = require('speakeasy');
   try {
     const userRes = await pool.query('SELECT username FROM users WHERE id = $1', [req.session.userId]);
@@ -5745,7 +5845,7 @@ app.post('/api/settings/2fa/totp/setup', requireAuth, async (req, res) => {
 });
 
 // Confirm TOTP 2FA setup
-app.post('/api/settings/2fa/totp/confirm', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/totp/confirm', requireAuth, denyApiKey, async (req, res) => {
   const { code } = req.body;
   const tempSecret = req.session.tempTotpSecret;
 
@@ -5778,7 +5878,7 @@ app.post('/api/settings/2fa/totp/confirm', requireAuth, async (req, res) => {
 });
 
 // Disable TOTP 2FA
-app.post('/api/settings/2fa/totp/disable', requireAuth, async (req, res) => {
+app.post('/api/settings/2fa/totp/disable', requireAuth, denyApiKey, async (req, res) => {
   try {
     await pool.query(
       'UPDATE users SET two_factor_totp = false, totp_secret = null WHERE id = $1',
@@ -5791,7 +5891,7 @@ app.post('/api/settings/2fa/totp/disable', requireAuth, async (req, res) => {
 });
 
 // Change password
-app.post('/api/settings/password', requireAuth, async (req, res) => {
+app.post('/api/settings/password', requireAuth, denyApiKey, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   const userId = req.session.userId;
 
@@ -5819,7 +5919,7 @@ app.post('/api/settings/password', requireAuth, async (req, res) => {
 });
 
 // Delete user passkey
-app.delete('/api/settings/passkeys/:id', requireAuth, async (req, res) => {
+app.delete('/api/settings/passkeys/:id', requireAuth, denyApiKey, async (req, res) => {
   const passkeyId = req.params.id;
   const userId = req.session.userId;
 
@@ -5962,6 +6062,12 @@ app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
         return res.status(400).json({ error: 'Der Aussteller (iss) muss eine gültige HTTPS-URL sein.' });
       }
     }
+
+    // File-path settings are only ever set by the branding upload routes — accepting them here
+    // would let an admin point the public branding routes at an arbitrary path.
+    const PROTECTED_KEYS = ['cloud_icon_path', 'seo_image_path', 'dashboard_bg_image', 'dashboard_bg_image_light', 'login_bg_image', 'login_bg_image_light'];
+    const badKey = Object.keys(configs).find(k => PROTECTED_KEYS.includes(k) || k.startsWith('reset_'));
+    if (badKey) return res.status(400).json({ error: 'Diese Einstellung kann nicht direkt gesetzt werden.' });
 
     const keysChanged = Object.keys(configs);
     const smtpKeys = ['email_smtp_host', 'email_smtp_port', 'email_smtp_user', 'email_smtp_pass', 'email_from', 'email_from_name'];
@@ -6331,13 +6437,14 @@ app.delete('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
 
 // Admin User-Management: Create a new user
 app.post('/api/settings/admin/users', requireAdmin, async (req, res) => {
-  const { username, email, password, role } = req.body;
+  const { username, password, role } = req.body;
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   if (!username || !email || !password) {
     return res.status(400).json({ error: 'Benutzername, E-Mail und Passwort sind erforderlich.' });
   }
   
   try {
-    const conflictRes = await pool.query('SELECT id FROM users WHERE username = $1 OR email = $2', [username, email]);
+    const conflictRes = await pool.query('SELECT id FROM users WHERE username = $1 OR LOWER(email) = $2', [username, email]);
     if (conflictRes.rows.length > 0) {
       return res.status(400).json({ error: 'Benutzername oder E-Mail existiert bereits.' });
     }
@@ -6518,6 +6625,13 @@ app.get('*', (req, res) => {
 // client got a clean-enough JSON error, but there was no server-side trail at all to explain a
 // report like "this file just won't upload, no matter how often I try". Logged with whatever
 // request context we have so a recurring failure can be correlated to a concrete file/size/user.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Der Inhalt ist zu groß, um ihn zu speichern.' });
+  }
+  next(err);
+});
+
 app.use((err, req, res, next) => {
   if (err && err.name === 'MulterError') {
     console.error(
@@ -6949,7 +7063,7 @@ function initWebSocket(server) {
   });
 }
 
-initDb()
+withDbRetry(initDb)
   .then(async () => {
     await refreshMaxUploadSizeBytes();
     // Awaited (unlike indexExistingFiles() below) — it's just filesystem renames, not the CPU-heavy
