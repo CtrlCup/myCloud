@@ -22,6 +22,7 @@ myCloud ist ein Node/Express-Monolith mit schlankem Vanilla-JS-Frontend — kein
 - [Schnellstart](#schnellstart)
 - [Konfiguration](#konfiguration-umgebungsvariablen)
 - [API & KI-Zugriff](#api--ki-zugriff)
+- [Verschlüsselung (optional)](#verschlüsselung-optional)
 - [Update-Hinweise](#update-hinweise)
 - [Versionierung](#versionierung)
 - [Tests](#tests)
@@ -169,6 +170,22 @@ lässt sich vollständig extern nutzen:
 - **Global abschaltbar:** Ein Admin kann API-Key-Authentifizierung instanzweit deaktivieren
   (**Admin-Einstellungen → Registrierung & SSO → API-Zugriff**), ohne bestehende Keys zu löschen —
   Session-Cookie-Logins im Browser bleiben davon unberührt.
+
+## Verschlüsselung (optional)
+
+myCloud kann Dateien mit einem Master-Key verschlüsselt ablegen (AES-256-GCM, Konzept: [`docs/Verschluesselung-und-Backup.md`](docs/Verschluesselung-und-Backup.md)). **Phase P1 legt nur die Grundlage** (Krypto-Modul, Key-Verwaltung, Start-Prüfung): Bis Phase P2 werden Dateien noch **nicht** verschlüsselt. Ohne Master-Key verhält sich die App unverändert.
+
+1. Key erzeugen (die Datei bekommt Modus `0400`, ein vorhandener Key wird nie überschrieben):
+   ```bash
+   mkdir -p secrets
+   docker compose run --rm --no-deps -v "$PWD/secrets:/out" app node scripts/keys.js init --out /out/master_key
+   ```
+   Alternativ lokal: `cd app && node scripts/keys.js init --out ../secrets/master_key`.
+2. **Recovery-Code sichern:** Die Ausgabe enthält einmalig einen Recovery-Code (Base32 in 4er-Gruppen), der den Master-Key enthält. Offline ablegen (z. B. Passwortmanager). Erneut anzeigen: `node scripts/keys.js show-recovery <datei>`, Format prüfen: `node scripts/keys.js check <datei>`.
+3. **Ohne Master-Key sind verschlüsselte Daten unwiederbringlich verloren.** Die Key-Datei gehört nicht ins Repository (und nicht in dieselbe Sicherung wie die Daten).
+4. Docker-Secret aktivieren: in `docker-compose.yml` die auskommentierten Zeilen `secrets: [master_key]`, `MYCLOUD_MASTER_KEY_FILE: /run/secrets/master_key` und den `secrets:`-Block am Ende einkommentieren, dann `docker compose up -d`.
+
+Beim ersten Start mit Key speichert die App einen Prüfwert in der Datenbank. Passt der Key später nicht (oder fehlt er bei einer schon verschlüsselten Instanz), beendet sich die App mit einer Fehlermeldung, statt Dateien unlesbar zu machen. Die Key-Datei enthält 32 Bytes als Hex oder Base64 (eine Zeile) oder JSON `{ "current": 1, "keys": { "1": "<hex>" } }` für spätere Schlüsselrotation.
 
 ## Update-Hinweise
 

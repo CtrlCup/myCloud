@@ -1,0 +1,11 @@
+# Override für tests/crypto-boot.test.js: eigenes Compose-Projekt (mycloudcryptoboot), kein Host-Port,
+# Master-Key-Datei aus ${BOOT_KEY_DIR} gemountet. Berührt den Test-Stack (mycloudtest) nicht.
+services:
+  app:
+    ports: !reset []
+    restart: "no"
+    volumes:
+      - ${BOOT_KEY_DIR}:/keys:ro
+    environment:
+      # leer = kein Key konfiguriert
+      MYCLOUD_MASTER_KEY_FILE: ${BOOT_KEY_FILE:-}

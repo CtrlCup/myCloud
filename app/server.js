@@ -21,6 +21,7 @@ const {
 const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
 const { withDbRetry } = require('./db-retry');
+const cryptoStore = require('./crypto-store');
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail, renderEmailTemplate, getEmailBranding, applyConditionalBlock } = require('./email');
 const { version: APP_VERSION } = require('./package.json');
@@ -7065,6 +7066,12 @@ function initWebSocket(server) {
 
 withDbRetry(initDb)
   .then(async () => {
+    try {
+      await cryptoStore.checkMasterKeyAtStartup(pool);
+    } catch (err) {
+      console.error(`FEHLER (Verschlüsselung): ${err.message}`);
+      process.exit(1);
+    }
     await refreshMaxUploadSizeBytes();
     // Awaited (unlike indexExistingFiles() below) — it's just filesystem renames, not the CPU-heavy
     // OCR/text-extraction work indexing does, so it's fast even for a large library, and completing

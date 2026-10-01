@@ -71,6 +71,11 @@ services:
       APP_URL: ${APP_URL:-http://localhost:3030}
       EURO_OFFICE_URL: ${EURO_OFFICE_URL:-http://eurooffice:80}
       EURO_OFFICE_PUBLIC_URL: ${EURO_OFFICE_PUBLIC_URL:-http://localhost:8080}
+      # Optional: Verschlüsselung (siehe README "Verschlüsselung (optional)"). Zusammen mit dem
+      # secrets-Block unten und "secrets: [master_key]" hier aktivieren:
+      # MYCLOUD_MASTER_KEY_FILE: /run/secrets/master_key
+    # secrets:
+    #   - master_key
     networks:
       - mycloud_network
       # Läuft bereits ein Reverse-Proxy (z. B. Caddy, siehe Caddyfile.example) in einem eigenen
@@ -102,6 +107,12 @@ volumes:
   uploads_data:
   eurooffice_data:
   eurooffice_logs:
+
+# Optional: Master-Key für die Verschlüsselung, Datei erzeugen mit
+# `node scripts/keys.js init --out ./secrets/master_key` (siehe README, Abschnitt Verschlüsselung).
+# secrets:
+#   master_key:
+#     file: ./secrets/master_key
 
 networks:
   mycloud_network:
