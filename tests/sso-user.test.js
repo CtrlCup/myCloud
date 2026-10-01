@@ -38,14 +38,6 @@ function sso(claims, opts, extra = {}) {
   return JSON.parse(out.split('\n').pop());
 }
 
-async function register(email) {
-  const res = await fetch(BASE + '/api/auth/register', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'Test-Passwort-12345!' }),
-  });
-  assert.ok(res.ok, 'register ' + res.status);
-  return (await res.json()).user;
-}
 // Lokale Nutzer per SQL statt API (Registrierungs-Rate-Limit); nur Link- und Profil-Test nutzen die API.
 function localUser(username, email) {
   return { id: parseInt(psql(`INSERT INTO users (username, email, role) VALUES ('${username}', '${email}', 'user') RETURNING id`).split('\n')[0]) };
@@ -62,7 +54,7 @@ test('setup: Stack erreichbar', async () => {
 test('verifizierte E-Mail: bestehendes Konto wird verknüpft', async (t) => {
   if (!setupOk) return t.skip();
   const email = `link${RUN}@example.test`;
-  const local = await register(email);
+  const local = localUser('link' + RUN, email); // per SQL: /api/auth/register ist auf 5 Versuche/h und IP limitiert
   const before = count();
   const r = sso({ sub: 'sub-link-' + RUN, email: email.toUpperCase(), email_verified: true, preferred_username: 'other' }, { allowEmailLinking: true });
   assert.strictEqual(r.user.id, local.id);
