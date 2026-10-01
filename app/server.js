@@ -1140,7 +1140,7 @@ app.post('/api/auth/login', async (req, res) => {
   }
 
   try {
-    const result = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
+    const result = await pool.query('SELECT * FROM users WHERE username = $1 OR LOWER(email) = LOWER($1)', [username.trim()]);
     if (result.rows.length === 0) {
       recordFailedLoginAttempt(loginKey);
       return res.status(401).json({ error: 'Ungültiger Benutzername oder E-Mail oder Passwort.' });
@@ -1713,7 +1713,7 @@ app.post('/api/auth/reset-password-request', async (req, res) => {
   }
 
   try {
-    const userRes = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $1', [username]);
+    const userRes = await pool.query('SELECT * FROM users WHERE username = $1 OR LOWER(email) = LOWER($1)', [username.trim()]);
     if (userRes.rows.length === 0) {
       // Do not disclose whether user exists
       return res.json({ success: true, message: 'Falls der Benutzer existiert, wurde ein Reset-Link gesendet.' });
@@ -6436,13 +6436,14 @@ app.delete('/api/settings/admin/roles/:id', requireAdmin, async (req, res) => {
 
 // Admin User-Management: Create a new user
 app.post('/api/settings/admin/users', requireAdmin, async (req, res) => {
-  const { username, email, password, role } = req.body;
+  const { username, password, role } = req.body;
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   if (!username || !email || !password) {
     return res.status(400).json({ error: 'Benutzername, E-Mail und Passwort sind erforderlich.' });
   }
   
   try {
-    const conflictRes = await pool.query('SELECT id FROM users WHERE username = $1 OR email = $2', [username, email]);
+    const conflictRes = await pool.query('SELECT id FROM users WHERE username = $1 OR LOWER(email) = $2', [username, email]);
     if (conflictRes.rows.length > 0) {
       return res.status(400).json({ error: 'Benutzername oder E-Mail existiert bereits.' });
     }
@@ -6624,6 +6625,13 @@ app.get('*', (req, res) => {
 // report like "this file just won't upload, no matter how often I try". Logged with whatever
 // request context we have so a recurring failure can be correlated to a concrete file/size/user.
 app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Der Inhalt ist zu groß, um ihn zu speichern.' });
+  }
+  next(err);
+});
+
+app.use((err, req, res, next) => {
   if (err && err.name === 'MulterError') {
     console.error(
       `Upload/multer error (${err.code}) on ${req.method} ${req.path} — user ${req.session?.userId ?? 'unauthenticated'}, ` +
@@ -6633,13 +6641,6 @@ app.use((err, req, res, next) => {
       return res.status(413).json({ error: 'File is too large.' });
     }
     return res.status(400).json({ error: err.message });
-app.use((err, req, res, next) => {
-  if (err && err.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'Der Inhalt ist zu groß, um ihn zu speichern.' });
-  }
-  next(err);
-});
-
   }
   next(err);
 });

@@ -31,20 +31,36 @@ async function initDb() {
     // Add email column if not exists
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255)');
 
+    // Emails are compared case-insensitively (login, reset, uniqueness), so they are stored as
+    // trim()+lowercase. Normalize existing rows, but only those whose normalized form is unique:
+    // accounts that collide (same LOWER(email)) are left untouched and reported, never merged.
+    // Idempotent — already-normalized rows are not touched again.
+    await client.query(`
+      UPDATE users SET email = LOWER(TRIM(email))
+      WHERE email IS NOT NULL AND email != LOWER(TRIM(email))
+        AND LOWER(TRIM(email)) NOT IN (
+          SELECT LOWER(TRIM(email)) FROM users WHERE email IS NOT NULL AND email != ''
+          GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1
+        )`);
+
     // Login and password-reset both look users up by email as if it were unique, but nothing
     // enforced that at the DB level — two accounts could end up sharing an email, and login-by-
     // email would then always resolve to whichever row Postgres happens to return first.
     // Skip (rather than fail startup) if a deployment already has duplicate/empty-string data;
     // the CREATE INDEX is retried on every boot, so it takes effect as soon as that's resolved.
     const dupEmailsRes = await client.query(
-      `SELECT email FROM users WHERE email IS NOT NULL AND email != '' GROUP BY email HAVING COUNT(*) > 1`
+      `SELECT LOWER(TRIM(email)) AS email FROM users WHERE email IS NOT NULL AND email != '' GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1`
     );
     if (dupEmailsRes.rows.length === 0) {
-      await client.query(
-        `CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique_idx ON users (email) WHERE email IS NOT NULL AND email != ''`
-      );
+      try {
+        await client.query(
+          `CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique_idx ON users (LOWER(email)) WHERE email IS NOT NULL AND email != ''`
+        );
+      } catch (err) {
+        console.warn('Skipping unique email index:', err.message);
+      }
     } else {
-      console.warn(`Skipping unique email index: ${dupEmailsRes.rows.length} duplicate email(s) already exist in the users table.`);
+      console.warn(`Skipping unique email index: ${dupEmailsRes.rows.length} email(s) exist more than once (ignoring case) in the users table: ${dupEmailsRes.rows.map(r => r.email).join(', ')}`);
     }
     // Add verification and 2FA columns
     await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT TRUE');
