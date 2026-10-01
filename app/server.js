@@ -20,6 +20,7 @@ const {
 } = require('@simplewebauthn/server');
 const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
+const { withDbRetry } = require('./db-retry');
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail, renderEmailTemplate, getEmailBranding, applyConditionalBlock } = require('./email');
 const { version: APP_VERSION } = require('./package.json');
@@ -7062,7 +7063,7 @@ function initWebSocket(server) {
   });
 }
 
-initDb()
+withDbRetry(initDb)
   .then(async () => {
     await refreshMaxUploadSizeBytes();
     // Awaited (unlike indexExistingFiles() below) — it's just filesystem renames, not the CPU-heavy

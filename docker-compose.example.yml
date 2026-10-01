@@ -15,6 +15,11 @@ services:
       POSTGRES_DB: ${DB_NAME:-mycloud}
     volumes:
       - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks:
       - mycloud_network
 
@@ -40,7 +45,8 @@ services:
       - ./.env:/usr/src/app/.env
       - ./docker-compose.yml:/usr/src/app/docker-compose.yml:ro
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${DB_USER:-mycloud}:${DB_PASSWORD:-mycloud_secure_password}@db:5432/${DB_NAME:-mycloud}
       SESSION_SECRET: ${SESSION_SECRET:-change_this_to_a_long_random_string}
