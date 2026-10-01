@@ -84,12 +84,18 @@ test('nicht verifiziert (false, String, fehlend) oder allowEmailLinking=false: k
 test('zwei lokale Konten mit gleicher E-Mail-Schreibweise-Kollision: nicht verknüpfen', async (t) => {
   if (!setupOk) return t.skip();
   const a = localUser('dup' + RUN, `dup${RUN}@example.test`);
-  // zweites Konto nur per SQL (Unique-Index erlaubt keine exakte Dublette, Schreibweise aber schon)
-  psql(`INSERT INTO users (username, email, role) VALUES ('dup2${RUN}', 'DUP${RUN}@example.test', 'user')`);
-  const r = sso({ sub: 'sub-dup-' + RUN, email: `dup${RUN}@example.test`, email_verified: true, preferred_username: 'dupsso' + RUN }, { allowEmailLinking: true });
-  assert.strictEqual(r.linked, false);
-  assert.strictEqual(r.created, true);
-  assert.notStrictEqual(r.user.id, a.id);
+  // Altbestand-Szenario (vor dem LOWER(email)-Unique-Index): zweites Konto nur per SQL; der Index wird dafür
+  // entfernt (er entsteht beim nächsten App-Start wieder) und die Dublette danach gelöscht.
+  psql(`DROP INDEX IF EXISTS users_email_lower_unique_idx;
+    INSERT INTO users (username, email, role) VALUES ('dup2${RUN}', 'DUP${RUN}@example.test', 'user')`);
+  try {
+    const r = sso({ sub: 'sub-dup-' + RUN, email: `dup${RUN}@example.test`, email_verified: true, preferred_username: 'dupsso' + RUN }, { allowEmailLinking: true });
+    assert.strictEqual(r.linked, false);
+    assert.strictEqual(r.created, true);
+    assert.notStrictEqual(r.user.id, a.id);
+  } finally {
+    psql(`DELETE FROM users WHERE username = 'dup2${RUN}'`);
+  }
 });
 
 test('Neuanlage: Standardrolle, Name/E-Mail, 80-Zeichen-Name', async (t) => {
