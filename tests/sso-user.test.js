@@ -54,7 +54,7 @@ test('setup: Stack erreichbar', async () => {
 test('verifizierte E-Mail: bestehendes Konto wird verknüpft', async (t) => {
   if (!setupOk) return t.skip();
   const email = `link${RUN}@example.test`;
-  const local = localUser('link' + RUN, email); // per SQL: /api/auth/register ist auf 5 Versuche/h und IP limitiert
+  const local = localUser('link' + RUN, email); // per SQL: /api/auth/register ist auf 5 Versuche/h und IP limitiert, die Suite braucht das Kontingent anderswo
   const before = count();
   const r = sso({ sub: 'sub-link-' + RUN, email: email.toUpperCase(), email_verified: true, preferred_username: 'other' }, { allowEmailLinking: true });
   assert.strictEqual(r.user.id, local.id);
@@ -98,11 +98,11 @@ test('Neuanlage: Standardrolle, Name/E-Mail, 80-Zeichen-Name', async (t) => {
   psql(`INSERT INTO roles (name, is_default, is_system, permissions) SELECT 'ssorole${RUN}', false, false, permissions FROM roles WHERE name='user'`);
   psql(`UPDATE roles SET is_default = (name='ssorole${RUN}')`);
   try {
-    const long = 'x'.repeat(80) + ' ü';
+    const long = RUN + 'x'.repeat(80) + ' ü'; // RUN-Präfix: ein Wiederholungslauf im selben Stack trifft sonst den schon vergebenen Namen
     const r = sso({ sub: 'sub-new-' + RUN, preferred_username: long, email: `New${RUN}@Example.test`, given_name: 'Erika', family_name: 'Muster' }, { allowEmailLinking: true });
     assert.strictEqual(r.created, true);
     assert.strictEqual(r.user.role, 'ssorole' + RUN);
-    assert.strictEqual(r.user.username, 'x'.repeat(50));
+    assert.strictEqual(r.user.username, (RUN + 'x'.repeat(80)).substring(0, 50));
     assert.strictEqual(r.user.email, `new${RUN}@example.test`);
     assert.strictEqual(r.user.first_name, 'Erika');
     assert.strictEqual(r.user.last_name, 'Muster');
