@@ -24,7 +24,7 @@ async function enc(data, opts) {
   return p;
 }
 async function mustFail(p) {
-  await assert.rejects(async () => { cs.useKeys(KEY); await cs.readDecrypted(p); });
+  await assert.rejects(async () => { cs.useKeys(KEY); await cs.readDecrypted(p, { encrypted: true }); });
 }
 
 test('E1 Roundtrip (0 B, 1 B, 1 Segment, Segment+1, 50 MB)', withKey(KEY, async () => {
@@ -72,6 +72,19 @@ test('E3 Range: zufällige und Grenzfälle', withKey(KEY, async () => {
   assert.strictEqual((await collect(cs.createDecryptStream(p, { start: size + 10 }))).length, 0);
 }));
 
+test('Stream früh zerstören gibt den fd frei und wirft nicht', withKey(KEY, async () => {
+  const p = await enc(crypto.randomBytes(4 * SEG));
+  const fdsBefore = fs.readdirSync('/proc/self/fd').length;
+  for (let i = 0; i < 20; i++) {
+    const st = cs.createDecryptStream(p, { encrypted: true });
+    st.destroy();
+    const st2 = cs.createDecryptStream(p, { encrypted: true });
+    for await (const c of st2) { st2.destroy(); break; }
+  }
+  await new Promise(r => setTimeout(r, 50));
+  assert.ok(fs.readdirSync('/proc/self/fd').length <= fdsBefore + 1);
+}));
+
 test('E3 Range entschlüsselt nur betroffene Segmente (Beschädigung anderswo stört nicht)', withKey(KEY, async () => {
   const data = crypto.randomBytes(3 * SEG);
   const p = await enc(data);
@@ -82,13 +95,13 @@ test('E3 Range entschlüsselt nur betroffene Segmente (Beschädigung anderswo st
   await assert.rejects(collect(cs.createDecryptStream(p, { start: 2 * SEG })));
 }));
 
-test('E4 Integrität: Bit-Flip in Header (alle Bytes ab 5), Segment, Tag', withKey(KEY, async () => {
+test('E4 Integrität: Bit-Flip in Header (alle 96 Bytes), Segment, Tag', withKey(KEY, async () => {
   const data = crypto.randomBytes(2 * SEG + 100);
   const p = await enc(data);
   const orig = fs.readFileSync(p);
   const total = orig.length;
   const positions = [];
-  for (let i = 5; i < 96; i++) positions.push(i);
+  for (let i = 0; i < 96; i++) positions.push(i);
   positions.push(96, 96 + 1000, 96 + SEG - 1, 96 + SEG, 96 + SEG + 7, total - 1, total - 16, total - 17, 96 + 2 * (SEG + 16) + 3);
   for (const pos of positions) {
     const b = Buffer.from(orig);
@@ -97,10 +110,6 @@ test('E4 Integrität: Bit-Flip in Header (alle Bytes ab 5), Segment, Tag', withK
     fs.writeFileSync(q, b);
     await mustFail(q);
   }
-  // Magic-Präfix beschädigt (Bytes 5..7) wird abgelehnt, nicht als Klartext durchgereicht
-  const m = Buffer.from(orig); m[6] ^= 1;
-  const q = tp(); fs.writeFileSync(q, m);
-  await mustFail(q);
 }));
 
 test('E4 Integrität: Segmente vertauscht, abgeschnitten, angehängt', withKey(KEY, async () => {
@@ -121,7 +130,7 @@ test('E4 Integrität: Segmente vertauscht, abgeschnitten, angehängt', withKey(K
   };
   for (const [name, b] of Object.entries(variants)) {
     const q = tp(); fs.writeFileSync(q, b);
-    await assert.rejects(async () => { cs.useKeys(KEY); await cs.readDecrypted(q); }, undefined, name);
+    await assert.rejects(async () => { cs.useKeys(KEY); await cs.readDecrypted(q, { encrypted: true }); }, undefined, name);
   }
 }));
 
@@ -138,13 +147,13 @@ test('E5 falscher Master-Key, fehlender Key, unbekannte keyId', async () => {
   cs.useKeys(KEY);
   const p = await enc(Buffer.from('hallo'));
   cs.useKeys(KEY2);
-  await assert.rejects(cs.readDecrypted(p), { code: 'KEY_MISMATCH' });
-  assert.throws(() => cs.createDecryptStream(p), { code: 'KEY_MISMATCH' });
+  await assert.rejects(cs.readDecrypted(p, { encrypted: true }), { code: 'KEY_MISMATCH' });
+  assert.throws(() => cs.createDecryptStream(p, { encrypted: true }), { code: 'KEY_MISMATCH' });
   cs.useKeys(null);
-  await assert.rejects(cs.readDecrypted(p), { code: 'ENCRYPTED_NO_KEY' });
-  assert.throws(() => cs.plainSizeOf(p), { code: 'ENCRYPTED_NO_KEY' });
+  await assert.rejects(cs.readDecrypted(p, { encrypted: true }), { code: 'ENCRYPTED_NO_KEY' });
+  assert.strictEqual(cs.plainSizeOf(p, { encrypted: true }), 5); // nur Header, kein Key nötig
   cs.useKeys({ current: 2, keys: new Map([[2, KEY]]) });
-  await assert.rejects(cs.readDecrypted(p), { code: 'KEY_UNKNOWN' });
+  await assert.rejects(cs.readDecrypted(p, { encrypted: true }), { code: 'KEY_UNKNOWN' });
   // Rotation: alte Datei (keyId 1) bleibt mit beiden Keys lesbar, neue nutzt current
   cs.useKeys({ current: 2, keys: new Map([[1, KEY], [2, KEY2]]) });
   assert.strictEqual((await cs.readDecrypted(p)).toString(), 'hallo');
@@ -181,15 +190,115 @@ test('Passthrough ohne Key', async () => {
   assert.ok(fs.existsSync(p));
 });
 
-test('Mischbetrieb: Klartextdatei mit aktivem Key lesbar, isEncrypted bei kurzen/leeren Dateien', withKey(KEY, async () => {
-  const p = tp(); fs.writeFileSync(p, 'MCENC');
-  const e = tp(); fs.writeFileSync(e, '');
-  assert.strictEqual(cs.isEncrypted(e), false);
-  assert.strictEqual(cs.isEncrypted(p), false);
+test('encrypted-Parameter: Aufrufer entscheidet, Klartext mit MCENC1-Magic bleibt Klartext', withKey(KEY, async () => {
+  const fake = Buffer.concat([Buffer.from('MCENC1\0\0'), crypto.randomBytes(300)]);
+  const p = tp(); fs.writeFileSync(p, fake);
+  assert.ok((await cs.readDecrypted(p, { encrypted: false })).equals(fake));
+  assert.ok((await collect(cs.createDecryptStream(p, { encrypted: false, start: 3, end: 40 }))).equals(fake.subarray(3, 41)));
+  assert.strictEqual(cs.plainSizeOf(p, { encrypted: false }), fake.length);
+  await assert.rejects(cs.readDecrypted(p, { encrypted: true }));
+  assert.throws(() => cs.plainSizeOf(p, { encrypted: true }));
+  // Klartext ohne Magic, aber encrypted:true -> Fehler, nie Klartext
   const plain = tp(); fs.writeFileSync(plain, 'klartext');
+  await assert.rejects(cs.readDecrypted(plain, { encrypted: true }), { code: 'ECORRUPT' });
+  assert.throws(() => cs.createDecryptStream(plain, { encrypted: true }), { code: 'ECORRUPT' });
+  await assert.rejects(cs.withPlaintextTempFile(plain, async () => {}, { encrypted: true }));
+  // Heuristik (nur Migration): exakte Magic, kurze/leere Dateien sind Klartext
+  assert.strictEqual(cs.isEncrypted(p), true);
+  const e = tp(); fs.writeFileSync(e, ''); const m = tp(); fs.writeFileSync(m, 'MCENC');
+  assert.strictEqual(cs.isEncrypted(e), false);
+  assert.strictEqual(cs.isEncrypted(m), false);
   assert.strictEqual((await cs.readDecrypted(plain)).toString(), 'klartext');
-  assert.strictEqual((await cs.readDecrypted(e)).length, 0);
+  // assumePlain verschlüsselt immer, auch bei MCENC1-Anfang
+  const r = await cs.encryptFileInPlace(p, { assumePlain: true });
+  assert.strictEqual(r.changed, true);
+  assert.strictEqual(r.plainSize, fake.length);
+  assert.ok((await cs.readDecrypted(p, { encrypted: true })).equals(fake));
 }));
+
+test('maxBytes in readDecrypted', withKey(KEY, async () => {
+  const p = await enc(Buffer.alloc(1000, 1));
+  await assert.rejects(cs.readDecrypted(p, { encrypted: true, maxBytes: 999 }), { code: 'ETOOBIG' });
+  assert.strictEqual((await cs.readDecrypted(p, { encrypted: true, maxBytes: 1000 })).length, 1000);
+  const q = tp(); fs.writeFileSync(q, 'abc');
+  await assert.rejects(cs.readDecrypted(q, { encrypted: false, maxBytes: 2 }), { code: 'ETOOBIG' });
+}));
+
+test('segSize-Validierung beim Schreiben', withKey(KEY, async () => {
+  for (const bad of [0, 1, 4095, 1.5, (1 << 24) + 1, NaN, '65536'])
+    await assert.rejects(cs.writeEncrypted(tp(), Buffer.from('x'), { segSize: bad }), RangeError, String(bad));
+  const p = await enc(crypto.randomBytes(10000), { segSize: 4096 });
+  assert.strictEqual((await cs.readDecrypted(p, { encrypted: true })).length, 10000);
+}));
+
+test('M1 Segment-AAD unabhängig von keyId/wrappedDek: rewrapHeader', async () => {
+  const data = crypto.randomBytes(3 * SEG + 5);
+  cs.useKeys({ current: 1, keys: new Map([[1, KEY]]) });
+  const p = await enc(data);
+  const before = fs.readFileSync(p);
+  cs.useKeys({ current: 2, keys: new Map([[1, KEY], [2, KEY2]]) });
+  const r = cs.rewrapHeader(p, { toKeyId: 2 });
+  assert.deepStrictEqual([r.fromKeyId, r.toKeyId, r.changed], [1, 2, true]);
+  const after = fs.readFileSync(p);
+  assert.ok(after.subarray(96).equals(before.subarray(96)), 'Segmentbytes identisch');
+  assert.ok(!after.subarray(34, 94).equals(before.subarray(34, 94)), 'neuer Wrap');
+  assert.ok(after.subarray(26, 34).equals(before.subarray(26, 34)), 'noncePfx bleibt');
+  assert.strictEqual(after.readUInt32BE(10), 2);
+  assert.ok((await cs.readDecrypted(p, { encrypted: true })).equals(data));
+  assert.strictEqual(cs.rewrapHeader(p, { toKeyId: 2 }).changed, false);
+  cs.useKeys({ current: 2, keys: new Map([[2, KEY2]]) });
+  assert.ok((await cs.readDecrypted(p, { encrypted: true })).equals(data));
+  cs.useKeys({ current: 1, keys: new Map([[1, KEY]]) });
+  await assert.rejects(cs.readDecrypted(p, { encrypted: true }), { code: 'KEY_UNKNOWN' });
+  // Bit-Flips nach Rewrap weiterhin erkannt
+  cs.useKeys({ current: 2, keys: new Map([[2, KEY2]]) });
+  for (const pos of [0, 9, 10, 14, 26, 34, 70, 94, 96, 200, after.length - 1]) {
+    const b = Buffer.from(after); b[pos] ^= 1;
+    const q = tp(); fs.writeFileSync(q, b);
+    await assert.rejects(cs.readDecrypted(q, { encrypted: true }), undefined, `pos ${pos}`);
+  }
+  assert.throws(() => cs.rewrapHeader(p, { toKeyId: 9 }), { code: 'KEY_UNKNOWN' });
+  cs.useKeys(null);
+});
+
+test('Domain-Separation: KCV und Spaltenschlüssel unterscheiden sich vom Master-Key', () => {
+  assert.notStrictEqual(cs.getKeyCheckValue(KEY), crypto.createHmac('sha256', KEY).update('mycloud-kcv').digest('hex'));
+  assert.ok(!cs.deriveColumnKey(KEY).equals(KEY));
+  assert.ok(!cs.deriveColumnKey(KEY).equals(cs.deriveColumnKey(KEY, 'mycloud-file-wrap-v1')));
+});
+
+test('S4 withPlaintextTempFile: ohne MYCLOUD_TMP_DIR Fehler bei aktivem Key, ext-Whitelist', withKey(KEY, async () => {
+  const p = await enc(Buffer.from('x'));
+  const saved = { t: process.env.MYCLOUD_TMP_DIR, a: process.env.MYCLOUD_ALLOW_DISK_TMP };
+  delete process.env.MYCLOUD_TMP_DIR; delete process.env.MYCLOUD_ALLOW_DISK_TMP;
+  try {
+    await assert.rejects(cs.withPlaintextTempFile(p, async () => {}, { encrypted: true }), /MYCLOUD_TMP_DIR/);
+    process.env.MYCLOUD_ALLOW_DISK_TMP = '1';
+    const w = console.warn; console.warn = () => {};
+    try { await cs.withPlaintextTempFile(p, async t => assert.strictEqual(fs.readFileSync(t, 'utf8'), 'x'), { encrypted: true }); } finally { console.warn = w; }
+    process.env.MYCLOUD_TMP_DIR = fs.mkdtempSync(path.join(tmpRoot, 'tt-'));
+    for (const bad of ['../x', 'A', 'toolong', '', 'a.b'])
+      await assert.rejects(cs.withPlaintextTempFile(p, async () => {}, { encrypted: true, ext: bad }), RangeError, bad);
+    await cs.withPlaintextTempFile(p, async t => assert.ok(t.endsWith('/plain.mp4')), { encrypted: true, ext: 'mp4' });
+  } finally {
+    for (const [k, v] of [['MYCLOUD_TMP_DIR', saved.t], ['MYCLOUD_ALLOW_DISK_TMP', saved.a]]) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  }
+}));
+
+test('S4 sweepOrphans: alte Reste weg, junge und echte Dateien bleiben', async () => {
+  const d = fs.mkdtempSync(path.join(tmpRoot, 'sweep-'));
+  fs.mkdirSync(path.join(d, 'user1'));
+  const old = new Date(Date.now() - 2 * 3600 * 1000);
+  const mk = (f, o) => { fs.writeFileSync(f, 'x'); if (o) fs.utimesSync(f, old, old); };
+  mk(path.join(d, 'blob'), true);
+  mk(path.join(d, 'user1', 'blob.tmp-abcdef123456'), true);
+  mk(path.join(d, 'user1', 'blob2.enc-tmp-abcdef123456'), true);
+  mk(path.join(d, 'jung.tmp-abcdef123456'), false);
+  fs.mkdirSync(path.join(d, 'mycloud-AbC123')); fs.utimesSync(path.join(d, 'mycloud-AbC123'), old, old);
+  fs.mkdirSync(path.join(d, 'mycloud-frisch1'));
+  assert.strictEqual(await cs.sweepOrphans([d, undefined, path.join(d, 'gibtsnicht')]), 3);
+  assert.deepStrictEqual(fs.readdirSync(d).sort(), ['blob', 'jung.tmp-abcdef123456', 'mycloud-frisch1', 'user1']);
+});
 
 test('encryptFileInPlace: atomar, idempotent, Klartext-Hash', withKey(KEY, async () => {
   const data = crypto.randomBytes(70000);
@@ -262,7 +371,8 @@ test('loadMasterKeys: Datei, ohne Pfad, unlesbar', () => {
 });
 
 test('Key-Check-Wert, Spaltenschlüssel, Recovery-Code', () => {
-  assert.strictEqual(cs.getKeyCheckValue(KEY), crypto.createHmac('sha256', KEY).update('mycloud-kcv').digest('hex'));
+  assert.match(cs.getKeyCheckValue(KEY), /^[0-9a-f]{64}$/);
+  assert.strictEqual(cs.getKeyCheckValue(KEY), cs.getKeyCheckValue(KEY));
   assert.notStrictEqual(cs.getKeyCheckValue(KEY), cs.getKeyCheckValue(KEY2));
   const c = cs.deriveColumnKey(KEY, 'mycloud-column-v1');
   assert.strictEqual(c.length, 32);
@@ -276,25 +386,45 @@ test('Key-Check-Wert, Spaltenschlüssel, Recovery-Code', () => {
   assert.throws(() => cs.parseRecoveryCode(bad), { code: 'KEY_FORMAT' });
 });
 
-test('Start-Check: erster Start, gleicher Key, falscher Key, Key fehlt', async () => {
+test('Start-Check (kcv pro keyId): Erststart, gleicher Key, falscher Key, Key fehlt, Rotation', async () => {
   const rows = new Map();
   const db = { query: async (sql, p) => {
-    if (/^SELECT/.test(sql)) return { rows: rows.has('k') ? [{ value: rows.get('k') }] : [] };
-    if (!rows.has('k')) rows.set('k', p[0]);
+    if (/^SELECT/.test(sql)) return { rows: [...rows].map(([key, value]) => ({ key, value })) };
+    if (!rows.has(p[0])) rows.set(p[0], p[1]);
     return { rows: [] };
   } };
-  cs.useKeys(null);
-  await cs.checkMasterKeyAtStartup(db);            // ohne Key, ohne kcv: no-op
-  assert.strictEqual(rows.size, 0);
-  cs.useKeys(KEY);
+  const warns = []; const opts = { warn: m => warns.push(m) };
+  const cfg = (current, ...ids) => ({ current, keys: new Map(ids.map(i => [i, { 1: KEY, 2: KEY2, 3: KEY3 }[i]])) });
+  const KEY3 = crypto.randomBytes(32);
   const log = console.log; console.log = () => {};
-  try { await cs.checkMasterKeyAtStartup(db); } finally { console.log = log; }
-  assert.strictEqual(rows.get('k'), cs.getKeyCheckValue(KEY));
-  await cs.checkMasterKeyAtStartup(db);            // gleicher Key
-  cs.useKeys(KEY2);
-  await assert.rejects(cs.checkMasterKeyAtStartup(db), { code: 'KCV_MISMATCH' });
-  cs.useKeys(null);
-  await assert.rejects(cs.checkMasterKeyAtStartup(db), { code: 'KCV_NO_KEY' });
+  try {
+    cs.useKeys(null);
+    await cs.checkMasterKeyAtStartup(db, opts);          // ohne Key, ohne kcv: no-op
+    assert.strictEqual(rows.size, 0);
+    cs.useKeys(cfg(1, 1));
+    await cs.checkMasterKeyAtStartup(db, opts);
+    assert.strictEqual(rows.get('crypto_kcv:1'), cs.getKeyCheckValue(KEY));
+    await cs.checkMasterKeyAtStartup(db, opts);          // gleicher Key
+    cs.useKeys({ current: 1, keys: new Map([[1, KEY2]]) });
+    await assert.rejects(cs.checkMasterKeyAtStartup(db, opts), { code: 'KCV_MISMATCH' });
+    cs.useKeys(null);
+    await assert.rejects(cs.checkMasterKeyAtStartup(db, opts), { code: 'KCV_NO_KEY' });
+    // Rotation: neuer current (2) mit altem Key 1 -> Eintrag für 2 wird angelegt
+    cs.useKeys(cfg(2, 1, 2));
+    await cs.checkMasterKeyAtStartup(db, opts);
+    assert.strictEqual(rows.get('crypto_kcv:2'), cs.getKeyCheckValue(KEY2));
+    // Neue keyId 3 ohne einen passenden alten Key -> Abbruch, nichts angelegt
+    cs.useKeys({ current: 3, keys: new Map([[3, KEY3]]) });
+    await assert.rejects(cs.checkMasterKeyAtStartup(db, opts), { code: 'KCV_MISMATCH' });
+    assert.ok(!rows.has('crypto_kcv:3'));
+    // Alter Key 1 entfernt: nur Warnung
+    cs.useKeys(cfg(2, 2));
+    await cs.checkMasterKeyAtStartup(db, opts);
+    assert.ok(warns.some(w => w.includes('keyId 1')));
+    // current passt nicht -> Abbruch, auch wenn ein anderer Key passt
+    cs.useKeys({ current: 2, keys: new Map([[1, KEY], [2, KEY3]]) });
+    await assert.rejects(cs.checkMasterKeyAtStartup(db, opts), { code: 'KCV_MISMATCH' });
+  } finally { console.log = log; cs.useKeys(null); }
 });
 
 test('keys.js: init, Modus 0400, Überschreiben verweigert, check, show-recovery', () => {
@@ -313,6 +443,9 @@ test('keys.js: init, Modus 0400, Überschreiben verweigert, check, show-recovery
   assert.ok(!again.stdout.includes(code));
   assert.match(execFileSync('node', [script, 'check', f], { encoding: 'utf8' }), /OK/);
   assert.ok(execFileSync('node', [script, 'show-recovery', f], { encoding: 'utf8' }).includes(code));
+  const noOut = spawnSync('node', [script, 'init'], { encoding: 'utf8', cwd: dir });
+  assert.notStrictEqual(noOut.status, 0);
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['master_key']);
   const bad = path.join(dir, 'bad'); fs.writeFileSync(bad, 'xyz');
   const r = spawnSync('node', [script, 'check', bad], { encoding: 'utf8' });
   assert.notStrictEqual(r.status, 0);

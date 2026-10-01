@@ -52,8 +52,8 @@ test('Start-Check des Master-Keys', { skip: !hasDocker && 'Docker nicht verfügb
     fs.writeFileSync(path.join(dir, 'key'), keyA + '\n');
     const r = await boot('/keys/key');
     assert.strictEqual(r.exit, null, r.logs);
-    const q = dc(['exec', '-T', 'db', 'psql', '-U', 'mycloud', '-tA', '-c', "SELECT value FROM settings WHERE key='crypto_kcv'"]);
-    const kcv = crypto.createHmac('sha256', Buffer.from(keyA, 'hex')).update('mycloud-kcv').digest('hex');
+    const q = dc(['exec', '-T', 'db', 'psql', '-U', 'mycloud', '-tA', '-c', "SELECT value FROM settings WHERE key='crypto_kcv:1'"]);
+    const kcv = require('../app/crypto-store').getKeyCheckValue(Buffer.from(keyA, 'hex'));
     assert.strictEqual(q.stdout.trim(), kcv);
     assert.ok(!r.logs.includes(keyA));
   });

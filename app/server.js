@@ -7072,6 +7072,11 @@ withDbRetry(initDb)
       console.error(`FEHLER (Verschlüsselung): ${err.message}`);
       process.exit(1);
     }
+    if (cryptoStore.isEnabled()) {
+      cryptoStore.sweepOrphans([UPLOADS_DIR, process.env.MYCLOUD_TMP_DIR])
+        .then(n => { if (n) console.log(`Verschlüsselung: ${n} verwaiste Temp-Einträge entfernt.`); })
+        .catch(err => console.error('Sweep verwaister Temp-Dateien fehlgeschlagen:', err.message));
+    }
     await refreshMaxUploadSizeBytes();
     // Awaited (unlike indexExistingFiles() below) — it's just filesystem renames, not the CPU-heavy
     // OCR/text-extraction work indexing does, so it's fast even for a large library, and completing

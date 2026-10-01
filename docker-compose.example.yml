@@ -74,8 +74,12 @@ services:
       # Optional: Verschlüsselung (siehe README "Verschlüsselung (optional)"). Zusammen mit dem
       # secrets-Block unten und "secrets: [master_key]" hier aktivieren:
       # MYCLOUD_MASTER_KEY_FILE: /run/secrets/master_key
+      # Entschlüsselte Temp-Dateien (Thumbnails, Konvertierung) nur im RAM, nie auf der Platte:
+      # MYCLOUD_TMP_DIR: /run/mycloud-tmp
     # secrets:
     #   - master_key
+    # tmpfs:
+    #   - /run/mycloud-tmp:size=512m,mode=0700
     networks:
       - mycloud_network
       # Läuft bereits ein Reverse-Proxy (z. B. Caddy, siehe Caddyfile.example) in einem eigenen
@@ -109,7 +113,9 @@ volumes:
   eurooffice_logs:
 
 # Optional: Master-Key für die Verschlüsselung, Datei erzeugen mit
-# `node scripts/keys.js init --out ./secrets/master_key` (siehe README, Abschnitt Verschlüsselung).
+# `docker compose run --rm --no-deps -v ./secrets:/out app node scripts/keys.js init --out /out/master_key`
+# Die Datei gehört danach dem Container-User (root): für ein Docker-Secret aus einer Host-Datei Modus
+# 0400/0440 und Besitzer beachten (ggf. `sudo chown $USER secrets/master_key`). Siehe README.
 # secrets:
 #   master_key:
 #     file: ./secrets/master_key
