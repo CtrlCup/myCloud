@@ -4770,14 +4770,19 @@ app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     // Atomic increment bounded by max_downloads, done before reading/sending content so two
     // concurrent views of a one-time note can't both succeed before either's increment runs
     // (mirrors the fix applied to the file/ZIP download routes for the same race).
-    const incRes = await pool.query(
-      `UPDATE shares SET download_count = download_count + 1
-       WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
-       RETURNING *`,
-      [share.id]
-    );
-    if (incRes.rows.length === 0) {
-      return res.status(410).json({ error: 'This share has reached its download limit.' });
+    // One-time notes are already counted by the confirmed open (GET /api/public/shares/:slug),
+    // counting again here would lock the reader out of their own note (same exception as the
+    // download route).
+    if (!file.is_one_time_note) {
+      const incRes = await pool.query(
+        `UPDATE shares SET download_count = download_count + 1
+         WHERE id = $1 AND (max_downloads IS NULL OR download_count < max_downloads)
+         RETURNING *`,
+        [share.id]
+      );
+      if (incRes.rows.length === 0) {
+        return res.status(410).json({ error: 'This share has reached its download limit.' });
+      }
     }
 
     const content = fs.readFileSync(filePath, 'utf8');
