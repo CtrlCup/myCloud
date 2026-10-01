@@ -7073,7 +7073,7 @@ withDbRetry(initDb)
       process.exit(1);
     }
     if (cryptoStore.isEnabled()) {
-      cryptoStore.sweepOrphans([UPLOADS_DIR, process.env.MYCLOUD_TMP_DIR])
+      cryptoStore.sweepOrphans({ uploads: UPLOADS_DIR, tmp: process.env.MYCLOUD_TMP_DIR })
         .then(n => { if (n) console.log(`Verschlüsselung: ${n} verwaiste Temp-Einträge entfernt.`); })
         .catch(err => console.error('Sweep verwaister Temp-Dateien fehlgeschlagen:', err.message));
     }

@@ -79,7 +79,9 @@ Segmente i = 0..n-1:
   die Segmente bleiben byte-identisch.
 - `plainSize` ist in der AAD des letzten Segments gebunden und wird beim Öffnen exakt gegen die
   Dateigröße geprüft (`96 + plainSize + nseg*16`). Eine **leere Datei** hat genau ein leeres
-  letztes Segment, damit Abschneiden erkennbar bleibt.
+  letztes Segment, damit Abschneiden erkennbar bleibt. Weil `plainSize` nicht im Wrap-AAD steht, wird bei `plainSize = 0` dieses Segment beim
+  Lesen immer verifiziert (sonst ließe sich jede Datei auf 112 Byte kürzen und `plainSize=0` setzen).
+  `plainSizeOf()` liest nur den Header und prüft das nicht.
 - **Rewrap-Invariante (hartes Verbot):** Nach einem Rewrap, und generell, darf nie neuer Inhalt mit
   demselben DEK und `noncePfx` geschrieben werden (Nonce-Wiederverwendung bricht GCM). Neuer
   Inhalt bedeutet neue Datei mit neuem DEK (Copy-on-Write, Abschnitt 3.4).
@@ -182,6 +184,14 @@ Passwort-Hashes (bcrypt) und API-Key-Hashes bleiben, wie sie sind: Sie sind bere
 - **Rotation:** Neuer Key bekommt eine neue `keyId`. Ein Hintergrund-Job wrappt alle DEKs in den
   Headern neu (nur je ~100 Byte pro Datei) und verschlüsselt die Spalten neu. Alte Keys bleiben
   lesbar, bis der Job fertig ist.
+  - **Risiko Torn-Write:** Der Header-Rewrap überschreibt 96 Byte in place und ist nicht
+    crash-atomar. Deshalb sichert `rewrapHeader` vorher den alten Header in `<datei>.rewrap-bak`
+    (0600, fsync), verifiziert nach dem Schreiben per Rücklesen, stellt bei Fehlern den alten Header
+    zurück und löscht das Backup erst danach. Nach einem Absturz stellt `recoverRewrap(path)` den alten
+    Header wieder her, falls der aktuelle nicht entpackbar ist, sonst löscht es nur das Backup.
+  - Vor einem Massen-Rewrap ein Backup (Abschnitt 6) erstellen. Der Rewrap läuft im Wartungsfenster
+    oder mit Retry bei gleichzeitigen Lesern: Leser können kurz `KEY_MISMATCH` sehen. Der Lesepfad
+    wiederholt den Header-Unwrap deshalb einmal nach 50 ms.
 
 ## 6. Backup
 
@@ -290,6 +300,9 @@ IdP ggf. anpassen. Nutzer müssen sich neu einloggen.
 - Migration idempotent: Eine bereits verschlüsselte Datei mit `enc_version = NULL` erkennen und nur
   die Spalte nachziehen. Vor dem `rename` das Ergebnis verifizieren (entschlüsseln, Hash vergleichen).
 - Semaphor für paralleles Entschlüsseln (CPU- und Speicherlast begrenzen).
+- Key-Check-Erstinitialisierung (`crypto_kcv:*` anlegen) nur, wenn keine Datei mit `enc_version > 0`
+  existiert. Sonst Abbruch, damit ein fehlender oder leerer `settings`-Eintrag nicht mit einem neuen Key
+  "überschrieben" wird, während schon verschlüsselte Dateien existieren.
 
 Jede Phase ist für sich auslieferbar. Ohne Master-Key bleibt das Verhalten unverändert.
 

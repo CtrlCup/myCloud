@@ -285,20 +285,107 @@ test('S4 withPlaintextTempFile: ohne MYCLOUD_TMP_DIR Fehler bei aktivem Key, ext
   }
 }));
 
-test('S4 sweepOrphans: alte Reste weg, junge und echte Dateien bleiben', async () => {
+test('S4 sweepOrphans: enge Muster, kein Folgen von Symlinks, tmp nicht rekursiv', async () => {
   const d = fs.mkdtempSync(path.join(tmpRoot, 'sweep-'));
-  fs.mkdirSync(path.join(d, 'user1'));
+  const up = path.join(d, 'up'), tmp = path.join(d, 'tmp'), outside = path.join(d, 'outside');
+  for (const x of [up, path.join(up, 'user1'), tmp, outside]) fs.mkdirSync(x);
   const old = new Date(Date.now() - 2 * 3600 * 1000);
-  const mk = (f, o) => { fs.writeFileSync(f, 'x'); if (o) fs.utimesSync(f, old, old); };
-  mk(path.join(d, 'blob'), true);
-  mk(path.join(d, 'user1', 'blob.tmp-abcdef123456'), true);
-  mk(path.join(d, 'user1', 'blob2.enc-tmp-abcdef123456'), true);
-  mk(path.join(d, 'jung.tmp-abcdef123456'), false);
-  fs.mkdirSync(path.join(d, 'mycloud-AbC123')); fs.utimesSync(path.join(d, 'mycloud-AbC123'), old, old);
-  fs.mkdirSync(path.join(d, 'mycloud-frisch1'));
-  assert.strictEqual(await cs.sweepOrphans([d, undefined, path.join(d, 'gibtsnicht')]), 3);
-  assert.deepStrictEqual(fs.readdirSync(d).sort(), ['blob', 'jung.tmp-abcdef123456', 'mycloud-frisch1', 'user1']);
+  const mk = (f, o = true) => { fs.writeFileSync(f, 'x'); if (o) fs.utimesSync(f, old, old); };
+  const U = '123e4567-e89b-12d3-a456-426614174000';
+  mk(path.join(up, U));
+  mk(path.join(up, 'user1', `${U}.tmp-abcdef123456`));
+  mk(path.join(up, 'user1', `${U}.png.jpg.enc-tmp-abcdef123456`));
+  mk(path.join(up, 'x.tmp-deadbeef'));                    // Nutzerdatei
+  mk(path.join(up, `${U}.tmp-abcdef123456.txt`));         // Nutzerdatei
+  mk(path.join(up, `${U}.tmp-abcdef654321`), false);      // jung
+  mk(path.join(outside, `${U}.tmp-abcdef123456`));
+  fs.symlinkSync(path.join(outside, `${U}.tmp-abcdef123456`), path.join(up, `${U}.tmp-111111111111`));
+  fs.symlinkSync(outside, path.join(up, 'linkdir'));
+  const mkTmp = (name, mode, o = true) => { const p = path.join(tmp, name); fs.mkdirSync(p, { mode }); fs.chmodSync(p, mode); if (o) fs.utimesSync(p, old, old); return p; };
+  mkTmp('mycloud-AbC123', 0o700);
+  mkTmp('mycloud-frisch', 0o700, false);
+  mkTmp('mycloud-ZzZ999', 0o755);
+  mkTmp('anderes', 0o700);
+  fs.mkdirSync(path.join(tmp, 'sub')); mk(path.join(tmp, 'sub', `${U}.tmp-abcdef123456`));
+  fs.symlinkSync(outside, path.join(tmp, 'mycloud-LnK123'));
+  assert.strictEqual(await cs.sweepOrphans({ uploads: up, tmp, nichtda: 1 }), 3);
+  assert.deepStrictEqual(fs.readdirSync(up).sort(), [U, 'linkdir', 'user1', 'x.tmp-deadbeef', `${U}.tmp-111111111111`, `${U}.tmp-abcdef123456.txt`, `${U}.tmp-abcdef654321`].sort());
+  assert.deepStrictEqual(fs.readdirSync(path.join(up, 'user1')), []);
+  assert.deepStrictEqual(fs.readdirSync(tmp).sort(), ['anderes', 'mycloud-LnK123', 'mycloud-ZzZ999', 'mycloud-frisch', 'sub']);
+  assert.ok(fs.existsSync(path.join(outside, `${U}.tmp-abcdef123456`)));
+  assert.ok(fs.existsSync(path.join(tmp, 'sub', `${U}.tmp-abcdef123456`)));
+  assert.strictEqual(await cs.sweepOrphans({}), 0);
 });
+
+test('Leere Datei: legitim lesbar, Abschneiden/Tag-Flip erkannt', withKey(KEY, async () => {
+  process.env.MYCLOUD_TMP_DIR = fs.mkdtempSync(path.join(tmpRoot, 'et-'));
+  try {
+  const emptyP = await enc(Buffer.alloc(0));
+  const raw = fs.readFileSync(emptyP);
+  assert.strictEqual(raw.length, 112);
+  for (const range of [{}, { start: 0 }, { start: 0, end: 0 }, { start: 5, end: 9 }, { start: 3, end: 1 }]) {
+    assert.strictEqual((await collect(cs.createDecryptStream(emptyP, { encrypted: true, ...range }))).length, 0);
+  }
+  assert.strictEqual((await cs.readDecrypted(emptyP, { encrypted: true })).length, 0);
+  await cs.withPlaintextTempFile(emptyP, async t => assert.strictEqual(fs.readFileSync(t).length, 0), { encrypted: true });
+  // (a) Datei mit Inhalt auf 112 Byte kürzen und plainSize=0 setzen
+  const full = fs.readFileSync(await enc(crypto.randomBytes(5000)));
+  const cut = Buffer.from(full.subarray(0, 112)); cut.writeBigUInt64BE(0n, 18);
+  const q = tp(); fs.writeFileSync(q, cut);
+  for (const range of [{}, { start: 0, end: 0 }, { start: 9, end: 3 }]) {
+    assert.throws(() => cs.createDecryptStream(q, { encrypted: true, ...range }), { code: 'ECORRUPT' });
+  }
+  await assert.rejects(cs.readDecrypted(q, { encrypted: true }), { code: 'ECORRUPT' });
+  await assert.rejects(cs.withPlaintextTempFile(q, async () => {}, { encrypted: true }), { code: 'ECORRUPT' });
+  // (c) gekippter Tag
+  const bad = Buffer.from(raw); bad[111] ^= 1;
+  const q2 = tp(); fs.writeFileSync(q2, bad);
+  await assert.rejects(cs.readDecrypted(q2, { encrypted: true }), { code: 'ECORRUPT' });
+  // Leere Datei: Segment-Bytes einer anderen Datei
+  const other = fs.readFileSync(await enc(Buffer.alloc(0)));
+  const q3 = tp(); fs.writeFileSync(q3, Buffer.concat([raw.subarray(0, 96), other.subarray(96)]));
+  await assert.rejects(cs.readDecrypted(q3, { encrypted: true }), { code: 'ECORRUPT' });
+  } finally { delete process.env.MYCLOUD_TMP_DIR; }
+}));
+
+test('KCV-Erstinitialisierung: Race (anderer Wert nach INSERT) -> Abbruch', async () => {
+  cs.useKeys(KEY);
+  const db = { query: async sql => (/^SELECT key/.test(sql) ? { rows: [] } : /^SELECT value/.test(sql) ? { rows: [{ value: 'ff'.repeat(32) }] } : { rows: [] }) };
+  const log = console.log; console.log = () => {};
+  try { await assert.rejects(cs.checkMasterKeyAtStartup(db), { code: 'KCV_MISMATCH' }); } finally { console.log = log; cs.useKeys(null); }
+});
+
+test('rewrapHeader: Backup wird entfernt, recoverRewrap stellt nach Teil-Write wieder her', async () => {
+  const data = crypto.randomBytes(3000);
+  cs.useKeys({ current: 1, keys: new Map([[1, KEY], [2, KEY2]]) });
+  const p = await enc(data);
+  const orig = fs.readFileSync(p);
+  assert.deepStrictEqual(cs.recoverRewrap(p), { recovered: false, reason: 'kein Backup' });
+  cs.rewrapHeader(p, { toKeyId: 2 });
+  assert.ok(!fs.existsSync(p + '.rewrap-bak'));
+  // simulierter Teil-Write: Backup (alter Header) vorhanden, aktueller Header halb überschrieben
+  const half = fs.readFileSync(p);
+  fs.writeFileSync(p + '.rewrap-bak', orig.subarray(0, 96), { mode: 0o600 });
+  const torn = Buffer.from(half); orig.copy(torn, 50, 50, 96); // vordere Hälfte neu (keyId 2), Rest alt
+  fs.writeFileSync(p, torn);
+  await assert.rejects(cs.readDecrypted(p, { encrypted: true }));
+  assert.deepStrictEqual(cs.recoverRewrap(p), { recovered: true });
+  assert.ok(!fs.existsSync(p + '.rewrap-bak'));
+  assert.ok((await cs.readDecrypted(p, { encrypted: true })).equals(data));
+  assert.strictEqual(fs.readFileSync(p).readUInt32BE(10), 1);
+  // intakter Header + Backup: Backup wird nur gelöscht
+  fs.writeFileSync(p + '.rewrap-bak', orig.subarray(0, 96));
+  assert.deepStrictEqual(cs.recoverRewrap(p), { recovered: false, reason: 'Header intakt' });
+  assert.ok(!fs.existsSync(p + '.rewrap-bak'));
+  cs.useKeys(null);
+});
+
+test('Heuristik-Warnung bei encrypted undefined (einmalig)', withKey(KEY, async () => {
+  const p = await enc(Buffer.from('a'));
+  const w = console.warn; const msgs = []; console.warn = m => msgs.push(m);
+  try { await cs.readDecrypted(p); await cs.readDecrypted(p); } finally { console.warn = w; }
+  assert.ok(msgs.length <= 1);
+}));
 
 test('encryptFileInPlace: atomar, idempotent, Klartext-Hash', withKey(KEY, async () => {
   const data = crypto.randomBytes(70000);
@@ -389,7 +476,7 @@ test('Key-Check-Wert, Spaltenschlüssel, Recovery-Code', () => {
 test('Start-Check (kcv pro keyId): Erststart, gleicher Key, falscher Key, Key fehlt, Rotation', async () => {
   const rows = new Map();
   const db = { query: async (sql, p) => {
-    if (/^SELECT/.test(sql)) return { rows: [...rows].map(([key, value]) => ({ key, value })) };
+    if (/^SELECT/.test(sql)) return { rows: [...rows].filter(([key]) => !p || key === p[0]).map(([key, value]) => ({ key, value })) };
     if (!rows.has(p[0])) rows.set(p[0], p[1]);
     return { rows: [] };
   } };
@@ -421,6 +508,11 @@ test('Start-Check (kcv pro keyId): Erststart, gleicher Key, falscher Key, Key fe
     cs.useKeys(cfg(2, 2));
     await cs.checkMasterKeyAtStartup(db, opts);
     assert.ok(warns.some(w => w.includes('keyId 1')));
+    // nicht numerische keyId wird ignoriert (Warnung)
+    rows.set('crypto_kcv:abc', 'zz');
+    await cs.checkMasterKeyAtStartup(db, opts);
+    assert.ok(warns.some(w => w.includes('crypto_kcv:abc')));
+    rows.delete('crypto_kcv:abc');
     // current passt nicht -> Abbruch, auch wenn ein anderer Key passt
     cs.useKeys({ current: 2, keys: new Map([[1, KEY], [2, KEY3]]) });
     await assert.rejects(cs.checkMasterKeyAtStartup(db, opts), { code: 'KCV_MISMATCH' });

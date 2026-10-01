@@ -32,7 +32,13 @@
  * Segment-AAD bindet nur UNVERÄNDERLICHE Header-Felder (nicht keyId/wrappedDek), damit rewrapHeader nur
  * die 96 Header-Bytes ändert. Der DEK ist durch den GCM-Wrap authentisiert.
  * plainSize steht in der AAD des letzten Segments und wird beim Öffnen gegen die Dateigröße geprüft.
- * Eine leere Datei hat genau ein leeres letztes Segment (Abschneiden bleibt erkennbar).
+ * Eine leere Datei hat genau ein leeres letztes Segment (Abschneiden bleibt erkennbar). Weil plainSize nicht
+ * im Wrap-AAD steht, verifizieren createDecryptStream/readDecrypted/withPlaintextTempFile bei plainSize 0
+ * immer dieses Segment (Tag über leeren Ciphertext); sonst ließe sich jede Datei auf 112 Byte kürzen und
+ * plainSize=0 setzen. plainSizeOf() liest nur den Header und verifiziert das nicht.
+ * rewrapHeader ist nicht crash-atomar: Vorher wird der alte Header in <datei>.rewrap-bak gesichert;
+ * recoverRewrap(path) stellt ihn nach einem Abbruch wieder her. Leser versuchen den Header-Unwrap bei
+ * KEY_MISMATCH einmal nach kurzer Pause erneut (gleichzeitiger Rewrap).
  *
  * HARTES VERBOT: Nach rewrapHeader (oder generell) niemals neuen Inhalt mit demselben DEK und noncePfx
  * schreiben (Nonce-Wiederverwendung bricht GCM). Neuer Inhalt = neue Datei mit neuem DEK/noncePfx
@@ -53,6 +59,7 @@ const TAG_SIZE = 16;
 const DEFAULT_SEG_SIZE = 65536;
 const MIN_SEG_SIZE = 4096;
 const MAX_SEG_SIZE = 1 << 24;
+const REWRAP_BAK = '.rewrap-bak';
 const OFF = { version: 8, keyId: 10, segSize: 14, plainSize: 18, noncePfx: 26, wrapped: 34, wrappedLen: 60, reserved: 94 };
 
 function fail(code, message) {
@@ -232,7 +239,17 @@ function openHeader(filePath, { unwrap = true, flags = 'r' } = {}) {
     if (nseg > 2 ** 32) throw fail('ECORRUPT', 'Verschlüsselte Datei: zu viele Segmente.');
     if (size !== HEADER_SIZE + plainSize + nseg * TAG_SIZE) throw fail('ECORRUPT', 'Verschlüsselte Datei: Größe passt nicht zum Header (abgeschnitten oder erweitert).');
     const info = { fd, header, keyId, segSize, plainSize, nseg };
-    if (unwrap) { info.dek = unwrapDek(header); info.hash = segHash(header); }
+    if (unwrap) {
+      try { info.dek = unwrapDek(header); }
+      catch (e) {
+        if (e.code !== 'KEY_MISMATCH') throw e;
+        // evtl. läuft gerade ein Rewrap: einmal kurz warten und den Header neu lesen
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+        if (fs.readSync(fd, header, 0, HEADER_SIZE, 0) !== HEADER_SIZE) throw e;
+        info.dek = unwrapDek(header);
+      }
+      info.hash = segHash(header);
+    }
     return info;
   } catch (e) {
     fs.closeSync(fd);
@@ -253,7 +270,15 @@ function isEncrypted(filePath) {
 }
 
 // encrypted undefined -> Heuristik (nur Migration/Recovery); sonst Entscheidung des Aufrufers.
-const decide = (filePath, encrypted) => (encrypted === undefined ? isEncrypted(filePath) : !!encrypted);
+let warnedHeuristic = false;
+function decide(filePath, encrypted) {
+  if (encrypted !== undefined) return !!encrypted;
+  if (!warnedHeuristic && isEnabled()) {
+    warnedHeuristic = true;
+    console.warn('WARNUNG (Verschlüsselung): `encrypted` nicht angegeben, es wird die Magic-Heuristik genutzt (nur für Migration/Recovery gedacht).');
+  }
+  return isEncrypted(filePath);
+}
 
 /**
  * Klartextgröße: aus dem Header (ohne DEK-Unwrap, nicht authentisiert) bzw. Dateigröße bei Klartext.
@@ -375,19 +400,53 @@ function rewrapHeader(filePath, { toKeyId }) {
   const master = keys && keys.keys.get(toKeyId);
   if (!master) throw fail('KEY_UNKNOWN', `Ziel-Key ${toKeyId} ist nicht konfiguriert.`);
   const info = openHeader(filePath, { flags: 'r+' });
+  const bak = filePath + REWRAP_BAK;
   try {
     const fromKeyId = info.keyId;
     if (fromKeyId === toKeyId) return { fromKeyId, toKeyId, changed: false };
     const h = Buffer.from(info.header);
     h.writeUInt32BE(toKeyId, OFF.keyId);
     wrapInto(h, master, info.dek);
-    if (fs.writeSync(info.fd, h, 0, HEADER_SIZE, 0) !== HEADER_SIZE) throw new Error('Header-Schreiben unvollständig.');
-    fs.fsyncSync(info.fd);
-    const back = Buffer.alloc(HEADER_SIZE);
-    fs.readSync(info.fd, back, 0, HEADER_SIZE, 0);
-    if (!back.equals(h) || !unwrapDek(back).equals(info.dek)) throw new Error('Rewrap-Verifikation fehlgeschlagen.');
+    // alten Header sichern (der Header-Write ist nicht crash-atomar, siehe recoverRewrap)
+    const bfd = fs.openSync(bak, 'w', 0o600);
+    try { fs.writeSync(bfd, info.header, 0, HEADER_SIZE, 0); fs.fsyncSync(bfd); } finally { fs.closeSync(bfd); }
+    try {
+      if (fs.writeSync(info.fd, h, 0, HEADER_SIZE, 0) !== HEADER_SIZE) throw new Error('Header-Schreiben unvollständig.');
+      fs.fsyncSync(info.fd);
+      const back = Buffer.alloc(HEADER_SIZE);
+      fs.readSync(info.fd, back, 0, HEADER_SIZE, 0);
+      if (!back.equals(h) || !unwrapDek(back).equals(info.dek)) throw new Error('Rewrap-Verifikation fehlgeschlagen.');
+    } catch (e) {
+      try { fs.writeSync(info.fd, info.header, 0, HEADER_SIZE, 0); fs.fsyncSync(info.fd); fs.unlinkSync(bak); } catch { /* best effort, Backup bleibt für recoverRewrap */ }
+      throw e;
+    }
+    fs.unlinkSync(bak);
     return { fromKeyId, toKeyId, changed: true };
   } finally { fs.closeSync(info.fd); }
+}
+
+/**
+ * Nach einem abgebrochenen Rewrap: Existiert <datei>.rewrap-bak und ist der aktuelle Header nicht
+ * entpackbar (KEY_MISMATCH/ECORRUPT), wird der gesicherte Header zurückgeschrieben; sonst wird das Backup
+ * gelöscht. Liefert { recovered: boolean } (oder { recovered:false, reason:'kein Backup' }).
+ */
+function recoverRewrap(filePath) {
+  const bak = filePath + REWRAP_BAK;
+  if (!fs.existsSync(bak)) return { recovered: false, reason: 'kein Backup' };
+  try {
+    fs.closeSync(openHeader(filePath).fd);
+    fs.unlinkSync(bak);
+    return { recovered: false, reason: 'Header intakt' };
+  } catch (e) {
+    if (e.code !== 'KEY_MISMATCH' && e.code !== 'ECORRUPT') throw e;
+  }
+  const old = fs.readFileSync(bak);
+  if (old.length !== HEADER_SIZE) throw fail('ECORRUPT', 'Rewrap-Backup hat die falsche Größe.');
+  const fd = fs.openSync(filePath, 'r+');
+  try { fs.writeSync(fd, old, 0, HEADER_SIZE, 0); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.closeSync(openHeader(filePath).fd); // wirft, wenn auch der alte Header nicht passt
+  fs.unlinkSync(bak);
+  return { recovered: true };
 }
 
 /* ---------- Lesen ---------- */
@@ -405,6 +464,20 @@ function createDecryptStream(filePath, { start = 0, end, encrypted } = {}) {
   const { fd, hash, dek, segSize, plainSize, nseg } = info;
   if (end === undefined || end > plainSize - 1) end = plainSize - 1;
   if (!Number.isInteger(start) || start < 0 || !Number.isInteger(end)) { fs.closeSync(fd); throw new RangeError('Ungültiger Bereich'); }
+  if (plainSize === 0) {
+    // plainSize ist nicht im Wrap-AAD: das einzige (leere) Segment immer verifizieren
+    try {
+      const tag = Buffer.alloc(TAG_SIZE);
+      if (fs.readSync(fd, tag, 0, TAG_SIZE, HEADER_SIZE) !== TAG_SIZE) throw new Error('kurz');
+      const d = decipher(dek, segNonce(info.header.subarray(OFF.noncePfx, OFF.noncePfx + 8), 0));
+      d.setAAD(segAad(hash, 0, true, 0));
+      d.setAuthTag(tag);
+      d.update(Buffer.alloc(0)); d.final();
+    } catch {
+      fs.closeSync(fd);
+      throw fail('ECORRUPT', 'Integritätsprüfung fehlgeschlagen (leere Datei): Datei beschädigt oder manipuliert.');
+    }
+  }
   if (start > end) { fs.closeSync(fd); return Readable.from([]); }
   const pfx = info.header.subarray(OFF.noncePfx, OFF.noncePfx + 8);
   const first = Math.floor(start / segSize);
@@ -485,30 +558,41 @@ async function withPlaintextTempFile(filePath, fn, { encrypted, ext } = {}) {
 }
 
 /**
- * Räumt Reste abgebrochener Vorgänge auf, die älter als `maxAgeMs` (Standard 1 h) sind: Temp-Verzeichnisse
- * `mycloud-XXXXXX` (nur direkt in den übergebenen Verzeichnissen) sowie Dateien `*.tmp-<hex>` /
- * `*.enc-tmp-<hex>` (rekursiv). Liefert die Anzahl gelöschter Einträge.
+ * Räumt Reste abgebrochener Vorgänge auf, die älter als `maxAgeMs` (Standard 1 h) sind:
+ *  - `uploads`: rekursiv (ohne Symlinks zu folgen) nur Dateien `<uuid>[.ext[.ext]].tmp-<12 hex>` bzw.
+ *    `.enc-tmp-<12 hex>`;
+ *  - `tmp` (MYCLOUD_TMP_DIR): NICHT rekursiv, nur direkte Unterverzeichnisse `mycloud-XXXXXX`, die dem
+ *    aktuellen Benutzer gehören und Modus 0700 haben.
+ * Liefert die Anzahl gelöschter Einträge.
  */
-async function sweepOrphans(dirs, { maxAgeMs = 3600000 } = {}) {
+async function sweepOrphans({ uploads, tmp } = {}, { maxAgeMs = 3600000 } = {}) {
   const limit = Date.now() - maxAgeMs;
+  const fileRe = /^[0-9a-f-]{36}(\.[A-Za-z0-9]+){0,2}\.(enc-)?tmp-[0-9a-f]{12}$/;
   let n = 0;
-  const walk = async (dir, top) => {
+  const walk = async (dir) => {
     let ents;
     try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       const p = path.join(dir, e.name);
       try {
-        if (e.isDirectory()) {
-          if (top && /^mycloud-[A-Za-z0-9]{6}$/.test(e.name)) {
-            if ((await fsp.stat(p)).mtimeMs < limit) { await fsp.rm(p, { recursive: true, force: true }); n++; }
-          } else await walk(p, false);
-        } else if (e.isFile() && /\.(enc-)?tmp-[0-9a-f]{6,}$/.test(e.name)) {
-          if ((await fsp.stat(p)).mtimeMs < limit) { await fsp.unlink(p); n++; }
-        }
+        if (e.isDirectory()) await walk(p);
+        else if (e.isFile() && fileRe.test(e.name) && (await fsp.lstat(p)).mtimeMs < limit) { await fsp.unlink(p); n++; }
       } catch { /* Eintrag verschwunden oder nicht löschbar: weiter */ }
     }
   };
-  for (const d of dirs.filter(Boolean)) await walk(d, true);
+  if (uploads) await walk(uploads);
+  if (tmp) {
+    let ents = [];
+    try { ents = await fsp.readdir(tmp, { withFileTypes: true }); } catch { /* fehlt */ }
+    for (const e of ents) {
+      if (!e.isDirectory() || !/^mycloud-[A-Za-z0-9]{6}$/.test(e.name)) continue;
+      const p = path.join(tmp, e.name);
+      try {
+        const st = await fsp.lstat(p);
+        if (st.isDirectory() && st.uid === process.getuid() && (st.mode & 0o777) === 0o700 && st.mtimeMs < limit) { await fsp.rm(p, { recursive: true, force: true }); n++; }
+      } catch { /* weiter */ }
+    }
+  }
   return n;
 }
 
@@ -521,7 +605,12 @@ async function sweepOrphans(dirs, { maxAgeMs = 3600000 } = {}) {
 async function checkMasterKeyAtStartup(db, { warn = console.warn } = {}) {
   const keys = getKeys();
   const r = await db.query("SELECT key, value FROM settings WHERE key LIKE 'crypto\\_kcv:%'");
-  const stored = new Map(r.rows.map(x => [Number(x.key.slice('crypto_kcv:'.length)), x.value]));
+  const stored = new Map();
+  for (const x of r.rows) {
+    const idStr = x.key.slice('crypto_kcv:'.length);
+    if (/^[1-9]\d{0,8}$/.test(idStr)) stored.set(Number(idStr), x.value);
+    else warn(`WARNUNG (Verschlüsselung): Einstellung "${x.key}" hat keine gültige keyId und wird ignoriert.`);
+  }
   if (!keys) {
     if (stored.size) throw fail('KCV_NO_KEY', 'Diese Instanz wurde mit einem Master-Key verschlüsselt, aber MYCLOUD_MASTER_KEY_FILE ist nicht gesetzt. Start abgebrochen, damit verschlüsselte Dateien nicht als beschädigt behandelt werden. Key-Datei wieder einbinden.');
     return;
@@ -532,7 +621,13 @@ async function checkMasterKeyAtStartup(db, { warn = console.warn } = {}) {
     return c.length === s.length && crypto.timingSafeEqual(c, s);
   };
   const mismatchMsg = 'Der Master-Key in MYCLOUD_MASTER_KEY_FILE passt nicht zu dieser Instanz (Key-Check-Wert weicht ab). Start abgebrochen. Richtige Key-Datei einbinden oder mit dem Recovery-Code wiederherstellen.';
-  const insertCurrent = () => db.query("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", [`crypto_kcv:${keys.current}`, getKeyCheckValue(keys.keys.get(keys.current))]);
+  const insertCurrent = async () => {
+    const k = `crypto_kcv:${keys.current}`, v = getKeyCheckValue(keys.keys.get(keys.current));
+    await db.query("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", [k, v]);
+    // Race (zwei Instanzen starten gleichzeitig): gespeicherten Wert nachlesen und vergleichen
+    const back = await db.query("SELECT value FROM settings WHERE key = $1", [k]);
+    if (!back.rows[0] || back.rows[0].value !== v) throw fail('KCV_MISMATCH', mismatchMsg);
+  };
   if (stored.size === 0) {
     await insertCurrent();
     console.log('Verschlüsselung: Master-Key geladen, Key-Check-Wert gespeichert.');
@@ -588,6 +683,6 @@ module.exports = {
   parseKeyFile, loadMasterKeys, useKeys, isEnabled,
   getKeyCheckValue, deriveColumnKey,
   isEncrypted, plainSizeOf,
-  writeEncrypted, encryptFileInPlace, rewrapHeader, createDecryptStream, readDecrypted, withPlaintextTempFile, sweepOrphans,
+  writeEncrypted, encryptFileInPlace, rewrapHeader, recoverRewrap, createDecryptStream, readDecrypted, withPlaintextTempFile, sweepOrphans,
   checkMasterKeyAtStartup, formatRecoveryCode, parseRecoveryCode,
 };
