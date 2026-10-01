@@ -3888,7 +3888,10 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
        SET slug = $1, can_read = $2, can_write = $3, can_download = $4, can_zip = $5, expires_at = $6,
            password_hash = $7, max_downloads = $8, only_upload = $9, can_collab = $10, message = $11
        WHERE id = $12 RETURNING *`,
-      [slug, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt,
+      [slug, canRead !== undefined ? canRead !== false : share.can_read,
+       canWrite !== undefined ? canWrite === true : share.can_write,
+       canDownload !== undefined ? canDownload !== false : share.can_download,
+       canZip !== undefined ? canZip !== false : share.can_zip, expiresAt,
        passwordHash, maxDownloadsVal, onlyUploadVal, canCollabVal, messageVal, shareId]
     );
 
