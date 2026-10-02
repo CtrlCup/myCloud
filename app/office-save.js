@@ -44,4 +44,31 @@ async function saveDownloadedFile(url, targetPath, get = defaultGet) {
   }
 }
 
-module.exports = { buildDocumentKey, saveDownloadedFile };
+// Copy-on-Write-Variante für aktive Verschlüsselung: streamt den Download direkt in einen NEUEN Blob
+// (`write(newPath, stream)` -> { plainSize, sha256 }, z. B. cryptoStore.writeEncrypted), ruft danach
+// `commit({ size, hash })` auf (DB-Transaktion, die files.path auf den neuen Blob umhängt und { oldPath }
+// liefert) und löscht erst NACH erfolgreichem Commit den alten Blob (`discard(oldPath)`). Bei jedem Fehler
+// (Download-Abbruch, Status != 200, Commit-Fehler) wird der neue Blob verworfen; alter Blob und Zeile bleiben
+// unverändert. Resolves { size, hash } des neuen Blobs.
+async function saveDownloadedFileCow(url, newPath, { write, commit, discard, get = defaultGet }) {
+  let written = false;
+  try {
+    const { statusCode, stream } = await get(url);
+    if (statusCode !== 200) {
+      stream.resume?.();
+      throw new Error(`Download failed with status ${statusCode}`);
+    }
+    const r = await write(newPath, stream);
+    written = true;
+    if (stream.aborted || stream.complete === false) throw new Error('Download aborted');
+    const saved = { size: r.plainSize, hash: r.sha256 };
+    const { oldPath } = await commit(saved);
+    try { discard(oldPath); } catch (e) { console.error('Alter Blob konnte nicht gelöscht werden:', e.message); }
+    return saved;
+  } catch (err) {
+    if (written) { try { discard(newPath); } catch { /* best-effort */ } }
+    throw err;
+  }
+}
+
+module.exports = { buildDocumentKey, saveDownloadedFile, saveDownloadedFileCow };

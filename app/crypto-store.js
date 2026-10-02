@@ -322,6 +322,9 @@ async function writeEncrypted(filePath, input, { segSize = DEFAULT_SEG_SIZE } = 
   const sha = crypto.createHash('sha256');
   let plainSize = 0;
   let fh;
+  // Ein Stream-Fehler (z. B. Client-Abbruch) während des asynchronen open() hätte noch keinen Listener und würde
+  // sonst als uncaughtException den Prozess beenden; die Iteration unten meldet ihn weiterhin als Rejection.
+  if (input && typeof input.on === 'function') input.on('error', () => {});
   try {
     fh = await fsp.open(tmp, 'wx', 0o600);
     let expected;
@@ -536,6 +539,23 @@ let warnedDiskTmp = false;
 async function withPlaintextTempFile(filePath, fn, { encrypted, ext } = {}) {
   if (ext !== undefined && !/^[a-z0-9]{1,5}$/.test(ext)) throw new RangeError('Ungültige Dateiendung.');
   if (!decide(filePath, encrypted)) return fn(filePath);
+  return withPrivateTempDir(async (dir) => {
+    const tmp = path.join(dir, ext ? `plain.${ext}` : 'plain');
+    const fh = await fsp.open(tmp, 'wx', 0o600);
+    try {
+      let pos = 0;
+      for await (const c of createDecryptStream(filePath, { encrypted: true })) { await writeAll(fh, c, pos); pos += c.length; }
+    } finally { await fh.close(); }
+    return fn(tmp);
+  });
+}
+
+/**
+ * Legt ein privates Temp-Verzeichnis (0700) unter MYCLOUD_TMP_DIR an, ruft fn(dir) auf und löscht es in finally.
+ * Für Klartext-Zwischenergebnisse externer Tools (z. B. ffmpeg-Ausgabe). Ist die Verschlüsselung aktiv und
+ * MYCLOUD_TMP_DIR nicht gesetzt, gibt es einen Fehler (außer MYCLOUD_ALLOW_DISK_TMP=1).
+ */
+async function withPrivateTempDir(fn) {
   let base = process.env.MYCLOUD_TMP_DIR;
   if (!base) {
     if (isEnabled() && process.env.MYCLOUD_ALLOW_DISK_TMP !== '1') throw new Error('MYCLOUD_TMP_DIR ist nicht gesetzt: Klartext-Temp-Dateien sollen auf ein tmpfs (oder mit MYCLOUD_ALLOW_DISK_TMP=1 bewusst auf die Platte).');
@@ -545,13 +565,7 @@ async function withPlaintextTempFile(filePath, fn, { encrypted, ext } = {}) {
   const dir = await fsp.mkdtemp(path.join(base, 'mycloud-'));
   try {
     await fsp.chmod(dir, 0o700);
-    const tmp = path.join(dir, ext ? `plain.${ext}` : 'plain');
-    const fh = await fsp.open(tmp, 'wx', 0o600);
-    try {
-      let pos = 0;
-      for await (const c of createDecryptStream(filePath, { encrypted: true })) { await writeAll(fh, c, pos); pos += c.length; }
-    } finally { await fh.close(); }
-    return await fn(tmp);
+    return await fn(dir);
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }
@@ -563,9 +577,10 @@ async function withPlaintextTempFile(filePath, fn, { encrypted, ext } = {}) {
  *    `.enc-tmp-<12 hex>`;
  *  - `tmp` (MYCLOUD_TMP_DIR): NICHT rekursiv, nur direkte Unterverzeichnisse `mycloud-XXXXXX`, die dem
  *    aktuellen Benutzer gehören und Modus 0700 haben.
+ *  - `chunked` (tmp-chunked): direkte Unterverzeichnisse mit UUID-Namen (abgebrochene Chunk-Uploads), samt Inhalt.
  * Liefert die Anzahl gelöschter Einträge.
  */
-async function sweepOrphans({ uploads, tmp } = {}, { maxAgeMs = 3600000 } = {}) {
+async function sweepOrphans({ uploads, tmp, chunked } = {}, { maxAgeMs = 3600000 } = {}) {
   const limit = Date.now() - maxAgeMs;
   const fileRe = /^[0-9a-f-]{36}(\.[A-Za-z0-9]+){0,2}\.(enc-)?tmp-[0-9a-f]{12}$/;
   let n = 0;
@@ -581,6 +596,17 @@ async function sweepOrphans({ uploads, tmp } = {}, { maxAgeMs = 3600000 } = {}) 
     }
   };
   if (uploads) await walk(uploads);
+  if (chunked) {
+    let ents = [];
+    try { ents = await fsp.readdir(chunked, { withFileTypes: true }); } catch { /* fehlt */ }
+    for (const e of ents) {
+      if (!e.isDirectory() || !/^[0-9a-f-]{36}$/.test(e.name)) continue;
+      const p = path.join(chunked, e.name);
+      try {
+        if ((await fsp.lstat(p)).mtimeMs <= limit) { await fsp.rm(p, { recursive: true, force: true }); n++; }
+      } catch { /* weiter */ }
+    }
+  }
   if (tmp) {
     let ents = [];
     try { ents = await fsp.readdir(tmp, { withFileTypes: true }); } catch { /* fehlt */ }
@@ -683,6 +709,6 @@ module.exports = {
   parseKeyFile, loadMasterKeys, useKeys, isEnabled,
   getKeyCheckValue, deriveColumnKey,
   isEncrypted, plainSizeOf,
-  writeEncrypted, encryptFileInPlace, rewrapHeader, recoverRewrap, createDecryptStream, readDecrypted, withPlaintextTempFile, sweepOrphans,
+  writeEncrypted, encryptFileInPlace, rewrapHeader, recoverRewrap, createDecryptStream, readDecrypted, withPlaintextTempFile, withPrivateTempDir, sweepOrphans,
   checkMasterKeyAtStartup, formatRecoveryCode, parseRecoveryCode,
 };

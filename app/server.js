@@ -7,6 +7,7 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const archiver = require('archiver');
 const crypto = require('crypto');
+const { Readable } = require('stream');
 const { findOrCreateSsoUser, linkSsoToUser, SsoUserError } = require('./sso-user');
 const swaggerUi = require('swagger-ui-express');
 const yaml = require('js-yaml');
@@ -31,7 +32,7 @@ const { getVersionStatus, logVersionStatus, checkForUpdate, GITHUB_REPO } = requ
 
 require('dotenv').config();
 const { parseTrustProxy } = require('./trust-proxy');
-const { buildDocumentKey, saveDownloadedFile } = require('./office-save');
+const { buildDocumentKey, saveDownloadedFile, saveDownloadedFileCow } = require('./office-save');
 
 const app = express();
 // req.ip (Rate-Limits) und req.protocol hängen daran; siehe TRUST_PROXY in .env.example.
@@ -75,6 +76,92 @@ function relocateUploadToOwnerDir(ownerId, filenameAtRoot) {
   const relativePath = `${ownerId}/${filenameAtRoot}`;
   fs.renameSync(path.join(UPLOADS_DIR, filenameAtRoot), path.join(UPLOADS_DIR, relativePath));
   return relativePath;
+}
+
+// Neuer Blob-Pfad im Benutzerordner (UUID + sichere Endung des Dateinamens). Liefert den files.path-relativen
+// und den absoluten Pfad. Copy-on-Write: Blobs werden nie überschrieben, Änderungen landen immer in einer neuen Datei.
+function newBlobPath(ownerId, fileName) {
+  const filename = crypto.randomUUID() + safeFileExtension(fileName);
+  return { relativePath: `${ownerId}/${filename}`, absPath: path.join(ensureUserUploadDir(ownerId), filename) };
+}
+
+// Schreibt einen neuen Blob (Buffer oder Readable): bei aktivem Master-Key verschlüsselt, sonst Klartext.
+// Liefert { plainSize, sha256, encVersion } (encVersion 1 bzw. null passend zum geschriebenen Blob).
+async function writeNewBlob(absPath, input) {
+  const r = await cryptoStore.writeEncrypted(absPath, input);
+  return { ...r, encVersion: cryptoStore.isEnabled() ? 1 : null };
+}
+
+// Einzige Stelle, die Blobs physisch löscht (P4 hängt hier die Backup-Warteschlange ein), samt zugehöriger
+// Thumbnails. ENOENT ist kein Fehler, jeder andere Fehler wird geworfen (wie bisher an den Aufrufstellen).
+function deleteThumbnailsFor(blobPath) {
+  const base = path.basename(blobPath);
+  for (const suffix of ['.jpg', '.png']) {
+    for (const enc of ['', '.enc']) {
+      try { fs.unlinkSync(path.join(UPLOADS_DIR, 'thumbnails', base + suffix + enc)); } catch { /* kein Thumbnail vorhanden */ }
+    }
+  }
+}
+function deleteBlob(blobPath) {
+  try {
+    fs.unlinkSync(blobPath);
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+  }
+  deleteThumbnailsFor(blobPath);
+}
+
+// Copy-on-Write-Umhängen: setzt in EINER Transaktion die Spalten `cols` (z. B. path, size, content_hash,
+// enc_version, content) der Zeile und liefert { ok, row, oldPath } (oldPath = der unter Zeilensperre gelesene
+// bisherige files.path, absolut). Optional unter Quota-Sperre (`quota`: { ownerId, netAdditionalBytes }) und nur,
+// wenn die Zeile noch auf `expectPath` (files.path-relativ) zeigt (sonst Fehler: zwischenzeitlich geändert).
+// Der Aufrufer löscht den alten Blob (deleteBlob) erst NACH dem Commit und bei einem Fehler den neuen.
+async function swapFileBlob(fileId, cols, { quota, expectPath } = {}) {
+  const run = async (client) => {
+    const cur = await client.query('SELECT path FROM files WHERE id = $1 FOR UPDATE', [fileId]);
+    if (cur.rows.length === 0) throw new Error(`Datei ${fileId} existiert nicht mehr.`);
+    if (expectPath !== undefined && cur.rows[0].path !== expectPath) throw new Error(`Datei ${fileId} wurde zwischenzeitlich geändert.`);
+    const keys = Object.keys(cols);
+    const upd = await client.query(
+      `UPDATE files SET ${keys.map((k, i) => `${k} = $${i + 1}`).join(', ')} WHERE id = $${keys.length + 1} RETURNING *`,
+      [...keys.map((k) => cols[k]), fileId]
+    );
+    return { row: upd.rows[0], oldPath: path.join(UPLOADS_DIR, cur.rows[0].path) };
+  };
+  if (quota && quota.netAdditionalBytes > 0) {
+    const r = await withStorageQuotaLock(quota.ownerId, quota.netAdditionalBytes, run);
+    return r.ok ? { ok: true, ...r.data } : r;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const data = await run(client);
+    await client.query('COMMIT');
+    return { ok: true, ...data };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Schreibt neuen Inhalt (Buffer/Readable) einer bestehenden Datei bei aktivem Master-Key als NEUEN verschlüsselten
+// Blob und hängt die Zeile um (auch wenn sie bisher Klartext war: so wandern Dateien beim Bearbeiten).
+// `extraCols` ergänzt/überschreibt Spalten (z. B. content). Alter Blob wird nach dem Commit gelöscht, bei
+// einem Fehler der neue. Liefert { ok, row, plainSize } wie swapFileBlob.
+async function replaceBlobCow(file, input, extraCols = {}, swapOpts = {}) {
+  const { relativePath, absPath } = newBlobPath(file.owner_id, file.path);
+  const { plainSize, sha256 } = await cryptoStore.writeEncrypted(absPath, input);
+  try {
+    const r = await swapFileBlob(file.id, { path: relativePath, size: plainSize, content_hash: sha256, enc_version: 1, ...extraCols }, swapOpts);
+    if (!r.ok) { deleteBlob(absPath); return r; }
+    deleteBlob(r.oldPath);
+    return { ...r, plainSize };
+  } catch (err) {
+    try { deleteBlob(absPath); } catch { /* best-effort */ }
+    throw err;
+  }
 }
 
 // SHA-256 of a file's content, hex-encoded. Streamed rather than read into memory at once since
@@ -154,8 +241,8 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Multer storage engine
-const storage = multer.diskStorage({
+// Multer storage engine (Klartext, Branding-Assets und Verschlüsselung aus)
+const plainStorage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, UPLOADS_DIR);
   },
@@ -164,6 +251,23 @@ const storage = multer.diskStorage({
     cb(null, uniqueSuffix + safeFileExtension(file.originalname));
   }
 });
+// Multer storage engine für alle Nutzer-Uploads: Ist ein Master-Key konfiguriert, läuft der Upload-Stream
+// direkt durch writeEncrypted (nie Klartext auf der Platte) und req.file bekommt size = Klartextgröße,
+// sha256 = Klartext-Hash und encrypted = true. Ohne Key verhält sich alles wie plainStorage (E16).
+const storage = {
+  _handleFile(req, file, cb) {
+    if (!cryptoStore.isEnabled()) return plainStorage._handleFile(req, file, cb);
+    const filename = crypto.randomUUID() + safeFileExtension(file.originalname);
+    const dest = path.join(UPLOADS_DIR, filename);
+    cryptoStore.writeEncrypted(dest, file.stream).then(
+      ({ plainSize, sha256 }) => cb(null, { destination: UPLOADS_DIR, filename, path: dest, size: plainSize, sha256, encrypted: true }),
+      cb
+    );
+  },
+  _removeFile(req, file, cb) {
+    fs.unlink(file.path, (err) => cb(err && err.code !== 'ENOENT' ? err : null));
+  },
+};
 // Without a limit, multer will happily write an unbounded request body to disk before the
 // app-level storage-quota check (further down) ever runs — a single oversized upload could
 // fill the disk regardless of any quota. This is a generous ceiling (not the per-user quota),
@@ -192,6 +296,10 @@ async function refreshMaxUploadSizeBytes() {
 // instance) to restart.
 function uploadSingle(fieldName) {
   return (req, res, next) => multer({ storage, limits: { fileSize: maxUploadSizeBytes } }).single(fieldName)(req, res, next);
+}
+// Branding-Assets (Logo, Hintergründe, SEO-Bild) werden öffentlich ausgeliefert und bleiben Klartext.
+function uploadSinglePlain(fieldName) {
+  return (req, res, next) => multer({ storage: plainStorage, limits: { fileSize: maxUploadSizeBytes } }).single(fieldName)(req, res, next);
 }
 function uploadArray(fieldName, maxCount) {
   return (req, res, next) => multer({ storage, limits: { fileSize: maxUploadSizeBytes } }).array(fieldName, maxCount)(req, res, next);
@@ -257,6 +365,17 @@ setInterval(() => {
 async function assembleChunkedUpload(session) {
   const filenameAtRoot = crypto.randomUUID() + safeFileExtension(session.originalName);
   const outPath = path.join(UPLOADS_DIR, filenameAtRoot);
+  if (cryptoStore.isEnabled()) {
+    // Chunks sind einzeln verschlüsselte Blobs (siehe PUT /api/uploads/chunked): nacheinander entschlüsselt in EIN
+    // writeEncrypted gestreamt; das Ergebnis ist ein verschlüsselter Blob, sha256 über den Klartext.
+    const plain = Readable.from((async function* () {
+      for (let i = 0; i < session.totalChunks; i++) {
+        yield* cryptoStore.createDecryptStream(path.join(session.dir, String(i)), { encrypted: true });
+      }
+    })(), { objectMode: false });
+    const { plainSize, sha256 } = await cryptoStore.writeEncrypted(outPath, plain);
+    return { filenameAtRoot, fileSize: plainSize, sha256, encrypted: true };
+  }
   const out = fs.createWriteStream(outPath);
   try {
     for (let i = 0; i < session.totalChunks; i++) {
@@ -2039,8 +2158,8 @@ app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), a
 // this beforehand serialized the whole batch behind it. A stale/failed extraction here just
 // leaves content NULL, same as any pre-existing file — indexExistingFiles() picks those up as a
 // backfill on the next server start.
-function scheduleTextExtraction(physicalPath, mimeType, originalName, fileId) {
-  extractTextContent(physicalPath, mimeType, originalName, { encrypted: false }) // P2b: frischer Blob, Format aus dem Schreibpfad
+function scheduleTextExtraction(physicalPath, mimeType, originalName, fileId, encrypted) {
+  extractTextContent(physicalPath, mimeType, originalName, { encrypted: !!encrypted }) // frischer Blob, Format aus dem Schreibpfad
     .then((textContent) => {
       if (textContent === null) return;
       return pool.query('UPDATE files SET content = $1 WHERE id = $2', [textContent, fileId]);
@@ -2060,15 +2179,33 @@ function scheduleTextExtraction(physicalPath, mimeType, originalName, fileId) {
 // scheduleTextExtraction: can take a while on a large file and must never block the response.
 const FASTSTART_EXTS = ['mp4', 'm4v', 'mov'];
 
-// Core remux — resolves with the new file size once physicalPath has been rewritten in place and
+// Core remux — resolves with the new file size once the container has been rewritten and
 // its DB row updated (size, content_hash, faststart_processed_at), or rejects on failure. Shared
 // by the fire-and-forget post-upload path below and the sequential admin backfill (see
 // runFaststartBackfill), which needs to await one file at a time instead of letting a whole
 // library's worth of ffmpeg processes race each other.
-function remuxMp4Faststart(physicalPath, originalName, fileId) {
+// Ohne Master-Key wird die Klartext-Datei wie bisher an Ort und Stelle ersetzt. Mit Key arbeitet ffmpeg auf einer
+// Klartext-Temp-Datei im tmpfs; das Ergebnis wird als NEUER verschlüsselter Blob geschrieben und per
+// Copy-on-Write in die Zeile eingehängt (`encrypted` kommt aus files.enc_version der Zeile).
+function remuxMp4Faststart(physicalPath, originalName, fileId, encrypted = false) {
+  const { exec } = require('child_process');
+  if (cryptoStore.isEnabled()) {
+    return fileDelivery.withPlaintextTempFile(physicalPath, (inputPath) => cryptoStore.withPrivateTempDir(async (dir) => {
+      const outPath = path.join(dir, 'faststart.mp4');
+      await new Promise((resolve, reject) => {
+        exec(`ffmpeg -y -i "${inputPath}" -c copy -movflags +faststart -f mp4 "${outPath}"`, { maxBuffer: 1024 * 1024 * 10, ...EXEC_TIMEOUT_LONG }, (err) => err ? reject(err) : resolve());
+      });
+      if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) throw new Error('ffmpeg produced no output');
+      const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+      const file = fileRes.rows[0];
+      const expectPath = path.relative(UPLOADS_DIR, physicalPath);
+      if (!file || file.path !== expectPath) throw new Error('Datei wurde während des Remux geändert oder gelöscht');
+      const r = await replaceBlobCow(file, fs.createReadStream(outPath), { faststart_processed_at: new Date() }, { expectPath });
+      return r.plainSize;
+    }), { encrypted: !!encrypted, ext: fileDelivery.tempExtFor(originalName) });
+  }
   return new Promise((resolve, reject) => {
     const tempPath = `${physicalPath}.faststart.mp4`;
-    const { exec } = require('child_process');
     const cmd = `ffmpeg -y -i "${physicalPath}" -c copy -movflags +faststart -f mp4 "${tempPath}"`;
     exec(cmd, { maxBuffer: 1024 * 1024 * 10, ...EXEC_TIMEOUT_LONG }, async (err) => {
       try {
@@ -2080,7 +2217,7 @@ function remuxMp4Faststart(physicalPath, originalName, fileId) {
         fs.renameSync(tempPath, physicalPath);
         // The container bytes changed (even though the video content itself didn't) — the hash
         // computed at upload time is now stale, and size can shift by a few KB (the moved atom).
-        const newHash = await computeFileHash(physicalPath, false); // P2b: Schreibpfad, bis dahin Klartext
+        const newHash = await computeFileHash(physicalPath, false); // Key aus: Klartext-Blob
         await pool.query(
           'UPDATE files SET size = $1, content_hash = $2, faststart_processed_at = NOW() WHERE id = $3',
           [newSize, newHash, fileId]
@@ -2106,11 +2243,11 @@ function remuxMp4Faststart(physicalPath, originalName, fileId) {
 // "-movflags +faststart" does — is what makes progressive "starts after the first chunk"
 // playback possible. Runs after the upload response, fire-and-forget, same reasoning as
 // scheduleTextExtraction: can take a while on a large file and must never block the response.
-function scheduleFaststartRemux(physicalPath, originalName, fileId) {
+function scheduleFaststartRemux(physicalPath, originalName, fileId, encrypted) {
   const ext = path.extname(originalName || '').slice(1).toLowerCase();
   if (!FASTSTART_EXTS.includes(ext)) return;
 
-  remuxMp4Faststart(physicalPath, originalName, fileId)
+  remuxMp4Faststart(physicalPath, originalName, fileId, encrypted)
     .then((newSize) => console.log(`Faststart remux OK for "${originalName}" (file ${fileId}, ${newSize} bytes)`))
     .catch((err) => console.error(`Faststart remux failed for "${originalName}" (file ${fileId}):`, err));
 }
@@ -2120,7 +2257,7 @@ function scheduleFaststartRemux(physicalPath, originalName, fileId) {
 // (conflict check, quota, DB row, physical relocation into the owner's folder, and scheduling
 // the post-response text extraction / faststart remux). Never touches `req`/`res` itself so
 // both callers can wrap the returned { status, body } in whatever response shape they need.
-async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, originalName, fileSize, onConflict }) {
+async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, originalName, fileSize, sha256, encrypted, onConflict }) {
   let currentPhysicalPath = path.join(UPLOADS_DIR, filenameAtRoot);
   try {
     if (parentId !== null) {
@@ -2138,10 +2275,12 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
 
     // Only hash when a name collision actually exists — hashing every upload unconditionally
     // would add a full extra read of every file's content to the common (non-conflicting) case.
-    let newFileHash = null;
+    // Verschlüsselte Uploads liefern den Klartext-Hash vom Schreiben mit (kostenlos, wird immer gespeichert).
+    const encVersion = encrypted ? 1 : null;
+    let newFileHash = sha256 || null;
     let isExactDuplicate = false;
     if (canReplace) {
-      newFileHash = await computeFileHash(currentPhysicalPath, false); // frischer Upload (P2b: verschlüsselt)
+      newFileHash = sha256 || await computeFileHash(currentPhysicalPath, !!encrypted); // frischer Upload
       const existingHash = await resolveExistingFileHash(existing);
       isExactDuplicate = !!existingHash && existingHash === newFileHash;
     }
@@ -2173,8 +2312,8 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
       // PUT /api/files/:id/binary-content.
       const netAdditionalBytes = fileSize - (existing.size || 0);
       const doReplace = (client) => client.query(
-        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4 WHERE id = $5 RETURNING *`,
-        [relativePath, safeMimeType, fileSize, newFileHash, existing.id]
+        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4, enc_version = $5 WHERE id = $6 RETURNING *`,
+        [relativePath, safeMimeType, fileSize, newFileHash, encVersion, existing.id]
       );
 
       const quotaResult = netAdditionalBytes > 0
@@ -2185,11 +2324,11 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
         return { status: 413, body: { error: quotaResult.error } };
       }
 
-      if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+      deleteBlob(oldPhysicalPath);
 
       const updatedFile = quotaResult.data.rows[0];
-      scheduleTextExtraction(currentPhysicalPath, safeMimeType, originalName, updatedFile.id);
-      scheduleFaststartRemux(currentPhysicalPath, originalName, updatedFile.id);
+      scheduleTextExtraction(currentPhysicalPath, safeMimeType, originalName, updatedFile.id, encrypted);
+      scheduleFaststartRemux(currentPhysicalPath, originalName, updatedFile.id, encrypted);
       return { status: 200, body: updatedFile };
     }
 
@@ -2201,9 +2340,9 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
 
     const quotaResult = await withStorageQuotaLock(userId, fileSize, (client) => client.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, content_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8) RETURNING *`,
-      [finalName, relativePath, safeMimeType, fileSize, false, parentId, userId, newFileHash]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, content_hash, enc_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9) RETURNING *`,
+      [finalName, relativePath, safeMimeType, fileSize, false, parentId, userId, newFileHash, encVersion]
     ));
     if (!quotaResult.ok) {
       fs.unlinkSync(currentPhysicalPath);
@@ -2211,8 +2350,8 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
     }
 
     const insertedFile = quotaResult.data.rows[0];
-    scheduleTextExtraction(currentPhysicalPath, safeMimeType, finalName, insertedFile.id);
-    scheduleFaststartRemux(currentPhysicalPath, finalName, insertedFile.id);
+    scheduleTextExtraction(currentPhysicalPath, safeMimeType, finalName, insertedFile.id, encrypted);
+    scheduleFaststartRemux(currentPhysicalPath, finalName, insertedFile.id, encrypted);
     return { status: 201, body: insertedFile };
   } catch (err) {
     console.error(`Error finalizing upload "${originalName}" (${fileSize} bytes, user ${userId}):`, err);
@@ -2245,7 +2384,8 @@ app.post('/api/files/upload', requireAuth, requirePermission('upload'), uploadSi
 
   const result = await finalizeUploadedFile({
     userId, parentId, filenameAtRoot: req.file.filename,
-    originalName: req.file.originalname, fileSize: req.file.size, onConflict,
+    originalName: req.file.originalname, fileSize: req.file.size,
+    sha256: req.file.sha256, encrypted: req.file.encrypted, onConflict,
   });
   res.status(result.status).json(result.body);
 });
@@ -2270,8 +2410,8 @@ app.post('/api/files/upload/chunked/init', requireAuth, requirePermission('uploa
 
   const session = createChunkedUploadSession({
     originalName, totalSize,
-    finalize: ({ filenameAtRoot, fileSize, onConflict }) => finalizeUploadedFile({
-      userId, parentId, filenameAtRoot, originalName, fileSize, onConflict,
+    finalize: ({ filenameAtRoot, fileSize, sha256, encrypted, onConflict }) => finalizeUploadedFile({
+      userId, parentId, filenameAtRoot, originalName, fileSize, sha256, encrypted, onConflict,
     }),
   });
   res.json(session);
@@ -2300,12 +2440,15 @@ app.put('/api/uploads/chunked/:uploadId/:index',
       return res.status(400).json({ error: 'Unerwartete Chunk-Größe.' });
     }
 
-    fs.writeFile(path.join(session.dir, String(index)), req.body, (err) => {
-      if (err) {
-        console.error('Error writing upload chunk:', err);
-        return res.status(500).json({ error: 'Internal server error' });
-      }
-      res.json({ received: index });
+    const chunkPath = path.join(session.dir, String(index));
+    // Bei aktivem Key liegt jeder Chunk als eigener kleiner verschlüsselter Blob in tmp-chunked (atomar ersetzt,
+    // eine Wiederholung desselben Chunks bleibt möglich); sonst wie bisher als Klartext-Datei.
+    const written = cryptoStore.isEnabled()
+      ? cryptoStore.writeEncrypted(chunkPath, req.body)
+      : fs.promises.writeFile(chunkPath, req.body);
+    written.then(() => res.json({ received: index }), (err) => {
+      console.error('Error writing upload chunk:', err);
+      res.status(500).json({ error: 'Internal server error' });
     });
   }
 );
@@ -2317,8 +2460,8 @@ app.post('/api/uploads/chunked/:uploadId/complete', async (req, res) => {
   if (!session) return res.status(404).json({ error: 'Upload-Session nicht gefunden oder abgelaufen.' });
 
   try {
-    const { filenameAtRoot, fileSize } = await assembleChunkedUpload(session);
-    const result = await session.finalize({ filenameAtRoot, fileSize, onConflict: req.body.onConflict });
+    const { filenameAtRoot, fileSize, sha256, encrypted } = await assembleChunkedUpload(session);
+    const result = await session.finalize({ filenameAtRoot, fileSize, sha256, encrypted, onConflict: req.body.onConflict });
     res.status(result.status).json(result.body);
   } catch (err) {
     console.error('Error assembling chunked upload:', err);
@@ -2509,12 +2652,8 @@ async function deleteFolderRecursive(folderId, userId) {
     // fs.existsSync() + fs.unlinkSync() is a TOCTOU race: if the file disappears between
     // the check and the unlink (e.g. an overlapping delete-multiple call on the same
     // subtree), unlinkSync throws ENOENT here and aborts the recursion partway through,
-    // leaving some rows deleted and others not. Best-effort delete instead.
-    try {
-      fs.unlinkSync(filePath);
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw e;
-    }
+    // leaving some rows deleted and others not. deleteBlob ignores ENOENT (best-effort).
+    deleteBlob(filePath);
   }
 
   await pool.query('DELETE FROM files WHERE id = ANY($1)', [subtreeRes.rows.map(f => f.id)]);
@@ -2528,12 +2667,7 @@ async function hardDeleteTrashItem(file, userId) {
   if (file.is_folder) {
     await deleteFolderRecursive(file.id, userId);
   } else {
-    const filePath = path.join(UPLOADS_DIR, file.path);
-    try {
-      fs.unlinkSync(filePath);
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw e;
-    }
+    deleteBlob(path.join(UPLOADS_DIR, file.path));
     await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
   }
 }
@@ -2650,7 +2784,7 @@ app.put('/api/files/:id/rename', requireAuth, requirePermission('rename'), async
     if (existing && onConflict === 'replace' && canReplace) {
       const targetPhysicalPath = path.join(UPLOADS_DIR, existing.path);
       await pool.query('DELETE FROM files WHERE id = $1', [existing.id]);
-      if (fs.existsSync(targetPhysicalPath)) fs.unlinkSync(targetPhysicalPath);
+      deleteBlob(targetPhysicalPath);
     }
 
     const resolvedName = (existing && onConflict === 'keep_both')
@@ -2747,7 +2881,7 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
       if (resolution === 'replace' && conflict.canReplace) {
         const oldTargetPhysicalPath = path.join(UPLOADS_DIR, conflict.existing.path);
         await pool.query('DELETE FROM files WHERE id = $1', [conflict.existing.id]);
-        if (fs.existsSync(oldTargetPhysicalPath)) fs.unlinkSync(oldTargetPhysicalPath);
+        deleteBlob(oldTargetPhysicalPath);
         idsToMove.push(item.id);
       } else if (resolution === 'keep_both') {
         const uniqueName = await generateUniqueName(userId, targetFolderId, item.name, item.is_folder);
@@ -3131,16 +3265,13 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     const relativePath = `${userId}/${uniqueFilename}`;
     const physicalPath = path.join(ensureUserUploadDir(userId), uniqueFilename);
 
-    let fileSize = 0;
-    if (templateFile && fs.existsSync(templateFile)) {
-      fs.copyFileSync(templateFile, physicalPath);
-      fileSize = fs.statSync(physicalPath).size;
-    } else {
-      fs.writeFileSync(physicalPath, '');
-    }
+    // Vorlage lesen (klein) und als neuen Blob schreiben: bei aktivem Key verschlüsselt.
+    const templateData = (templateFile && fs.existsSync(templateFile)) ? fs.readFileSync(templateFile) : Buffer.alloc(0);
+    const blob = await writeNewBlob(physicalPath, templateData);
+    const fileSize = blob.plainSize;
     // Content is tiny (empty, or a small office template) — always hashing it here, unlike the
     // upload route's "only hash on an actual collision" rule, is cheap enough to just always do.
-    const newFileHash = await computeFileHash(physicalPath, false); // frisch erzeugt (P2b: verschlüsselt)
+    const newFileHash = blob.sha256;
 
     const existing = await findNameConflict(userId, parsedParentId, finalName);
     // A new file is always a file — replacing only makes sense when the existing item is one too.
@@ -3163,10 +3294,10 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     if (existing && onConflict === 'replace' && canReplace) {
       const oldPhysicalPath = path.join(UPLOADS_DIR, existing.path);
       const result = await pool.query(
-        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4 WHERE id = $5 RETURNING *`,
-        [relativePath, mimeType, fileSize, newFileHash, existing.id]
+        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4, enc_version = $5 WHERE id = $6 RETURNING *`,
+        [relativePath, mimeType, fileSize, newFileHash, blob.encVersion, existing.id]
       );
-      if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+      deleteBlob(oldPhysicalPath);
       return res.status(200).json(result.rows[0]);
     }
 
@@ -3175,9 +3306,9 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
       : finalName;
 
     const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [resolvedName, relativePath, mimeType, fileSize, false, parsedParentId, userId, newFileHash]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content_hash, enc_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [resolvedName, relativePath, mimeType, fileSize, false, parsedParentId, userId, newFileHash, blob.encVersion]
     );
 
     res.status(201).json(result.rows[0]);
@@ -3232,23 +3363,22 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
 
       const uniqueFilename = crypto.randomUUID() + '.txt';
       const relativePath = `${userId}/${uniqueFilename}`;
-      fs.writeFileSync(path.join(ensureUserUploadDir(userId), uniqueFilename), content, 'utf8');
-      const size = Buffer.byteLength(content, 'utf8');
+      const noteBlob = await writeNewBlob(path.join(ensureUserUploadDir(userId), uniqueFilename), Buffer.from(content, 'utf8'));
       // Children are also flagged is_one_time_note so the flat "exclude one-time notes from
       // listing/search" filter catches them too, without needing a recursive ancestor check.
       await pool.query(
-        `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
-         VALUES ($1, $2, 'text/plain', $3, false, $4, $5, true, $6)`,
-        [cleanName, relativePath, size, folderId, userId, content]
+        `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content, content_hash, enc_version)
+         VALUES ($1, $2, 'text/plain', $3, false, $4, $5, true, $6, $7, $8)`,
+        [cleanName, relativePath, noteBlob.plainSize, folderId, userId, content, noteBlob.encVersion ? noteBlob.sha256 : null, noteBlob.encVersion]
       );
 
       for (const att of attachments) {
         const safeMimeType = getSafeMimeType(att.originalname);
         const attRelativePath = relocateUploadToOwnerDir(userId, att.filename);
         await pool.query(
-          `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note)
-           VALUES ($1, $2, $3, $4, false, $5, $6, true)`,
-          [att.originalname, attRelativePath, safeMimeType, att.size, folderId, userId]
+          `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content_hash, enc_version)
+           VALUES ($1, $2, $3, $4, false, $5, $6, true, $7, $8)`,
+          [att.originalname, attRelativePath, safeMimeType, att.size, folderId, userId, att.sha256 || null, att.encrypted ? 1 : null]
         );
       }
 
@@ -3256,12 +3386,11 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
     } else {
       const uniqueFilename = crypto.randomUUID() + '.txt';
       const relativePath = `${userId}/${uniqueFilename}`;
-      fs.writeFileSync(path.join(ensureUserUploadDir(userId), uniqueFilename), content, 'utf8');
-      const size = Buffer.byteLength(content, 'utf8');
+      const noteBlob = await writeNewBlob(path.join(ensureUserUploadDir(userId), uniqueFilename), Buffer.from(content, 'utf8'));
       const fileRes = await pool.query(
-        `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content)
-         VALUES ($1, $2, $3, $4, false, $5, $6, true, $7) RETURNING id`,
-        [cleanName, relativePath, 'text/plain', size, parsedParentId, userId, content]
+        `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content, content_hash, enc_version)
+         VALUES ($1, $2, $3, $4, false, $5, $6, true, $7, $8, $9) RETURNING id`,
+        [cleanName, relativePath, 'text/plain', noteBlob.plainSize, parsedParentId, userId, content, noteBlob.encVersion ? noteBlob.sha256 : null, noteBlob.encVersion]
       );
       containerFileId = fileRes.rows[0].id;
     }
@@ -3398,13 +3527,18 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
 
     await maybeSaveFileVersion(fileId, file.content);
 
-    const filePath = path.join(UPLOADS_DIR, file.path);
-    fs.writeFileSync(filePath, content);
-    const stats = fs.statSync(filePath);
+    let size;
+    if (cryptoStore.isEnabled()) {
+      // Copy-on-Write: nie in einen vorhandenen Blob schreiben, sondern neuer verschlüsselter Blob + Zeile umhängen.
+      size = (await replaceBlobCow(file, Buffer.from(content, 'utf8'), { content })).plainSize;
+    } else {
+      const filePath = path.join(UPLOADS_DIR, file.path);
+      fs.writeFileSync(filePath, content);
+      size = fs.statSync(filePath).size;
+      await pool.query('UPDATE files SET size = $1, content = $2 WHERE id = $3', [size, content, fileId]);
+    }
 
-    await pool.query('UPDATE files SET size = $1, content = $2 WHERE id = $3', [stats.size, content, fileId]);
-
-    res.json({ success: true, size: stats.size });
+    res.json({ success: true, size });
   } catch (err) {
     console.error('Error saving file content:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -3440,15 +3574,15 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
     const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
-    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name, { encrypted: false }); // P2b: frischer Blob
+    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name, { encrypted: !!req.file.encrypted }); // frischer Blob (multer-Engine)
 
     // Only the net size increase counts against quota — usedBytes inside the lock still
     // includes this file's OLD size (its row hasn't been updated yet), so checking the full
     // new size on top of that would double-count the very file being replaced.
     const netAdditionalBytes = req.file.size - (file.size || 0);
     const doUpdate = (client) => client.query(
-      'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
-      [relativePath, req.file.size, textContent, fileId]
+      'UPDATE files SET path = $1, size = $2, content = $3, enc_version = $4, content_hash = COALESCE($5, content_hash) WHERE id = $6',
+      [relativePath, req.file.size, textContent, req.file.encrypted ? 1 : null, req.file.sha256 || null, fileId]
     );
     if (netAdditionalBytes > 0) {
       const quotaResult = await withStorageQuotaLock(userId, netAdditionalBytes, doUpdate);
@@ -3460,7 +3594,7 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
       await doUpdate(pool);
     }
 
-    if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+    deleteBlob(oldPhysicalPath);
 
     res.json({ success: true, size: req.file.size });
   } catch (err) {
@@ -3542,10 +3676,14 @@ app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermi
       [fileId, FILE_VERSION_MAX_PER_FILE]
     );
 
-    const filePath = path.join(UPLOADS_DIR, file.path);
-    fs.writeFileSync(filePath, restoredContent);
-    const stats = fs.statSync(filePath);
-    await pool.query('UPDATE files SET size = $1, content = $2 WHERE id = $3', [stats.size, restoredContent, fileId]);
+    if (cryptoStore.isEnabled()) {
+      await replaceBlobCow(file, Buffer.from(restoredContent, 'utf8'), { content: restoredContent });
+    } else {
+      const filePath = path.join(UPLOADS_DIR, file.path);
+      fs.writeFileSync(filePath, restoredContent);
+      const stats = fs.statSync(filePath);
+      await pool.query('UPDATE files SET size = $1, content = $2 WHERE id = $3', [stats.size, restoredContent, fileId]);
+    }
 
     res.json({ success: true, content: restoredContent });
   } catch (err) {
@@ -3594,9 +3732,10 @@ function runExifSummary(inputPath) {
 }
 
 // Helper to generate a thumbnail using ffmpeg or dcraw/exiftool
-// Thumbnails sind abgeleiteter Klartext und werden künftig verschlüsselt abgelegt (P2b): Ob ein Thumbnail
+// Thumbnails sind abgeleiteter Klartext und werden bei aktivem Key verschlüsselt abgelegt: Ob ein Thumbnail
 // verschlüsselt ist, entscheidet allein der Suffix ".enc" im Dateinamen (siehe fileDelivery.isEncThumbnail).
-// Bis P2b schreibt die Erzeugung noch Klartext; ein vorhandenes <name>.enc hat Vorrang.
+// Bei aktivem Master-Key schreibt die Erzeugung <name>.enc (Tool-Ausgabe zuerst in ein tmpfs-Temp-Verzeichnis,
+// dann verschlüsselt), sonst Klartext; ein vorhandenes <name>.enc hat Vorrang.
 const THUMB_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
 const THUMB_RAW_EXTS = ['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
 async function generateThumbnail(physicalFilename, extension, encrypted) {
@@ -3622,7 +3761,20 @@ function sendThumbnail(req, res, thumbPath) {
   });
 }
 
-function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
+async function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
+  // Keyed by basename only (siehe unten): Zielpfad des Klartext-Thumbnails.
+  const finalPath = path.join(THUMBNAILS_DIR, path.basename(physicalFilename) + (lowerExt === 'svg' ? '.png' : '.jpg'));
+  if (!cryptoStore.isEnabled()) return runThumbnailTool(inputPath, finalPath, physicalFilename, lowerExt);
+  // Ausgabe der Tools nur im tmpfs, danach verschlüsselt als <name>.enc ablegen (nie Klartext-Thumbnail auf der Platte).
+  return cryptoStore.withPrivateTempDir(async (dir) => {
+    const tmpOut = path.join(dir, 'thumb' + path.extname(finalPath));
+    if (!(await runThumbnailTool(inputPath, tmpOut, physicalFilename, lowerExt))) return null;
+    await cryptoStore.writeEncrypted(finalPath + '.enc', fs.createReadStream(tmpOut));
+    return finalPath + '.enc';
+  });
+}
+
+function runThumbnailTool(inputPath, outputPath, physicalFilename, lowerExt) {
   return new Promise((resolve) => {
     // Keyed by basename only (not the full "<ownerId>/<uuid>.ext" relative path) — physical
     // filenames are UUIDs, unique regardless of which owner subfolder they live in, so this
@@ -3631,9 +3783,6 @@ function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
     // SVG thumbnails are rasterized to PNG (keeps transparency) — the vector source is never
     // served as a thumbnail itself, only this pre-rendered raster derivative, so no SVG markup
     // (and no <script>/external reference it might contain) ever reaches the client here.
-    const thumbBasename = path.basename(physicalFilename);
-    const outputPath = path.join(THUMBNAILS_DIR, thumbBasename + (lowerExt === 'svg' ? '.png' : '.jpg'));
-
     if (fs.existsSync(outputPath)) {
       return resolve(outputPath);
     }
@@ -4288,12 +4437,27 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
 
       // Download into a temp file, rename over the old one only when complete; size/content/hash
       // are updated afterwards so an aborted download leaves the previous file + index intact.
-      const saved = await saveDownloadedFile(url, filePath);
-      const textContent = await extractTextContent(filePath, file.mime_type, file.name, { encrypted: false }); // P2b: Copy-on-Write-Blob
-      await pool.query(
-        'UPDATE files SET size = $1, content = $2, content_hash = $3 WHERE id = $4',
-        [saved.size, textContent, saved.hash, fileId]
-      );
+      let saved;
+      if (cryptoStore.isEnabled()) {
+        // Copy-on-Write: Download direkt als neuer verschlüsselter Blob, danach in EINER Transaktion umhängen
+        // (path/size/content_hash/enc_version/content) und erst nach dem Commit den alten Blob löschen.
+        const { relativePath, absPath } = newBlobPath(file.owner_id, file.path);
+        saved = await saveDownloadedFileCow(url, absPath, {
+          write: (p, stream) => cryptoStore.writeEncrypted(p, stream),
+          commit: async (s) => {
+            const textContent = await extractTextContent(absPath, file.mime_type, file.name, { encrypted: true });
+            return swapFileBlob(fileId, { path: relativePath, size: s.size, content: textContent, content_hash: s.hash, enc_version: 1 });
+          },
+          discard: deleteBlob,
+        });
+      } else {
+        saved = await saveDownloadedFile(url, filePath);
+        const textContent = await extractTextContent(filePath, file.mime_type, file.name, { encrypted: false }); // Key aus: Klartext-Blob
+        await pool.query(
+          'UPDATE files SET size = $1, content = $2, content_hash = $3 WHERE id = $4',
+          [saved.size, textContent, saved.hash, fileId]
+        );
+      }
       console.log(`Office document ${fileId} successfully saved. New size: ${saved.size} bytes.`);
     } catch (err) {
       console.error('Callback save error:', err);
@@ -4396,7 +4560,7 @@ app.get('/api/public/branding/login-bg', async (req, res) => {
 });
 
 // Upload Cloud Icon (Admin only)
-app.post('/api/settings/admin/icon', requireAdmin, uploadSingle('icon'), async (req, res) => {
+app.post('/api/settings/admin/icon', requireAdmin, uploadSinglePlain('icon'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No icon file provided.' });
   }
@@ -4424,7 +4588,7 @@ app.post('/api/settings/admin/icon', requireAdmin, uploadSingle('icon'), async (
 });
 
 // Upload SEO/Open-Graph preview image (Admin only)
-app.post('/api/settings/admin/seo-image', requireAdmin, uploadSingle('image'), async (req, res) => {
+app.post('/api/settings/admin/seo-image', requireAdmin, uploadSinglePlain('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided.' });
   }
@@ -4470,7 +4634,7 @@ app.delete('/api/settings/admin/seo-image', requireAdmin, async (req, res) => {
 });
 
 // Upload Dashboard Background (Admin only) — variant: dark (default) | light
-app.post('/api/settings/admin/dashboard-bg', requireAdmin, uploadSingle('image'), async (req, res) => {
+app.post('/api/settings/admin/dashboard-bg', requireAdmin, uploadSinglePlain('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
@@ -4514,7 +4678,7 @@ app.delete('/api/settings/admin/dashboard-bg', requireAdmin, async (req, res) =>
 });
 
 // Upload Login Background (Admin only) — variant: dark (default) | light
-app.post('/api/settings/admin/login-bg', requireAdmin, uploadSingle('image'), async (req, res) => {
+app.post('/api/settings/admin/login-bg', requireAdmin, uploadSinglePlain('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image provided.' });
   }
@@ -4889,13 +5053,17 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     if (!share.can_write) return res.status(403).json({ error: 'Write permission denied.' });
     if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
 
-    const filePath = path.join(UPLOADS_DIR, file.path);
-    fs.writeFileSync(filePath, content);
-    const stats = fs.statSync(filePath);
+    let size;
+    if (cryptoStore.isEnabled()) {
+      size = (await replaceBlobCow(file, Buffer.from(content, 'utf8'))).plainSize;
+    } else {
+      const filePath = path.join(UPLOADS_DIR, file.path);
+      fs.writeFileSync(filePath, content);
+      size = fs.statSync(filePath).size;
+      await pool.query('UPDATE files SET size = $1 WHERE id = $2', [size, file.id]);
+    }
 
-    await pool.query('UPDATE files SET size = $1 WHERE id = $2', [stats.size, file.id]);
-
-    res.json({ success: true, size: stats.size });
+    res.json({ success: true, size });
   } catch (err) {
     console.error('Public content save error:', err);
     res.status(500).json({ error: 'Internal server error.' });
@@ -4932,14 +5100,14 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'),
     // public share, and the file already belongs to whoever created the share.
     const relativePath = relocateUploadToOwnerDir(file.owner_id, req.file.filename);
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
-    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name, { encrypted: false }); // P2b: frischer Blob
+    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name, { encrypted: !!req.file.encrypted }); // frischer Blob (multer-Engine)
 
     // Only the net size increase counts against quota — usedBytes inside the lock still
     // includes this file's OLD size until the UPDATE below runs.
     const netAdditionalBytes = req.file.size - (file.size || 0);
     const doUpdate = (client) => client.query(
-      'UPDATE files SET path = $1, size = $2, content = $3 WHERE id = $4',
-      [relativePath, req.file.size, textContent, file.id]
+      'UPDATE files SET path = $1, size = $2, content = $3, enc_version = $4, content_hash = COALESCE($5, content_hash) WHERE id = $6',
+      [relativePath, req.file.size, textContent, req.file.encrypted ? 1 : null, req.file.sha256 || null, file.id]
     );
     if (netAdditionalBytes > 0) {
       const quotaResult = await withStorageQuotaLock(file.owner_id, netAdditionalBytes, doUpdate);
@@ -4951,7 +5119,7 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'),
       await doUpdate(pool);
     }
 
-    if (fs.existsSync(oldPhysicalPath)) fs.unlinkSync(oldPhysicalPath);
+    deleteBlob(oldPhysicalPath);
 
     res.json({ success: true, size: req.file.size });
   } catch (err) {
@@ -5113,7 +5281,7 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
 // anonymous visitor has no dialog to answer — so a name collision is resolved silently by
 // auto-suffixing via generateUniqueName(), the same "keep both" behavior the dashboard offers
 // as one of its choices.
-async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtRoot, originalName, fileSize }) {
+async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtRoot, originalName, fileSize, sha256, encrypted }) {
   let currentPhysicalPath = path.join(UPLOADS_DIR, filenameAtRoot);
   try {
     // No uploader account on a public share — the new file is organized/charged under the
@@ -5123,9 +5291,9 @@ async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtR
     const finalName = await generateUniqueName(ownerId, targetFolderId, originalName, false);
 
     const quotaResult = await withStorageQuotaLock(ownerId, fileSize, (client) => client.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [finalName, relativePath, getSafeMimeType(originalName), fileSize, false, targetFolderId, ownerId]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content_hash, enc_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [finalName, relativePath, getSafeMimeType(originalName), fileSize, false, targetFolderId, ownerId, sha256 || null, encrypted ? 1 : null]
     ));
     if (!quotaResult.ok) {
       fs.unlinkSync(currentPhysicalPath);
@@ -5133,7 +5301,7 @@ async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtR
     }
 
     const insertedFile = quotaResult.data.rows[0];
-    scheduleFaststartRemux(currentPhysicalPath, originalName, insertedFile.id);
+    scheduleFaststartRemux(currentPhysicalPath, originalName, insertedFile.id, encrypted);
     return { status: 201, body: insertedFile };
   } catch (err) {
     console.error('Public upload error:', err);
@@ -5196,6 +5364,7 @@ app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilen
     const result = await finalizePublicUploadedFile({
       ownerId: baseFile.owner_id, targetFolderId, filenameAtRoot: req.file.filename,
       originalName: req.file.originalname, fileSize: req.file.size,
+      sha256: req.file.sha256, encrypted: req.file.encrypted,
     });
     res.status(result.status).json(result.body);
   } catch (err) {
@@ -5233,8 +5402,8 @@ app.post('/api/public/shares/:slug/upload/chunked/init', async (req, res) => {
 
     const session = createChunkedUploadSession({
       originalName, totalSize,
-      finalize: ({ filenameAtRoot, fileSize }) => finalizePublicUploadedFile({
-        ownerId: baseFile.owner_id, targetFolderId, filenameAtRoot, originalName, fileSize,
+      finalize: ({ filenameAtRoot, fileSize, sha256, encrypted }) => finalizePublicUploadedFile({
+        ownerId: baseFile.owner_id, targetFolderId, filenameAtRoot, originalName, fileSize, sha256, encrypted,
       }),
     });
     res.json(session);
@@ -5322,12 +5491,12 @@ app.post('/api/public/shares/:slug/file', async (req, res) => {
     const finalName = await generateUniqueName(baseFile.owner_id, targetFolderId, cleanName, false);
     const uniqueFilename = crypto.randomUUID() + '.txt';
     const relativePath = `${baseFile.owner_id}/${uniqueFilename}`;
-    fs.writeFileSync(path.join(ensureUserUploadDir(baseFile.owner_id), uniqueFilename), '');
+    const blob = await writeNewBlob(path.join(ensureUserUploadDir(baseFile.owner_id), uniqueFilename), Buffer.alloc(0));
 
     const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
-       VALUES ($1, $2, 'text/plain', 0, false, $3, $4, '') RETURNING *`,
-      [finalName, relativePath, targetFolderId, baseFile.owner_id]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, content_hash, enc_version)
+       VALUES ($1, $2, 'text/plain', 0, false, $3, $4, '', $5, $6) RETURNING *`,
+      [finalName, relativePath, targetFolderId, baseFile.owner_id, blob.encVersion ? blob.sha256 : null, blob.encVersion]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -5514,16 +5683,27 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
 
 // Avatar type detection by magic bytes; returns the enforced file extension or null.
 const AVATAR_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
-function detectAvatarImageExt(filePath) {
-  const buf = Buffer.alloc(12);
-  let fd;
-  try {
-    fd = fs.openSync(filePath, 'r');
-    fs.readSync(fd, buf, 0, 12, 0);
-  } catch (e) {
-    return null;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
+// `encrypted`: der Upload liegt verschlüsselt vor (multer-Engine), die Magic Bytes stehen im Klartext-Anfang.
+async function detectAvatarImageExt(filePath, encrypted) {
+  let buf = Buffer.alloc(12);
+  if (encrypted) {
+    try {
+      const chunks = [];
+      for await (const c of cryptoStore.createDecryptStream(filePath, { start: 0, end: 11, encrypted: true })) chunks.push(c);
+      buf = Buffer.concat([Buffer.concat(chunks), buf]).subarray(0, 12);
+    } catch (e) {
+      return null;
+    }
+  } else {
+    let fd;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      fs.readSync(fd, buf, 0, 12, 0);
+    } catch (e) {
+      return null;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
   }
   if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
@@ -5542,7 +5722,7 @@ app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req
   const userId = req.session.userId;
 
   // Verify it is an image by magic bytes (the client-reported mimetype/filename is not trusted)
-  const avatarExt = detectAvatarImageExt(req.file.path);
+  const avatarExt = await detectAvatarImageExt(req.file.path, req.file.encrypted);
   if (!avatarExt) {
     fs.unlinkSync(req.file.path);
     return res.status(400).json({ error: 'Nur JPEG-, PNG-, GIF- oder WebP-Bilder sind erlaubt.' });
@@ -5556,7 +5736,8 @@ app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req
 
   try {
     // Force the stored extension from the detected type (never from the original name)
-    const avatarFilename = path.basename(req.file.filename, path.extname(req.file.filename)) + '.' + avatarExt;
+    // Verschlüsselte Avatare tragen zusätzlich den Suffix ".enc" (wie Thumbnails): die Auslieferung entscheidet daran.
+    const avatarFilename = path.basename(req.file.filename, path.extname(req.file.filename)) + '.' + avatarExt + (req.file.encrypted ? '.enc' : '');
     fs.renameSync(req.file.path, path.join(path.dirname(req.file.path), avatarFilename));
     req.file.path = path.join(path.dirname(req.file.path), avatarFilename);
     req.file.filename = avatarFilename;
@@ -5602,11 +5783,16 @@ app.get('/api/users/:id/avatar', requireAuth, async (req, res) => {
     const user = userRes.rows[0];
     if (user.avatar_path) {
       const filePath = path.join(UPLOADS_DIR, user.avatar_path);
-      const ext = path.extname(user.avatar_path).slice(1).toLowerCase();
+      const encAvatar = fileDelivery.isEncThumbnail(user.avatar_path); // Suffix ".enc" = verschlüsselt, nie per Heuristik
+      const typeName = user.avatar_path.replace(/\.enc$/, '');
+      const ext = path.extname(typeName).slice(1).toLowerCase();
       // Legacy avatars with a non-image extension (e.g. .html/.svg) are never served actively;
       // they fall through to the generated initials avatar below.
       if (AVATAR_EXTS.includes(ext) && fs.existsSync(filePath)) {
-        setFileServeHeaders(res, user.avatar_path);
+        setFileServeHeaders(res, typeName);
+        if (encAvatar) {
+          return fileDelivery.sendFileDecrypted(req, res, { enc_version: 1 }, { filePath, mimeType: getSafeMimeType(typeName) });
+        }
         return res.sendFile(filePath, { headers: { 'Content-Type': getSafeMimeType(user.avatar_path) } });
       }
     }
@@ -6149,8 +6335,8 @@ async function runFaststartBackfill() {
   if (faststartBackfillState.running) return;
 
   const res = await pool.query(
-    `SELECT id, name, path FROM files
-     WHERE is_folder = false AND deleted_at IS NULL AND faststart_processed_at IS NULL AND enc_version IS NULL
+    `SELECT id, name, path, enc_version FROM files
+     WHERE is_folder = false AND deleted_at IS NULL AND faststart_processed_at IS NULL
        AND lower(name) ~ '\\.(mp4|m4v|mov)$'
      ORDER BY id ASC`
   );
@@ -6162,7 +6348,7 @@ async function runFaststartBackfill() {
     const physicalPath = path.join(UPLOADS_DIR, file.path);
     if (fs.existsSync(physicalPath)) {
       try {
-        await remuxMp4Faststart(physicalPath, file.name, file.id);
+        await remuxMp4Faststart(physicalPath, file.name, file.id, isEncRow(file));
       } catch (err) {
         console.error(`Faststart backfill: remux failed for "${file.name}" (file ${file.id}):`, err);
         faststartBackfillState.failed++;
@@ -6506,10 +6692,7 @@ app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
       // Find files of user and remove physical files
       const filesRes = await pool.query('SELECT path FROM files WHERE owner_id = $1 AND is_folder = false', [targetUserId]);
       for (const file of filesRes.rows) {
-        const filePath = path.join(UPLOADS_DIR, file.path);
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
+        deleteBlob(path.join(UPLOADS_DIR, file.path));
       }
       
       await pool.query('DELETE FROM users WHERE id = $1', [targetUserId]);
@@ -6696,10 +6879,7 @@ setInterval(async () => {
           if (file.is_folder) {
             await deleteFolderRecursive(file.id, file.owner_id);
           } else {
-            const filePath = path.join(UPLOADS_DIR, file.path);
-            if (fs.existsSync(filePath)) {
-              fs.unlinkSync(filePath);
-            }
+            deleteBlob(path.join(UPLOADS_DIR, file.path));
             await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
           }
           console.log(`Background clean: Expired self-destruct note ${file.name} deleted.`);
@@ -6790,10 +6970,7 @@ app.post('/api/public/shares/:slug/burn', async (req, res) => {
           if (file.is_folder) {
             await deleteFolderRecursive(file.id, file.owner_id);
           } else {
-            const filePath = path.join(UPLOADS_DIR, file.path);
-            if (fs.existsSync(filePath)) {
-              fs.unlinkSync(filePath);
-            }
+            deleteBlob(path.join(UPLOADS_DIR, file.path));
             await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
           }
           console.log(`Self-destructed one-time note share ${slug} immediately via burn call.`);
@@ -6826,10 +7003,7 @@ setInterval(async () => {
         if (file.is_folder) {
           await deleteFolderRecursive(file.id, file.owner_id);
         } else {
-          const filePath = path.join(UPLOADS_DIR, file.path);
-          if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-          }
+          deleteBlob(path.join(UPLOADS_DIR, file.path));
           await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
         }
         console.log(`Self-destructed expired one-time note share ${share.slug} (ID: ${file.id}) due to lost heartbeat.`);
@@ -7095,6 +7269,10 @@ withDbRetry(initDb)
       cryptoStore.sweepOrphans({ uploads: UPLOADS_DIR, tmp: process.env.MYCLOUD_TMP_DIR })
         .then(n => { if (n) console.log(`Verschlüsselung: ${n} verwaiste Temp-Einträge entfernt.`); })
         .catch(err => console.error('Sweep verwaister Temp-Dateien fehlgeschlagen:', err.message));
+      // Chunk-Sessions leben nur im Speicher: beim Start ist jedes Verzeichnis in tmp-chunked verwaist (Alter egal).
+      cryptoStore.sweepOrphans({ chunked: CHUNK_UPLOAD_DIR }, { maxAgeMs: 0 })
+        .then(n => { if (n) console.log(`Verschlüsselung: ${n} verwaiste Chunk-Upload-Verzeichnisse entfernt.`); })
+        .catch(err => console.error('Sweep verwaister Chunk-Uploads fehlgeschlagen:', err.message));
     }
     await refreshMaxUploadSizeBytes();
     // Awaited (unlike indexExistingFiles() below) — it's just filesystem renames, not the CPU-heavy

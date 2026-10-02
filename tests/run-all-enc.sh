@@ -4,13 +4,13 @@
 # Der Master-Key wird zur Laufzeit erzeugt (Temp-Verzeichnis, nach dem Lauf gelöscht) und nie ausgegeben.
 # Übersprungen wird nur tests/crypto-boot.test.js: Es startet ohnehin eigene Stacks (mycloudcryptoboot) und
 # ist unabhängig vom Ziel-Stack; der normale Lauf (run-all.sh) deckt es ab.
-# Hinweis: Solange P2b (verschlüsselte Schreibpfade) fehlt, liegen Uploads noch im Klartext (enc_version NULL);
-# der Lauf prüft Lesepfade mit aktivem Key und tmpfs.
+# Hinweis: Mit P2b schreiben alle Schreibpfade verschlüsselt; TEST_ENCRYPTED=1 aktiviert die Enc-Prüfungen der Suiten.
 set -u
 cd "$(dirname "$0")/.."
 ENC_KEY_DIR=$(mktemp -d -t mycloud-enc-key.XXXXXX)
 export ENC_KEY_DIR
 export TEST_BASE=http://localhost:3098
+export TEST_ENCRYPTED=1
 export TEST_COMPOSE_PROJECT=mycloudenc
 export TEST_COMPOSE_FILES="tests/docker-compose.test.yml tests/docker-compose.enc.override.yml"
 COMPOSE="docker compose -p $TEST_COMPOSE_PROJECT -f tests/docker-compose.test.yml -f tests/docker-compose.enc.override.yml"

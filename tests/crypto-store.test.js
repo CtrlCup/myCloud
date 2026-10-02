@@ -317,6 +317,22 @@ test('S4 sweepOrphans: enge Muster, kein Folgen von Symlinks, tmp nicht rekursiv
   assert.strictEqual(await cs.sweepOrphans({}), 0);
 });
 
+test('sweepOrphans chunked: UUID-Verzeichnisse (auch gefüllt) weg, Rest und Symlinks bleiben', async () => {
+  const d = fs.mkdtempSync(path.join(tmpRoot, 'sweepc-'));
+  const ch = path.join(d, 'tmp-chunked'), outside = path.join(d, 'outside');
+  fs.mkdirSync(ch); fs.mkdirSync(outside);
+  const U = '123e4567-e89b-12d3-a456-426614174000', V = '223e4567-e89b-12d3-a456-426614174000';
+  fs.mkdirSync(path.join(ch, U)); fs.writeFileSync(path.join(ch, U, '0'), 'x');
+  fs.mkdirSync(path.join(ch, V));
+  fs.mkdirSync(path.join(ch, 'fremd')); fs.writeFileSync(path.join(ch, 'datei'), 'x');
+  fs.symlinkSync(outside, path.join(ch, '323e4567-e89b-12d3-a456-426614174000'));
+  assert.strictEqual(await cs.sweepOrphans({ chunked: ch }, { maxAgeMs: 0 }), 2);
+  assert.deepStrictEqual(fs.readdirSync(ch).sort(), ['323e4567-e89b-12d3-a456-426614174000', 'datei', 'fremd']);
+  // junge Verzeichnisse bleiben bei Standardalter
+  fs.mkdirSync(path.join(ch, U));
+  assert.strictEqual(await cs.sweepOrphans({ chunked: ch }), 0);
+});
+
 test('Leere Datei: legitim lesbar, Abschneiden/Tag-Flip erkannt', withKey(KEY, async () => {
   process.env.MYCLOUD_TMP_DIR = fs.mkdtempSync(path.join(tmpRoot, 'et-'));
   try {
