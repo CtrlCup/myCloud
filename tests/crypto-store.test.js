@@ -326,6 +326,7 @@ test('sweepOrphans chunked: UUID-Verzeichnisse (auch gefüllt) weg, Rest und Sym
   fs.mkdirSync(path.join(ch, V));
   fs.mkdirSync(path.join(ch, 'fremd')); fs.writeFileSync(path.join(ch, 'datei'), 'x');
   fs.symlinkSync(outside, path.join(ch, '323e4567-e89b-12d3-a456-426614174000'));
+  await new Promise(r => setTimeout(r, 20)); // mtime hat Sub-Millisekunden, Date.now() nicht
   assert.strictEqual(await cs.sweepOrphans({ chunked: ch }, { maxAgeMs: 0 }), 2);
   assert.deepStrictEqual(fs.readdirSync(ch).sort(), ['323e4567-e89b-12d3-a456-426614174000', 'datei', 'fremd']);
   // junge Verzeichnisse bleiben bei Standardalter

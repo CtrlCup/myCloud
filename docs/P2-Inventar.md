@@ -1,11 +1,11 @@
 # P2-Inventar: Stellen, die Datei-Blobs lesen oder schreiben
 
-Stand: Phase P2a (Lesepfade). Zeilennummern beziehen sich auf `app/server.js` nach P2a und dienen nur der
+Stand: Phase P2b (Schreibpfade). Zeilennummern in den P2a-Tabellen beziehen sich auf `app/server.js` nach P2a und dienen nur der
 Orientierung. Grundlage: `docs/Verschluesselung-und-Backup.md` 3.4/3.5. `enc` meint `files.enc_version > 0`
 (Spalte, nie Heuristik), "Thumb" meint den Suffix `.enc`.
 
-Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt**. Offen sind Schreibpfade (P2b), Migration
-(P2c) und Avatar/Branding (Entscheidung nötig).
+Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt, alle Schreibpfade in P2b**. Offen ist die Migration
+bestehender Dateien (P2c).
 
 ## Auslieferung (Bytes an den Client)
 
@@ -15,7 +15,8 @@ Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt**. Offen sind
 | `GET /api/public/shares/:slug/download/:fileId` (~5077) | öffentliche Freigabe | `sendFileDecrypted` | Passwort, Limits und atomarer Download-Zähler laufen unverändert davor |
 | `GET /api/eurooffice/download/:id` (~4216) | EuroOffice-Download | `sendFileDecrypted` | Token-Prüfung unverändert; Doc-Server bekommt Klartext |
 | `GET /api/files/thumbnail/:id` (~3728), `GET /api/public/shares/:slug/thumbnail/:fileId` (~5037) | Thumbnail-Auslieferung | `sendThumbnail` (Thumb `.enc` per Namens-Suffix) | Entscheidung deterministisch über den Namen; Fallback auf das Original über `sendFileDecrypted` mit `file.enc_version` |
-| `sendBrandingFile` (~346), `GET /api/users/:id/avatar` (~5603) | Branding/Avatar | **unverändert (Klartext `res.sendFile`)** | Es gibt keine Spalte, die das Format festhält (Avatar: `users.avatar_path`, Branding: `settings`). Entscheidung für P2b offen, siehe unten |
+| `GET /api/users/:id/avatar` | Avatar | P2b: `.enc`-Suffix im `avatar_path` -> `sendFileDecrypted`, sonst Klartext wie bisher | Entscheidung am Suffix (wie Thumbnails), keine neue Spalte |
+| `sendBrandingFile` | Branding | unverändert (Klartext `res.sendFile`) | Branding-Assets bleiben bewusst Klartext (öffentlich ausgeliefert, kein vertraulicher Inhalt) |
 | `res.sendFile` für `index.html`/`share.html` | statische App-Dateien | unverändert | keine Nutzerdaten |
 
 ## ZIP
@@ -40,25 +41,44 @@ Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt**. Offen sind
 | `generateThumbnail` (~3613) | ffmpeg, exiftool, rsvg-convert | Eingabe über `withPlaintextTempFile`; nur für thumbnailbare Endungen entschlüsseln; Cache-Prüfung zuerst (`<name>.enc` hat Vorrang) | Schreiben des Thumbnails bleibt P2b |
 | Semaphor | Last | `MYCLOUD_DECRYPT_CONCURRENCY` (Standard 4) für alle `withPlaintextTempFile`-Nutzer mit `enc` | Klartext-Blobs belegen keinen Slot |
 
-## Schreibpfade und Sonderfälle (nicht in P2a angefasst)
+## Schreibpfade und Sonderfälle (P2b erledigt)
 
-| Stelle | Art | Phase | Begründung |
-|---|---|---|---|
-| Multer-Upload (`/api/files/upload` ~2120ff), `relocateUploadToOwnerDir` (~72), Ersetzen/Kollision | Upload | P2b | Neuer Blob verschlüsselt schreiben, `enc_version` setzen. Die dortigen `extractTextContent(…, {encrypted:false})`/`computeFileHash(…, false)` mit P2b-Kommentar sind dann auf das Schreibergebnis umzustellen |
-| `assembleChunkedUpload` (~257), `tmp-chunked` (~2300) | Chunked-Upload | P2b | Chunks verschlüsselt oder auf tmpfs |
-| `PUT /api/files/content/:id` (~3395), Versions-Restore (~3557), öffentliches Speichern (~4903), EuroOffice-Callback (~4302, `saveDownloadedFile`) | In-Place-Schreiben | P2b | Copy-on-Write: neuer Blob mit neuem DEK, `files.path` umhängen, alten löschen. **Harte Vorbedingung:** nie neuen Inhalt in einen vorhandenen verschlüsselten Blob schreiben |
-| `remuxMp4Faststart` (~2065) und `runFaststartBackfill` (~6158) | ffmpeg schreibt in Datei und ersetzt per `rename` | P2b | Eingabe über Temp-Klartext, Ergebnis als neuer verschlüsselter Blob (Copy-on-Write), `enc_version` setzen; bis dahin nur auf Klartext-Zeilen sinnvoll |
-| `copyFileOrFolderRecursive` (~2790) | `fs.copyFileSync` des Blobs | P2a (INSERT) | Der INSERT übernimmt `enc_version` und `content_hash` der Quelle. Bytegleiche Kopie mit gleichem DEK/noncePfx ist unkritisch, solange nie neuer Inhalt in einen Blob geschrieben wird; das garantiert Copy-on-Write (P2b) |
-| `create-empty` (~3064), Notizen (~3248, 3272), `templates/` | neue Dateien | P2b | schreiben verschlüsselt |
-| Thumbnail-Erzeugung (Schreiben in `uploads/thumbnails`) | abgeleiteter Klartext | P2b | Ausgabe als `<name>.enc` schreiben; Lese-/Auslieferungsseite steht |
-| Avatar-/Branding-Upload (~4400-4560, ~5560) | Schreiben | P2b (Entscheidung) | Es braucht ein Format-Merkmal: neue Spalte (`users.avatar_enc`) bzw. Suffix `.enc` im Pfad (wie bei Thumbnails). Empfehlung: Suffix `.enc` im Dateinamen, keine neue Spalte. Branding wird auch ohne Login ausgeliefert (Login-Hintergrund), das ist mit verschlüsselter Ablage vereinbar, weil die App entschlüsselt |
-| Migration (idempotent, fortsetzbar, Admin-Fortschritt) | Bestand | P2c | siehe Konzept 3.5 |
+Gemeinsame Bausteine in `app/server.js`: `storage` (multer-StorageEngine, bei aktivem Key `writeEncrypted(stream)` direkt,
+`req.file.size` = Klartextgröße, `sha256`, `encrypted`), `writeNewBlob`, `newBlobPath`, `swapFileBlob` (eine Transaktion
+mit `SELECT ... FOR UPDATE`, setzt `path/size/content_hash/enc_version/...`), `replaceBlobCow`, `deleteBlob`/`deleteThumbnailsFor`
+(einzige Stellen, die Blobs und Thumbnails `<name>`/`<name>.enc` physisch löschen; Einhängepunkt für die Backup-Warteschlange in P4).
+Ohne Master-Key bleibt jedes Verhalten wie vorher (Klartext, `enc_version` NULL, In-Place-Schreiben, E16).
+
+| Stelle | Art | P2b |
+|---|---|---|
+| Multer-Upload (`/api/files/upload`), `relocateUploadToOwnerDir`, Ersetzen/Kollision, `finalizeUploadedFile` | Upload | erledigt: Stream läuft durch die Engine, `files.size` = Klartextgröße, `content_hash` = Klartext-SHA-256 (bei aktivem Key immer gesetzt), `enc_version` = 1; Textindex/Remux bekommen `encrypted` aus dem Schreibergebnis; Ersetzen löscht den alten Blob über `deleteBlob` |
+| Öffentlicher Upload (`finalizePublicUploadedFile`), öffentliche Datei anlegen (`/api/public/shares/:slug/file`) | Upload/neue Datei | erledigt (wie oben; leere Datei als verschlüsselter Blob) |
+| `assembleChunkedUpload`, `tmp-chunked` (Variante A, siehe unten) | Chunked-Upload | erledigt |
+| `PUT /api/files/content/:id`, Versions-Restore, `PUT /api/public/shares/:slug/content/:fileId` | In-Place-Schreiben | erledigt: bei aktivem Key `replaceBlobCow` (neuer Blob mit neuem DEK, `files.path` umhängen, nach dem Commit alten Blob löschen; auch wenn die Zeile bisher Klartext war: Auto-Wandern). Key aus: unverändert in-place |
+| `PUT /api/files/:id/binary-content`, `PUT /api/public/shares/:slug/binary-content/:fileId` | Binär-Speichern | erledigt: Upload ist schon ein neuer Blob (Engine), `enc_version`/`content_hash` werden mitgesetzt, alter Blob über `deleteBlob` |
+| EuroOffice-Callback (`saveDownloadedFileCow` in `office-save.js`) | Speichern aus dem Doc-Server | erledigt: Download streamt direkt in einen NEUEN verschlüsselten Blob, `swapFileBlob` (path/size/content_hash/enc_version/content in einer Transaktion), alter Blob erst nach dem Commit gelöscht, bei Fehler/Abbruch bleibt alles beim Alten und der neue Blob wird gelöscht. Key aus: `saveDownloadedFile` wie bisher |
+| `remuxMp4Faststart`, `runFaststartBackfill` | ffmpeg | erledigt: bei aktivem Key liest ffmpeg eine Temp-Klartextdatei (`withPlaintextTempFile`), schreibt die Ausgabe in ein tmpfs-Temp-Verzeichnis (`withPrivateTempDir`), daraus neuer verschlüsselter Blob + Copy-on-Write (mit `expectPath`-Prüfung gegen zwischenzeitliche Änderungen). Der Backfill wählt jetzt auch `enc_version > 0` (das `AND enc_version IS NULL` aus P2a ist entfernt) |
+| `copyFileOrFolderRecursive` | `fs.copyFileSync` | unverändert (P2a-INSERT behält `enc_version`/`content_hash`); bytegleiche Kopie ist unkritisch, weil nie in einen Blob geschrieben wird |
+| `create-empty` (Office-Vorlagen aus `templates/`), `create-note` (Text und Anhänge) | neue Dateien | erledigt: Vorlage lesen, als Blob schreiben (`writeNewBlob`); Anhänge laufen über die Engine |
+| Thumbnail-Erzeugung | abgeleiteter Klartext | erledigt: bei aktivem Key schreiben ffmpeg/rsvg/exiftool in ein tmpfs-Temp-Verzeichnis, daraus `<name>.enc` (`writeEncrypted`), Temp wird gelöscht; Ersetzen/Löschen entfernt `<name>` und `<name>.enc` mit |
+| Avatar-Upload / -Auslieferung | Schreiben/Lesen | erledigt: bei aktivem Key `<uuid>.<ext>.enc` (Magic-Bytes aus dem entschlüsselten Anfang, Endungs-Allowlist und `setFileServeHeaders` aus #52 gelten weiter); die Auslieferung entscheidet am Suffix `.enc`, ältere Klartext-Avatare bleiben lesbar. Keine neue Spalte |
+| Branding-Assets (Logo, Hintergründe, SEO-Bild) | Schreiben | **bewusst Klartext** (`uploadSinglePlain`): sie werden öffentlich ausgeliefert (Login-Seite, Link-Vorschau, ohne Anmeldung), enthalten keinen vertraulichen Inhalt und liegen nicht in `files` |
+| Migration (idempotent, fortsetzbar, Admin-Fortschritt) | Bestand | P2c, noch offen (siehe Konzept 3.5) |
+
+**Entscheidung Chunked-Upload (Variante A):** Jeder Chunk wird als eigener kleiner verschlüsselter Blob (`writeEncrypted`, atomar
+ersetzt, ein wiederholter Chunk überschreibt ihn) in `tmp-chunked/<uploadId>/<index>` abgelegt. Beim Zusammenbau werden die
+Chunks nacheinander per `createDecryptStream` in EIN `writeEncrypted` gestreamt; Ergebnis ist ein verschlüsselter Blob samt
+SHA-256 und Größe des Klartexts. Begründung gegenüber Klartext-Chunks im tmpfs: Chunks sind bis 8 MiB groß, mehrere
+Uploads parallel und bis 4 h Sessions würden den RAM-basierten tmpfs unvorhersehbar füllen; so liegt nie Klartext auf der Platte. Kosten: einmal Verschlüsseln und Entschlüsseln mehr pro Chunk. Aufräumen:
+`deleteChunkedUploadSession` (wie bisher, auch bei Abbruch), Session-Timeout (4 h) und beim Start `sweepOrphans({ chunked })`,
+weil Sessions nur im Speicher leben und nach einem Neustart jedes Verzeichnis in `tmp-chunked` verwaist ist.
 
 ## Reine Lösch-/Verschiebe-Stellen (kein Lesen des Inhalts)
 
-`deleteFolderRecursive`, `hardDeleteTrashItem`, Einmal-Notiz-Bereinigung, Benutzer löschen,
-`migrateUploadsToPerUserFolders`: `unlink`/`rename`, unabhängig vom Format. Keine Änderung nötig.
-(Ein `rename` ändert den Blob nicht; der Dateiname trägt kein Format-Merkmal.)
+`deleteFolderRecursive`, `hardDeleteTrashItem`, Umbenennen/Verschieben mit Ersetzen, Einmal-Notiz-Bereinigung (Ablauf, Burn,
+Heartbeat-Verlust), Benutzer löschen und alle COW-Ersetzungen löschen über `deleteBlob` (samt Thumbnails). `migrateUploadsToPerUserFolders`
+nutzt `rename` (der Dateiname trägt kein Format-Merkmal). Nicht über `deleteBlob` laufen nur verworfene Uploads, die nie in
+`files` standen, und Branding-/Avatar-Dateien.
 
 ## Nicht-Blob-Leser (zur Vollständigkeit)
 
@@ -68,14 +88,14 @@ Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt**. Offen sind
 
 | Job | Behandlung |
 |---|---|
-| `runFaststartBackfill` | P2a: nur Zeilen mit `enc_version IS NULL` (verschlüsselte Blobs brauchen Copy-on-Write, P2b/P2c) |
+| `runFaststartBackfill` | P2b: wählt auch verschlüsselte Zeilen, Remux per Copy-on-Write |
 | `indexExistingFiles` (Text-/OCR-Reindex) | liest über `extractTextContent` mit `enc_version`, unkritisch |
 | Bereinigungsjobs (Shares, Papierkorb, Einmalnotizen) | nur `unlink`, unabhängig vom Format |
 
 ## Externe Tools
 
-Alle `exec`-Aufrufe haben Timeouts (`EXEC_TIMEOUT_SHORT` 60 s für Thumbnails/EXIF, `EXEC_TIMEOUT_LONG` 300 s für OCR/Remux) mit `SIGKILL`, damit hängende Prozesse den Entschlüsselungs-Semaphor nicht dauerhaft belegen.
+Auch die Ausgabe-Temp-Dateien (Thumbnails, Remux) liegen nur im tmpfs (`withPrivateTempDir`). Alle `exec`-Aufrufe haben Timeouts (`EXEC_TIMEOUT_SHORT` 60 s für Thumbnails/EXIF, `EXEC_TIMEOUT_LONG` 300 s für OCR/Remux) mit `SIGKILL`, damit hängende Prozesse den Entschlüsselungs-Semaphor nicht dauerhaft belegen.
 
 ## Reihenfolge
 
-**P2c (Migration) darf erst nach P2b laufen bzw. ausgerollt werden.** Solange Schreibpfade (In-Place-Writes, Remux, Callback) nicht Copy-on-Write sind, würden sie migrierte Blobs beschädigen.
+P2b ist erledigt: Schreibpfade sind Copy-on-Write, damit darf P2c (Migration) laufen. Bekannte Lücke bis P2c: Klartext-Thumbnails, die vor dem Aktivieren des Keys entstanden sind, bleiben bis zum Ersetzen/Löschen der Datei als Klartext liegen (P2c soll sie mit migrieren oder löschen).

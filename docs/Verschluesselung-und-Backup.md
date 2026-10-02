@@ -130,6 +130,12 @@ isEncrypted(path)                            → exakte Magic-Bytes (nur Migrati
   verschlüsseln. Besser: eigener multer-StorageEngine, der direkt verschlüsselt schreibt, dann
   liegt nie Klartext auf der Platte. Chunks im `tmp-chunked`-Verzeichnis ebenfalls
   verschlüsselt oder auf tmpfs.
+  *Entscheidung (P2b):* Avatare (persönliche Fotos) werden bei aktivem Key verschlüsselt als `<uuid>.<ext>.enc`
+  abgelegt (Auslieferung entscheidet am Suffix `.enc`, wie bei Thumbnails; ältere Klartext-Avatare bleiben lesbar).
+  Branding-Assets (Logo, Hintergründe, SEO-Bild) bleiben bewusst Klartext: sie werden öffentlich ausgeliefert
+  (Login-Seite, Link-Vorschau) und enthalten keinen vertraulichen Inhalt.
+  Chunked-Upload: jeder Chunk liegt als eigener kleiner verschlüsselter Blob in `tmp-chunked`, der Zusammenbau
+  streamt sie entschlüsselt in ein einziges `writeEncrypted` (Details: `docs/P2-Inventar.md`).
 - **Thumbnails** (`uploads/thumbnails/`) sind abgeleiteter Klartext und werden genauso
   verschlüsselt gespeichert.
 - `files.size` bleibt die **Klartextgröße** (Quota, Anzeige). `content_hash` wird über den

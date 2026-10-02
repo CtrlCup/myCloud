@@ -25,6 +25,17 @@ const blobExists = (rel) => shOk(`test -e "${UP}/${rel}"`);
 // true, wenn irgendeine Datei unter den Verzeichnissen die Zeichenfolge enthält
 const containsOnDisk = (needle, dirs) => shOk(`grep -rlF -- "${needle}" ${dirs.join(' ')} | grep -q .`);
 
+// Hintergrundjobs (OCR/Textindex nach dem Upload) belegen das Temp-Verzeichnis kurzzeitig: bis zu 20 s auf "leer" warten.
+async function assertTmpEmpty(msg = 'Temp-Verzeichnis nicht leer') {
+  let n;
+  for (let i = 0; i < 40; i++) {
+    n = sh(`ls -A ${TMP} | wc -l`).trim();
+    if (n === '0') return;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  assert.strictEqual(n, '0', msg);
+}
+
 const user = 'p2b' + Date.now();
 const password = 'Test-Passwort-12345!';
 let cookie = '', userId;
@@ -324,7 +335,7 @@ test('E11: Thumbnail erzeugt/ausgeliefert; im Enc-Stack verschlüsselt, Temp lee
   if (ENC) {
     assert.deepStrictEqual(list, [base + '.jpg.enc']);
     assert.strictEqual(sh(`head -c 6 "${UP}/thumbnails/${base}.jpg.enc"`), 'MCENC1');
-    assert.strictEqual(sh(`ls -A ${TMP} | wc -l`).trim(), '0', 'Temp-Verzeichnis nicht leer');
+    await assertTmpEmpty();
     assert.strictEqual(b[0], 0xff); assert.strictEqual(b[1], 0xd8); // ausgeliefert wird JPEG-Klartext
     // zweiter Abruf aus dem Cache
     assert.strictEqual((await api(`/api/files/thumbnail/${j.id}`)).status, 200);
@@ -404,7 +415,7 @@ test('Faststart-Remux: neuer Blob (Enc-Stack), Datei bleibt abspielbar', async (
     assert.ok(!blobExists(j.path));
     assert.strictEqual(row[2], '1');
     assert.strictEqual(blobHead(row[0]), 'MCENC1');
-    assert.strictEqual(sh(`ls -A ${TMP} | wc -l`).trim(), '0');
+    await assertTmpEmpty();
   }
 });
 
@@ -478,5 +489,5 @@ test('Enc-Stack: Klartext-Altdatei (enc_version NULL) wandert beim Bearbeiten in
 
 test('keine Temp-Reste: tmp-chunked und MYCLOUD_TMP_DIR sauber', async () => {
   assert.strictEqual(sh(`ls -A ${UP}/tmp-chunked | wc -l`).trim(), '0');
-  if (ENC) assert.strictEqual(sh(`ls -A ${TMP} | wc -l`).trim(), '0');
+  if (ENC) await assertTmpEmpty();
 });
