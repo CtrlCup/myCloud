@@ -22,6 +22,8 @@ const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
 const { withDbRetry } = require('./db-retry');
 const cryptoStore = require('./crypto-store');
+const fileDelivery = require('./file-delivery');
+const { isEncRow } = fileDelivery;
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
 const { sendMail, renderEmailTemplate, getEmailBranding, applyConditionalBlock } = require('./email');
 const { version: APP_VERSION } = require('./package.json');
@@ -79,10 +81,11 @@ function relocateUploadToOwnerDir(ownerId, filenameAtRoot) {
 // this can run against arbitrarily large uploads. Only called when a name collision is found
 // (see /api/files/upload) — hashing every upload unconditionally would double the disk I/O for
 // the common case where no conflict exists.
-function computeFileHash(filePath) {
+function computeFileHash(filePath, encrypted) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
+    // `encrypted` kommt aus files.enc_version; der Hash läuft immer über den Klartext.
+    const stream = cryptoStore.createDecryptStream(filePath, { encrypted });
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('end', () => resolve(hash.digest('hex')));
     stream.on('error', reject);
@@ -102,7 +105,7 @@ async function findNameConflict(userId, parentId, name, excludeId) {
     excludeClause = 'AND id != $4';
   }
   const res = await pool.query(
-    `SELECT id, path, size, is_folder, content_hash FROM files WHERE owner_id = $1 AND deleted_at IS NULL
+    `SELECT id, path, size, is_folder, content_hash, enc_version FROM files WHERE owner_id = $1 AND deleted_at IS NULL
      AND name = $2 AND (parent_id = $3 OR (parent_id IS NULL AND $3 IS NULL)) ${excludeClause}`,
     params
   );
@@ -116,7 +119,7 @@ async function resolveExistingFileHash(existing) {
   if (existing.content_hash) return existing.content_hash;
   const physicalPath = path.join(UPLOADS_DIR, existing.path);
   if (!fs.existsSync(physicalPath)) return null;
-  const hash = await computeFileHash(physicalPath);
+  const hash = await computeFileHash(physicalPath, isEncRow(existing));
   pool.query('UPDATE files SET content_hash = $1 WHERE id = $2', [hash, existing.id]).catch((err) => {
     console.error('Error backfilling content_hash:', err);
   });
@@ -413,21 +416,23 @@ async function ocrPdf(pdfPath) {
 // sites) and a synchronous read of a large file (a big log/text file, or a many-MB PDF) would
 // block Node's single event loop thread, stalling every other in-flight request on the server
 // until the read finishes, not just this one.
-async function extractTextContent(filePath, mimeType, fileName) {
+async function extractTextContent(filePath, mimeType, fileName, { encrypted }) {
+  if (typeof encrypted !== 'boolean') throw new TypeError('extractTextContent: `encrypted` muss aus files.enc_version abgeleitet werden.');
   try {
     const ext = path.extname(fileName).toLowerCase();
 
     // 1. PDF files
     if (ext === '.pdf' || mimeType === 'application/pdf') {
       let dataBuffer;
-      try { dataBuffer = await fs.promises.readFile(filePath); } catch { return null; }
+      try { dataBuffer = await cryptoStore.readDecrypted(filePath, { encrypted }); } catch { return null; }
       const uint8Array = new Uint8Array(dataBuffer);
       const parser = new pdfParse.PDFParse(uint8Array);
       const parsed = await parser.getText();
       const text = parsed.text || '';
       if (text.trim().length > 20) return text;
       // Likely a scanned PDF with no text layer — fall back to OCR.
-      const ocrText = await ocrPdf(filePath);
+      // ocrPdf legt Seitenbilder neben die PDF: bei verschlüsselten Blobs im privaten Temp-Verzeichnis.
+      const ocrText = await fileDelivery.withPlaintextTempFile(filePath, (plain) => ocrPdf(plain), { encrypted, ext: 'pdf' });
       return ocrText || text;
     }
 
@@ -437,23 +442,19 @@ async function extractTextContent(filePath, mimeType, fileName) {
     const textExts = ['.txt', '.md', '.json', '.js', '.css', '.html', '.py', '.sh', '.xml', '.yaml', '.yml', '.csv', '.ini', '.conf'];
     if (textExts.includes(ext) || (mimeType && mimeType.startsWith('text/'))) {
       const MAX_INDEXED_BYTES = 500000;
-      let handle;
       try {
-        handle = await fs.promises.open(filePath, 'r');
-        const buffer = Buffer.alloc(MAX_INDEXED_BYTES);
-        const { bytesRead } = await handle.read(buffer, 0, MAX_INDEXED_BYTES, 0);
-        return buffer.toString('utf8', 0, bytesRead);
+        const chunks = [];
+        for await (const c of cryptoStore.createDecryptStream(filePath, { start: 0, end: MAX_INDEXED_BYTES - 1, encrypted })) chunks.push(c);
+        return Buffer.concat(chunks).toString('utf8');
       } catch {
         return null;
-      } finally {
-        await handle?.close();
       }
     }
 
     // 3. Images — OCR any visible text (screenshots, scanned documents, photos of signs, etc.)
     if (OCR_IMAGE_EXTS.includes(ext)) {
       if (!fs.existsSync(filePath)) return null;
-      const ocrText = await ocrImage(filePath);
+      const ocrText = await fileDelivery.withPlaintextTempFile(filePath, (plain) => ocrImage(plain), { encrypted, ext: fileDelivery.tempExtFor(fileName) });
       return ocrText || null;
     }
   } catch (err) {
@@ -520,13 +521,13 @@ async function migrateUploadsToPerUserFolders() {
 async function indexExistingFiles() {
   try {
     const res = await pool.query(
-      "SELECT id, name, path, mime_type FROM files WHERE is_folder = false AND content IS NULL"
+      "SELECT id, name, path, mime_type, enc_version FROM files WHERE is_folder = false AND content IS NULL"
     );
     for (const row of res.rows) {
       const filePath = path.join(UPLOADS_DIR, row.path);
       if (fs.existsSync(filePath)) {
         console.log(`Indexing existing file: ${row.name}`);
-        const content = await extractTextContent(filePath, row.mime_type, row.name);
+        const content = await extractTextContent(filePath, row.mime_type, row.name, { encrypted: isEncRow(row) });
         if (content !== null) {
           await pool.query("UPDATE files SET content = $1 WHERE id = $2", [content, row.id]);
         }
@@ -2036,7 +2037,7 @@ app.post('/api/files/folder', requireAuth, requirePermission('create_folder'), a
 // leaves content NULL, same as any pre-existing file — indexExistingFiles() picks those up as a
 // backfill on the next server start.
 function scheduleTextExtraction(physicalPath, mimeType, originalName, fileId) {
-  extractTextContent(physicalPath, mimeType, originalName)
+  extractTextContent(physicalPath, mimeType, originalName, { encrypted: false }) // P2b: frischer Blob, Format aus dem Schreibpfad
     .then((textContent) => {
       if (textContent === null) return;
       return pool.query('UPDATE files SET content = $1 WHERE id = $2', [textContent, fileId]);
@@ -2076,7 +2077,7 @@ function remuxMp4Faststart(physicalPath, originalName, fileId) {
         fs.renameSync(tempPath, physicalPath);
         // The container bytes changed (even though the video content itself didn't) — the hash
         // computed at upload time is now stale, and size can shift by a few KB (the moved atom).
-        const newHash = await computeFileHash(physicalPath);
+        const newHash = await computeFileHash(physicalPath, false); // P2b: Schreibpfad, bis dahin Klartext
         await pool.query(
           'UPDATE files SET size = $1, content_hash = $2, faststart_processed_at = NOW() WHERE id = $3',
           [newSize, newHash, fileId]
@@ -2137,7 +2138,7 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
     let newFileHash = null;
     let isExactDuplicate = false;
     if (canReplace) {
-      newFileHash = await computeFileHash(currentPhysicalPath);
+      newFileHash = await computeFileHash(currentPhysicalPath, false); // frischer Upload (P2b: verschlüsselt)
       const existingHash = await resolveExistingFileHash(existing);
       isExactDuplicate = !!existingHash && existingHash === newFileHash;
     }
@@ -2395,21 +2396,41 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
     }
 
     setFileServeHeaders(res, file.name);
-    if (req.query.inline === 'true') {
-      return res.sendFile(filePath, {
-        headers: {
-          'Content-Type': getSafeMimeType(file.name),
-          'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
-        }
-      });
-    }
-
-    res.download(filePath, file.name);
+    return fileDelivery.sendFileDecrypted(req, res, file, {
+      filePath,
+      filename: file.name,
+      inline: req.query.inline === 'true',
+      mimeType: req.query.inline === 'true' ? getSafeMimeType(file.name) : undefined,
+    });
   } catch (err) {
     console.error('Error downloading file:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// archiver meldet Fehler (Client-Abbruch, fehlende/defekte/nicht entschlüsselbare Datei) asynchron: ein `throw`
+// im Handler würde den Prozess beenden. Vor dem ersten Byte: 500; danach Verbindung abbrechen statt ein
+// unvollständiges ZIP als erfolgreich zu beenden.
+function zipErrorHandler(res, logLabel, message) {
+  return (err) => {
+    console.error(logLabel, err);
+    if (!res.headersSent) {
+      res.removeHeader('Content-Disposition');
+      res.status(500).type('application/json').send(JSON.stringify({ error: message }));
+    } else {
+      res.destroy(err);
+    }
+  };
+}
+
+// Fügt eine Datei dem ZIP hinzu. Klartext wie bisher per Pfad (archiver liest selbst, lazy); verschlüsselte
+// Blobs als lazy Klartext-Stream. Fehlende Blobs werden übersprungen.
+function addFileToZip(zip, file, archivePath) {
+  const physicalPath = path.join(UPLOADS_DIR, file.path);
+  if (!fs.existsSync(physicalPath)) return;
+  if (isEncRow(file)) zip.append(fileDelivery.lazyPlainStream(physicalPath, { encrypted: true }), { name: archivePath });
+  else zip.file(physicalPath, { name: archivePath });
+}
 
 // Helper for ZIP folder packing — fetches the whole subtree in one recursive-CTE query instead
 // of one round-trip per folder level, then walks the resulting (small, in-memory) tree to add
@@ -2417,13 +2438,13 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
 async function addFolderToZip(zip, folderId, currentPath, userId) {
   const subtreeRes = await pool.query(
     `WITH RECURSIVE subtree AS (
-       SELECT id, name, parent_id, is_folder, path FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+       SELECT id, name, parent_id, is_folder, path, enc_version FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
        UNION ALL
-       SELECT f.id, f.name, f.parent_id, f.is_folder, f.path FROM files f
+       SELECT f.id, f.name, f.parent_id, f.is_folder, f.path, f.enc_version FROM files f
        JOIN subtree s ON f.parent_id = s.id
        WHERE f.owner_id = $2 AND f.deleted_at IS NULL
      )
-     SELECT id, name, parent_id, is_folder, path FROM subtree WHERE id != $1`,
+     SELECT id, name, parent_id, is_folder, path, enc_version FROM subtree WHERE id != $1`,
     [folderId, userId]
   );
 
@@ -2439,10 +2460,7 @@ async function addFolderToZip(zip, folderId, currentPath, userId) {
       if (file.is_folder) {
         addChildren(file.id, archivePath);
       } else {
-        const physicalPath = path.join(UPLOADS_DIR, file.path);
-        if (fs.existsSync(physicalPath)) {
-          zip.file(physicalPath, { name: archivePath });
-        }
+        addFileToZip(zip, file, archivePath);
       }
     }
   };
@@ -2469,7 +2487,7 @@ app.get('/api/files/download-zip/:id', requireAuth, requirePermission('download'
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(folder.name)}.zip"`);
 
     const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => { throw err; });
+    archive.on('error', zipErrorHandler(res, 'ZIP archive error:', 'Failed to create ZIP archive'));
     archive.pipe(res);
 
     await addFolderToZip(archive, folder.id, '', userId);
@@ -2701,7 +2719,7 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
     const resolutionMap = resolutions && typeof resolutions === 'object' ? resolutions : {};
 
     const itemsRes = await pool.query(
-      'SELECT id, name, is_folder, path, size, content_hash FROM files WHERE id = ANY($1) AND owner_id = $2',
+      'SELECT id, name, is_folder, path, size, content_hash, enc_version FROM files WHERE id = ANY($1) AND owner_id = $2',
       [fileIds, userId]
     );
     const items = itemsRes.rows;
@@ -3017,7 +3035,7 @@ app.get('/api/files/download-zip-multiple', requireAuth, requirePermission('down
     res.setHeader('Content-Disposition', 'attachment; filename="mycloud_selection.zip"');
 
     const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => { throw err; });
+    archive.on('error', zipErrorHandler(res, 'ZIP archive error:', 'Failed to create ZIP archive'));
     archive.pipe(res);
 
     for (const id of ids) {
@@ -3030,10 +3048,7 @@ app.get('/api/files/download-zip-multiple', requireAuth, requirePermission('down
       if (file.is_folder) {
         await addFolderToZip(archive, file.id, file.name, userId);
       } else {
-        const physicalPath = path.join(UPLOADS_DIR, file.path);
-        if (fs.existsSync(physicalPath)) {
-          archive.file(physicalPath, { name: file.name });
-        }
+        addFileToZip(archive, file, file.name);
       }
     }
     await archive.finalize();
@@ -3138,7 +3153,7 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     }
     // Content is tiny (empty, or a small office template) — always hashing it here, unlike the
     // upload route's "only hash on an actual collision" rule, is cheap enough to just always do.
-    const newFileHash = await computeFileHash(physicalPath);
+    const newFileHash = await computeFileHash(physicalPath, false); // frisch erzeugt (P2b: verschlüsselt)
 
     const existing = await findNameConflict(userId, parsedParentId, finalName);
     // A new file is always a file — replacing only makes sense when the existing item is one too.
@@ -3315,6 +3330,14 @@ app.get('/api/files/notes', requireAuth, async (req, res) => {
   }
 });
 
+// Liest einen Datei-Blob für den Texteditor. Klartext wie bisher unbegrenzt; verschlüsselte Blobs werden
+// ganz entschlüsselt, daher mit Obergrenze (Speicherlast, entspricht dem Editor-Speicherlimit + Reserve).
+const EDITOR_READ_MAX_BYTES_ENCRYPTED = 32 * 1024 * 1024;
+function readTextBlob(file, filePath) {
+  const encrypted = isEncRow(file);
+  return cryptoStore.readDecrypted(filePath, { encrypted, maxBytes: encrypted ? EDITOR_READ_MAX_BYTES_ENCRYPTED : undefined });
+}
+
 // Get text file content
 app.get('/api/files/content/:id', requireAuth, async (req, res) => {
   const fileId = parseInt(req.params.id);
@@ -3331,7 +3354,7 @@ app.get('/api/files/content/:id', requireAuth, async (req, res) => {
     const filePath = path.join(UPLOADS_DIR, file.path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Physical file not found' });
 
-    const content = fs.readFileSync(filePath, 'utf8');
+    const content = (await readTextBlob(file, filePath)).toString('utf8');
     res.type('text/plain').send(content);
   } catch (err) {
     console.error('Error reading file content:', err);
@@ -3428,7 +3451,7 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
     const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
     const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
-    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name);
+    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name, { encrypted: false }); // P2b: frischer Blob
 
     // Only the net size increase counts against quota — usedBytes inside the lock still
     // includes this file's OLD size (its row hasn't been updated yet), so checking the full
@@ -3556,9 +3579,14 @@ const WEB_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
 // for RAW thumbnail extraction). Returns null if the file has no such tags at all (e.g.
 // screenshots, AI-generated images, anything stripped of EXIF) so the caller can hide the whole
 // section rather than showing empty fields.
-function getExifSummary(physicalFilename) {
+function getExifSummary(physicalFilename, encrypted) {
+  const absPath = path.join(UPLOADS_DIR, physicalFilename);
+  return fileDelivery.withPlaintextTempFile(absPath, (inputPath) => runExifSummary(inputPath), { encrypted, ext: fileDelivery.tempExtFor(physicalFilename) })
+    .catch((err) => { console.error('EXIF-Auslesen fehlgeschlagen:', err.message); return null; });
+}
+
+function runExifSummary(inputPath) {
   return new Promise((resolve) => {
-    const inputPath = path.join(UPLOADS_DIR, physicalFilename);
     const { exec } = require('child_process');
     const cmd = `exiftool -j -Make -Model -LensModel -LensID "${inputPath}"`;
     exec(cmd, (err, stdout) => {
@@ -3577,10 +3605,36 @@ function getExifSummary(physicalFilename) {
 }
 
 // Helper to generate a thumbnail using ffmpeg or dcraw/exiftool
-function generateThumbnail(physicalFilename, extension) {
+// Thumbnails sind abgeleiteter Klartext und werden künftig verschlüsselt abgelegt (P2b): Ob ein Thumbnail
+// verschlüsselt ist, entscheidet allein der Suffix ".enc" im Dateinamen (siehe fileDelivery.isEncThumbnail).
+// Bis P2b schreibt die Erzeugung noch Klartext; ein vorhandenes <name>.enc hat Vorrang.
+const THUMB_VIDEO_EXTS = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
+const THUMB_RAW_EXTS = ['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+async function generateThumbnail(physicalFilename, extension, encrypted) {
+  const lowerExt = extension.toLowerCase();
+  // Nur Typen entschlüsseln, für die es überhaupt ein Thumbnail gibt (sonst unnötige Temp-Kopie).
+  if (!['svg', 'heic', 'heif', ...THUMB_VIDEO_EXTS, ...THUMB_RAW_EXTS, ...WEB_IMAGE_EXTS].includes(lowerExt)) return null;
+  const plainThumb = path.join(THUMBNAILS_DIR, path.basename(physicalFilename) + (lowerExt === 'svg' ? '.png' : '.jpg'));
+  if (fs.existsSync(plainThumb + '.enc')) return plainThumb + '.enc';
+  if (fs.existsSync(plainThumb)) return plainThumb;
+  const absPath = path.join(UPLOADS_DIR, physicalFilename);
+  return fileDelivery.withPlaintextTempFile(absPath, (inputPath) => generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt), { encrypted, ext: fileDelivery.tempExtFor(physicalFilename) })
+    .catch((err) => { console.error(`Thumbnail-Erzeugung fehlgeschlagen für ${physicalFilename}:`, err.message); return null; });
+}
+
+// Sendet ein Thumbnail (Pfad aus generateThumbnail): verschlüsselt genau dann, wenn der Name auf ".enc" endet.
+function sendThumbnail(req, res, thumbPath) {
+  const typePath = thumbPath.replace(/\.enc$/, '');
+  setFileServeHeaders(res, typePath);
+  return fileDelivery.sendFileDecrypted(req, res, { enc_version: fileDelivery.isEncThumbnail(thumbPath) ? 1 : null }, {
+    filePath: thumbPath,
+    mimeType: getSafeMimeType(typePath),
+    headersFn: (r) => r.setHeader('Cache-Control', 'private, max-age=604800, immutable'),
+  });
+}
+
+function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
   return new Promise((resolve) => {
-    const inputPath = path.join(UPLOADS_DIR, physicalFilename);
-    const lowerExt = extension.toLowerCase();
     // Keyed by basename only (not the full "<ownerId>/<uuid>.ext" relative path) — physical
     // filenames are UUIDs, unique regardless of which owner subfolder they live in, so this
     // stays a flat cache that needs no migration of its own and keeps working across a file
@@ -3595,10 +3649,8 @@ function generateThumbnail(physicalFilename, extension) {
       return resolve(outputPath);
     }
 
-    // Check if it's a video
-    const videoExts = ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'm4v'];
-    // Check if it's a RAW image
-    const rawExts = ['cr2', 'nef', 'dng', 'arw', 'orf', 'rw2', 'pef', 'raf'];
+    const videoExts = THUMB_VIDEO_EXTS;
+    const rawExts = THUMB_RAW_EXTS;
 
     if (lowerExt === 'svg') {
       // rsvg-convert never fetches remote http(s) references, unlike e.g. ImageMagick's SVG
@@ -3692,10 +3744,9 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     // Cached, downscaled thumbnail — covers web images, video and RAW (see generateThumbnail).
     // Content is immutable once generated (physical filenames are per-upload UUIDs, never
     // reused/overwritten), so it's safe to cache aggressively client-side.
-    const thumbPath = await generateThumbnail(file.path, ext);
+    const thumbPath = await generateThumbnail(file.path, ext, isEncRow(file));
     if (thumbPath && fs.existsSync(thumbPath)) {
-      setFileServeHeaders(res, thumbPath);
-      return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
+      return sendThumbnail(req, res, thumbPath);
     }
 
     // Fallback for standard web images if downscaling failed for some reason (e.g. an
@@ -3704,7 +3755,7 @@ app.get('/api/files/thumbnail/:id', requireAuth, async (req, res) => {
     // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
     if (WEB_IMAGE_EXTS.includes(ext)) {
       setFileServeHeaders(res, file.name);
-      return res.sendFile(filePath);
+      return fileDelivery.sendFileDecrypted(req, res, file, { filePath, mimeType: getSafeMimeType(file.name) });
     }
 
     res.status(404).json({ error: 'Thumbnail not available' });
@@ -3728,7 +3779,7 @@ app.get('/api/files/:id', requireAuth, async (req, res) => {
     const file = fileRes.rows[0];
     const ext = file.name.split('.').pop().toLowerCase();
     if (!file.is_folder && EXIF_CAPABLE_EXTS.includes(ext)) {
-      file.exif = await getExifSummary(file.path);
+      file.exif = await getExifSummary(file.path, isEncRow(file));
     }
     res.json(file);
   } catch (err) {
@@ -4193,7 +4244,7 @@ app.get('/api/eurooffice/download/:id', async (req, res) => {
     }
 
     setFileServeHeaders(res, file.name);
-    res.sendFile(filePath);
+    fileDelivery.sendFileDecrypted(req, res, file, { filePath });
   } catch (err) {
     console.error('Office download error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -4249,7 +4300,7 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
       // Download into a temp file, rename over the old one only when complete; size/content/hash
       // are updated afterwards so an aborted download leaves the previous file + index intact.
       const saved = await saveDownloadedFile(url, filePath);
-      const textContent = await extractTextContent(filePath, file.mime_type, file.name);
+      const textContent = await extractTextContent(filePath, file.mime_type, file.name, { encrypted: false }); // P2b: Copy-on-Write-Blob
       await pool.query(
         'UPDATE files SET size = $1, content = $2, content_hash = $3 WHERE id = $4',
         [saved.size, textContent, saved.hash, fileId]
@@ -4806,7 +4857,7 @@ app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
       }
     }
 
-    const content = fs.readFileSync(filePath, 'utf8');
+    const content = (await readTextBlob(file, filePath)).toString('utf8');
 
     res.type('text/plain').send(content);
   } catch (err) {
@@ -4824,7 +4875,7 @@ app.get('/api/public/shares/:slug/meta/:fileId', async (req, res) => {
     const file = access.file;
     const ext = file.name.split('.').pop().toLowerCase();
     if (!file.is_folder && EXIF_CAPABLE_EXTS.includes(ext)) {
-      file.exif = await getExifSummary(file.path);
+      file.exif = await getExifSummary(file.path, isEncRow(file));
     }
     res.json(file);
   } catch (err) {
@@ -4891,7 +4942,7 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'),
     // public share, and the file already belongs to whoever created the share.
     const relativePath = relocateUploadToOwnerDir(file.owner_id, req.file.filename);
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
-    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name);
+    const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name, { encrypted: false }); // P2b: frischer Blob
 
     // Only the net size increase counts against quota — usedBytes inside the lock still
     // includes this file's OLD size until the UPDATE below runs.
@@ -5000,10 +5051,9 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     // Cached, downscaled thumbnail — covers web images, video and RAW (see generateThumbnail).
     // Content is immutable once generated (physical filenames are per-upload UUIDs, never
     // reused/overwritten), so it's safe to cache aggressively client-side.
-    const thumbPath = await generateThumbnail(file.path, ext);
+    const thumbPath = await generateThumbnail(file.path, ext, isEncRow(file));
     if (thumbPath && fs.existsSync(thumbPath)) {
-      setFileServeHeaders(res, thumbPath);
-      return res.sendFile(thumbPath, { headers: { 'Cache-Control': 'private, max-age=604800, immutable' } });
+      return sendThumbnail(req, res, thumbPath);
     }
 
     // Fallback for standard web images if downscaling failed for some reason (e.g. an
@@ -5012,7 +5062,7 @@ app.get('/api/public/shares/:slug/thumbnail/:fileId', async (req, res) => {
     // letting the browser execute an attacker-uploaded SVG inline as a "thumbnail".
     if (WEB_IMAGE_EXTS.includes(ext)) {
       setFileServeHeaders(res, file.name);
-      return res.sendFile(filePath);
+      return fileDelivery.sendFileDecrypted(req, res, file, { filePath, mimeType: getSafeMimeType(file.name) });
     }
 
     res.status(404).json({ error: 'Thumbnail not available' });
@@ -5055,16 +5105,12 @@ app.get('/api/public/shares/:slug/download/:fileId', async (req, res) => {
     }
 
     setFileServeHeaders(res, file.name);
-    if (req.query.inline === 'true') {
-      return res.sendFile(filePath, {
-        headers: {
-          'Content-Type': getSafeMimeType(file.name),
-          'Content-Disposition': 'inline; filename="' + encodeURIComponent(file.name) + '"'
-        }
-      });
-    }
-
-    res.download(filePath, file.name);
+    return fileDelivery.sendFileDecrypted(req, res, file, {
+      filePath,
+      filename: file.name,
+      inline: req.query.inline === 'true',
+      mimeType: req.query.inline === 'true' ? getSafeMimeType(file.name) : undefined,
+    });
   } catch (err) {
     console.error('Public download error:', err);
     res.status(500).json({ error: 'Internal server error.' });
@@ -5391,14 +5437,7 @@ app.get('/api/public/shares/:slug/download-zip/:folderId', async (req, res) => {
     // or a file disappearing while being zipped) — by then this handler runs outside the
     // surrounding try/catch's call stack, so `throw`ing here would be an uncaught exception
     // that crashes the whole process for every user. Log and just end the response instead.
-    archive.on('error', (err) => {
-      console.error('ZIP archive error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to create ZIP.' });
-      } else {
-        res.end();
-      }
-    });
+    archive.on('error', zipErrorHandler(res, 'ZIP archive error:', 'Failed to create ZIP.'));
     archive.pipe(res);
 
     const baseFileRes = await pool.query('SELECT owner_id FROM files WHERE id = $1 AND deleted_at IS NULL', [share.file_id]);
@@ -5455,14 +5494,7 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename="mycloud_selection.zip"');
 
     const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => {
-      console.error('Public multi-ZIP archive error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to create ZIP.' });
-      } else {
-        res.end();
-      }
-    });
+    archive.on('error', zipErrorHandler(res, 'Public multi-ZIP archive error:', 'Failed to create ZIP.'));
     archive.pipe(res);
 
     for (const id of ids) {
@@ -5474,10 +5506,7 @@ app.get('/api/public/shares/:slug/download-zip-multiple', async (req, res) => {
       if (file.is_folder) {
         await addFolderToZip(archive, file.id, file.name, baseFile.owner_id);
       } else {
-        const physicalPath = path.join(UPLOADS_DIR, file.path);
-        if (fs.existsSync(physicalPath)) {
-          archive.file(physicalPath, { name: file.name });
-        }
+        addFileToZip(archive, file, file.name);
       }
     }
     await archive.finalize();

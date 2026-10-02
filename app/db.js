@@ -217,6 +217,9 @@ async function initDb() {
     // automatically; this also drives the admin-triggered backfill over files uploaded before
     // that existed — NULL there just means "not processed yet", not "processing failed".
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS faststart_processed_at TIMESTAMP');
+    // Verschlüsselungs-Format des Blobs (files.path): NULL = Klartext, 1 = crypto-store Format v1. Einzige
+    // Wahrheit für jede Lese-/Auslieferungsentscheidung (docs/Verschluesselung-und-Backup.md 3.5).
+    await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_version SMALLINT');
     // Normalise legacy rows that stored an active document type (see getSafeMimeType in server.js).
     // Order matters: first everything html/xml/svg/javascript -> text/plain (office types excluded),
     // then .svg files -> image/svg+xml. IS DISTINCT FROM keeps reboots from rewriting unchanged rows.

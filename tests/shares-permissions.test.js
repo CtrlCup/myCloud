@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const BASE = process.env.BASE_URL || 'http://localhost:3099';
+const { BASE } = require('./_env');
 const user = 'shareperm' + Date.now();
 const password = 'Test-Passwort-12345!';
 let cookie = '';
