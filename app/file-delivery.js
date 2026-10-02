@@ -64,6 +64,33 @@ function lazyPlainStream(filePath, { encrypted }) {
   })(), { objectMode: false });
 }
 
+/**
+ * archiver meldet Fehler (Client-Abbruch, fehlende/defekte/nicht entschlüsselbare Datei) asynchron: ein `throw`
+ * im Handler würde den Prozess beenden. Vor dem ersten Byte: 500; danach Verbindung abbrechen statt ein
+ * unvollständiges ZIP als erfolgreich zu beenden.
+ */
+function zipErrorHandler(res, logLabel, message) {
+  return (err) => {
+    console.error(logLabel, err);
+    if (!res.headersSent) {
+      res.removeHeader('Content-Disposition');
+      res.status(500).type('application/json').send(JSON.stringify({ error: message }));
+    } else {
+      res.destroy(err);
+    }
+  };
+}
+
+/** Datei ins ZIP: Klartext per Pfad (archiver liest lazy), verschlüsselt als lazy Klartext-Stream. */
+function addToZip(zip, physicalPath, archivePath, encrypted) {
+  if (!encrypted) return zip.file(physicalPath, { name: archivePath });
+  const src = lazyPlainStream(physicalPath, { encrypted: true });
+  // archiver pipt die Quelle in einen PassThrough: deren 'error' erreicht archive.on('error') nicht von selbst
+  // (sonst uncaughtException). Hier weiterreichen, damit zipErrorHandler die Antwort abbricht.
+  src.on('error', (e) => zip.emit('error', e));
+  zip.append(src, { name: archivePath });
+}
+
 /* ---------- sendFileDecrypted ---------- */
 
 function sendJsonError(res, status, message, headers = {}) {
@@ -71,6 +98,7 @@ function sendJsonError(res, status, message, headers = {}) {
   for (const h of ['Content-Range', 'Content-Length', 'ETag', 'Content-Disposition', 'Accept-Ranges']) res.removeHeader(h);
   for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
   res.end(JSON.stringify({ error: message }));
 }
 
@@ -93,14 +121,12 @@ function parseRange(header, size) {
   let start, end;
   if (spec[1] === '') {
     const n = Number(spec[2]);
-    if (!Number.isSafeInteger(n)) return null;
     if (n === 0) return 'unsatisfiable';
     start = Math.max(0, size - n);
     end = size - 1;
   } else {
     start = Number(spec[1]);
     end = spec[2] === '' ? size - 1 : Number(spec[2]);
-    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return null;
     if (spec[2] !== '' && end < start) return null;
     end = Math.min(end, size - 1);
   }
@@ -114,7 +140,9 @@ const etagMatches = (header, etag) => String(header).split(',').some((t) => { co
 // landete er im globalen Fehler-Handler als 500); alle anderen Fehler bleiben wie bisher ein 500.
 function plainDone(res) {
   return (err) => {
-    if (!err || err.code === 'ECONNABORTED' || err.syscall === 'write' || res.headersSent) return;
+    if (!err || err.code === 'ECONNABORTED' || err.syscall === 'write') return;
+    // Fehler nach gesendeten Headern: Antwort abbrechen, sonst hängt der Client
+    if (res.headersSent) return res.destroy(err);
     if (err.status === 416) {
       for (const [k, v] of Object.entries(err.headers || {})) res.setHeader(k, v);
       return sendJsonError(res, 416, 'Angeforderter Bereich nicht erfüllbar.', err.headers || {});
@@ -227,5 +255,5 @@ function sendFileDecrypted(req, res, fileRow, { filePath, filename, inline, mime
 
 module.exports = {
   isEncRow, isEncThumbnail, withPlaintextTempFile, tempExtFor, lazyPlainStream,
-  sendFileDecrypted, parseRange, makeSemaphore,
+  sendFileDecrypted, parseRange, makeSemaphore, addToZip, zipErrorHandler,
 };

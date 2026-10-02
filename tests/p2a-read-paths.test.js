@@ -359,3 +359,78 @@ test('unit: Semaphor begrenzt Parallelität', async () => {
   })));
   assert.strictEqual(max, 2);
 });
+
+test('unit: riesige Range-Zahlen: Start hinter der Datei -> 416, Ende wird geklemmt (verschlüsselt und Klartext)', async () => {
+  const huge = '9'.repeat(40);
+  let r = await request(encCfg(), { headers: { Range: `bytes=${huge}-` } });
+  assert.strictEqual(r.status, 416);
+  r = await request(encCfg(), { headers: { Range: `bytes=0-${huge}` } });
+  assert.strictEqual(r.status, 206);
+  assert.ok(r.body.equals(PLAIN));
+  const express = require('../app/node_modules/express');
+  const p = path.join(tmpDir, 'plain2.bin');
+  fs.writeFileSync(p, PLAIN);
+  const app = express();
+  app.get('/f', (req, res) => sendFileDecrypted(req, res, { enc_version: null }, { filePath: p }));
+  const server = await new Promise((rs) => { const s = app.listen(0, '127.0.0.1', () => rs(s)); });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/f`, { headers: { Range: `bytes=${huge}-` } });
+    assert.strictEqual(res.status, 416);
+    await res.arrayBuffer();
+  } finally { server.close(); }
+});
+
+test('unit: ZIP mit korruptem verschlüsseltem Blob bricht die Antwort ab, Prozess läuft weiter', async () => {
+  const archiver = require('../app/node_modules/archiver');
+  const { zipErrorHandler, addToZip } = require('../app/file-delivery');
+  const bad = path.join(tmpDir, 'zipbad.bin');
+  fs.copyFileSync(encPath, bad);
+  const fd = fs.openSync(bad, 'r+');
+  const off = cryptoStore.HEADER_SIZE + SEG + 16 + 9; // Segment 1
+  const b = Buffer.alloc(1);
+  fs.readSync(fd, b, 0, 1, off); b[0] ^= 0xff; fs.writeSync(fd, b, 0, 1, off);
+  fs.closeSync(fd);
+  const server = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/zip');
+    const archive = archiver('zip', { zlib: { level: 1 } });
+    archive.on('error', zipErrorHandler(res, 'ZIP-Test:', 'Failed to create ZIP.'));
+    archive.pipe(res);
+    if (req.url === '/ok') addToZip(archive, encPath, 'ok.bin', true);
+    else { addToZip(archive, encPath, 'a.bin', true); addToZip(archive, bad, 'bad.bin', true); addToZip(archive, path.join(tmpDir, 'fehlt.bin'), 'x.bin', true); }
+    archive.finalize();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const get = (u) => new Promise((resolve) => {
+    http.get({ host: '127.0.0.1', port: server.address().port, path: u }, (res) => {
+      const c = [];
+      res.on('data', (d) => c.push(d));
+      res.on('close', () => resolve({ status: res.statusCode, complete: res.complete, body: Buffer.concat(c) }));
+    }).on('error', () => resolve({ status: 0, complete: false, body: Buffer.alloc(0) }));
+  });
+  try {
+    const orig = console.error; console.error = () => {};
+    const r1 = await get('/bad');
+    console.error = orig;
+    assert.ok(r1.status === 500 || r1.complete === false, 'ZIP darf nicht als vollständig enden');
+    const r2 = await get('/ok'); // Prozess lebt, nächster Request funktioniert
+    assert.strictEqual(r2.status, 200);
+    assert.ok(r2.complete);
+    assert.ok(unzip(r2.body)['ok.bin'].equals(PLAIN));
+  } finally { server.close(); }
+});
+
+test('Kopie übernimmt enc_version und content_hash der Quelle (Blob wird 1:1 kopiert)', async () => {
+  const { COMPOSE_CMD } = require('./_env');
+  const { execSync } = require('node:child_process');
+  const psql = (sql) => execSync(`${COMPOSE_CMD} exec -T db psql -U mycloud -d mycloud -At`, { input: sql, cwd: path.join(__dirname, '..') }).toString().trim();
+  const id = await upload('copysrc.bin', Buffer.from('x'), null);
+  psql(`UPDATE files SET enc_version = 1, content_hash = 'abc123' WHERE id = ${id}`);
+  try {
+    const res = await json('POST', '/api/files/copy-multiple', { fileIds: [id], targetFolderId: null });
+    assert.ok(res.ok, 'copy ' + res.status);
+    const row = psql(`SELECT enc_version, content_hash FROM files WHERE name = 'copysrc (Kopie).bin' AND owner_id = (SELECT owner_id FROM files WHERE id = ${id})`);
+    assert.strictEqual(row, '1|abc123');
+  } finally {
+    psql(`UPDATE files SET enc_version = NULL WHERE owner_id = (SELECT owner_id FROM files WHERE id = ${id})`);
+  }
+});

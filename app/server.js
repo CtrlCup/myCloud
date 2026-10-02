@@ -366,13 +366,16 @@ const pdfParse = require('pdf-parse');
 // OCR support (tesseract-ocr + poppler-utils, installed in the Dockerfile alongside the
 // existing ffmpeg/exiftool system tools) so images and scanned PDFs without a text layer are
 // still findable via deep search, not just by filename.
+// Obergrenzen für externe Tools: hängende Prozesse dürfen den Entschlüsselungs-Semaphor nicht dauerhaft belegen.
+const EXEC_TIMEOUT_SHORT = { timeout: 60 * 1000, killSignal: 'SIGKILL' };   // Thumbnails, EXIF
+const EXEC_TIMEOUT_LONG = { timeout: 300 * 1000, killSignal: 'SIGKILL' };   // OCR, Remux
 const OCR_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif'];
 
 function ocrImage(imagePath) {
   return new Promise((resolve) => {
     const { exec } = require('child_process');
     const outputBase = imagePath + '.ocrtmp';
-    exec(`tesseract "${imagePath}" "${outputBase}" -l deu+eng`, { timeout: 30000 }, () => {
+    exec(`tesseract "${imagePath}" "${outputBase}" -l deu+eng`, { ...EXEC_TIMEOUT_LONG }, () => {
       try {
         const text = fs.readFileSync(outputBase + '.txt', 'utf8');
         fs.unlinkSync(outputBase + '.txt');
@@ -391,7 +394,7 @@ async function ocrPdf(pdfPath) {
   const { exec } = require('child_process');
   const tmpPrefix = pdfPath + '.ocrpage';
   await new Promise((resolve) => {
-    exec(`pdftoppm -png -r 150 -l 10 "${pdfPath}" "${tmpPrefix}"`, { timeout: 60000 }, () => resolve());
+    exec(`pdftoppm -png -r 150 -l 10 "${pdfPath}" "${tmpPrefix}"`, { ...EXEC_TIMEOUT_LONG }, () => resolve());
   });
 
   const dir = path.dirname(pdfPath);
@@ -2067,7 +2070,7 @@ function remuxMp4Faststart(physicalPath, originalName, fileId) {
     const tempPath = `${physicalPath}.faststart.mp4`;
     const { exec } = require('child_process');
     const cmd = `ffmpeg -y -i "${physicalPath}" -c copy -movflags +faststart -f mp4 "${tempPath}"`;
-    exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, async (err) => {
+    exec(cmd, { maxBuffer: 1024 * 1024 * 10, ...EXEC_TIMEOUT_LONG }, async (err) => {
       try {
         if (err || !fs.existsSync(tempPath) || fs.statSync(tempPath).size === 0) {
           if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
@@ -2408,29 +2411,13 @@ app.get('/api/files/download/:id', requireAuth, requirePermission('download'), a
   }
 });
 
-// archiver meldet Fehler (Client-Abbruch, fehlende/defekte/nicht entschlüsselbare Datei) asynchron: ein `throw`
-// im Handler würde den Prozess beenden. Vor dem ersten Byte: 500; danach Verbindung abbrechen statt ein
-// unvollständiges ZIP als erfolgreich zu beenden.
-function zipErrorHandler(res, logLabel, message) {
-  return (err) => {
-    console.error(logLabel, err);
-    if (!res.headersSent) {
-      res.removeHeader('Content-Disposition');
-      res.status(500).type('application/json').send(JSON.stringify({ error: message }));
-    } else {
-      res.destroy(err);
-    }
-  };
-}
-
-// Fügt eine Datei dem ZIP hinzu. Klartext wie bisher per Pfad (archiver liest selbst, lazy); verschlüsselte
-// Blobs als lazy Klartext-Stream. Fehlende Blobs werden übersprungen.
+// Fügt eine Datei dem ZIP hinzu (Logik in file-delivery.js: Klartext per Pfad, verschlüsselt als lazy Stream).
 function addFileToZip(zip, file, archivePath) {
   const physicalPath = path.join(UPLOADS_DIR, file.path);
   if (!fs.existsSync(physicalPath)) return;
-  if (isEncRow(file)) zip.append(fileDelivery.lazyPlainStream(physicalPath, { encrypted: true }), { name: archivePath });
-  else zip.file(physicalPath, { name: archivePath });
+  fileDelivery.addToZip(zip, physicalPath, archivePath, isEncRow(file));
 }
+const zipErrorHandler = fileDelivery.zipErrorHandler;
 
 // Helper for ZIP folder packing — fetches the whole subtree in one recursive-CTE query instead
 // of one round-trip per folder level, then walks the resulting (small, in-memory) tree to add
@@ -2818,9 +2805,9 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId, isRoot 
       : `${file.name} (Kopie)`;
 
     await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content)
-       VALUES ($1, $2, $3, $4, false, $5, $6, $7)`,
-      [newName, newRelativePath, getSafeMimeType(newName), file.size, targetFolderId, userId, file.content]
+      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, enc_version, content_hash)
+       VALUES ($1, $2, $3, $4, false, $5, $6, $7, $8, $9)`,
+      [newName, newRelativePath, getSafeMimeType(newName), file.size, targetFolderId, userId, file.content, file.enc_version, file.content_hash]
     );
   }
 }
@@ -3333,6 +3320,7 @@ app.get('/api/files/notes', requireAuth, async (req, res) => {
 // Liest einen Datei-Blob für den Texteditor. Klartext wie bisher unbegrenzt; verschlüsselte Blobs werden
 // ganz entschlüsselt, daher mit Obergrenze (Speicherlast, entspricht dem Editor-Speicherlimit + Reserve).
 const EDITOR_READ_MAX_BYTES_ENCRYPTED = 32 * 1024 * 1024;
+const EDITOR_TOO_BIG = 'Die Datei ist zu groß für den Editor.';
 function readTextBlob(file, filePath) {
   const encrypted = isEncRow(file);
   return cryptoStore.readDecrypted(filePath, { encrypted, maxBytes: encrypted ? EDITOR_READ_MAX_BYTES_ENCRYPTED : undefined });
@@ -3357,6 +3345,7 @@ app.get('/api/files/content/:id', requireAuth, async (req, res) => {
     const content = (await readTextBlob(file, filePath)).toString('utf8');
     res.type('text/plain').send(content);
   } catch (err) {
+    if (err.code === 'ETOOBIG') return res.status(413).json({ error: EDITOR_TOO_BIG });
     console.error('Error reading file content:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -3589,7 +3578,7 @@ function runExifSummary(inputPath) {
   return new Promise((resolve) => {
     const { exec } = require('child_process');
     const cmd = `exiftool -j -Make -Model -LensModel -LensID "${inputPath}"`;
-    exec(cmd, (err, stdout) => {
+    exec(cmd, { ...EXEC_TIMEOUT_SHORT }, (err, stdout) => {
       if (err) return resolve(null);
       try {
         const data = JSON.parse(stdout)[0];
@@ -3657,7 +3646,7 @@ function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
       // delegate — that's precisely why it's the standard safe choice for untrusted SVG input.
       const { exec } = require('child_process');
       const cmd = `rsvg-convert -a -w 512 -h 512 -o "${outputPath}" "${inputPath}"`;
-      exec(cmd, (err) => {
+      exec(cmd, { ...EXEC_TIMEOUT_SHORT }, (err) => {
         if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
           return resolve(outputPath);
         }
@@ -3668,7 +3657,7 @@ function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
       // Generate video thumbnail using ffmpeg
       const { exec } = require('child_process');
       const cmd = `ffmpeg -y -i "${inputPath}" -ss 00:00:01 -vframes 1 -f image2 -vcodec mjpeg "${outputPath}"`;
-      exec(cmd, (err) => {
+      exec(cmd, { ...EXEC_TIMEOUT_SHORT }, (err) => {
         if (err) {
           console.error(`ffmpeg failed for ${physicalFilename}:`, err);
           return resolve(null);
@@ -3679,7 +3668,7 @@ function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
       // Extract RAW embedded preview using exiftool (supports all raw formats)
       const { exec } = require('child_process');
       const cmd = `exiftool -b -PreviewImage "${inputPath}" > "${outputPath}" || exiftool -b -ThumbnailImage "${inputPath}" > "${outputPath}" || exiftool -b -JpgFromRaw "${inputPath}" > "${outputPath}"`;
-      exec(cmd, (err) => {
+      exec(cmd, { ...EXEC_TIMEOUT_SHORT }, (err) => {
         if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
           return resolve(outputPath);
         }
@@ -3693,7 +3682,7 @@ function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
       // branches here; callers fall back to the original file if this fails.
       const { exec } = require('child_process');
       const cmd = `ffmpeg -y -i "${inputPath}" -vf "scale='min(480,iw)':-1" -q:v 4 "${outputPath}"`;
-      exec(cmd, (err) => {
+      exec(cmd, { ...EXEC_TIMEOUT_SHORT }, (err) => {
         if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
           return resolve(outputPath);
         }
@@ -3711,7 +3700,7 @@ function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt) {
       // the image2 muxer this is a single still frame, not a sequence.
       const { exec } = require('child_process');
       const cmd = `ffmpeg -y -i "${inputPath}" -vf "scale='min(480,iw)':-1" -update 1 -q:v 4 "${outputPath}"`;
-      exec(cmd, (err) => {
+      exec(cmd, { ...EXEC_TIMEOUT_SHORT }, (err) => {
         if (!err && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
           return resolve(outputPath);
         }
@@ -4861,6 +4850,7 @@ app.get('/api/public/shares/:slug/content/:fileId', async (req, res) => {
 
     res.type('text/plain').send(content);
   } catch (err) {
+    if (err.code === 'ETOOBIG') return res.status(413).json({ error: EDITOR_TOO_BIG });
     console.error('Public content fetch error:', err);
     res.status(500).json({ error: 'Internal server error.' });
   }
@@ -6160,7 +6150,7 @@ async function runFaststartBackfill() {
 
   const res = await pool.query(
     `SELECT id, name, path FROM files
-     WHERE is_folder = false AND deleted_at IS NULL AND faststart_processed_at IS NULL
+     WHERE is_folder = false AND deleted_at IS NULL AND faststart_processed_at IS NULL AND enc_version IS NULL
        AND lower(name) ~ '\\.(mp4|m4v|mov)$'
      ORDER BY id ASC`
   );

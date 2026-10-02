@@ -48,7 +48,7 @@ Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt**. Offen sind
 | `assembleChunkedUpload` (~257), `tmp-chunked` (~2300) | Chunked-Upload | P2b | Chunks verschlüsselt oder auf tmpfs |
 | `PUT /api/files/content/:id` (~3395), Versions-Restore (~3557), öffentliches Speichern (~4903), EuroOffice-Callback (~4302, `saveDownloadedFile`) | In-Place-Schreiben | P2b | Copy-on-Write: neuer Blob mit neuem DEK, `files.path` umhängen, alten löschen. **Harte Vorbedingung:** nie neuen Inhalt in einen vorhandenen verschlüsselten Blob schreiben |
 | `remuxMp4Faststart` (~2065) und `runFaststartBackfill` (~6158) | ffmpeg schreibt in Datei und ersetzt per `rename` | P2b | Eingabe über Temp-Klartext, Ergebnis als neuer verschlüsselter Blob (Copy-on-Write), `enc_version` setzen; bis dahin nur auf Klartext-Zeilen sinnvoll |
-| `copyFileOrFolderRecursive` (~2790) | `fs.copyFileSync` des Blobs | P2b | Bytegleiche Kopie ist ohne Nonce-Problem möglich (gleicher Inhalt, keine Änderung), **aber** die neue Zeile muss `enc_version` mitnehmen |
+| `copyFileOrFolderRecursive` (~2790) | `fs.copyFileSync` des Blobs | P2a (INSERT) | Der INSERT übernimmt `enc_version` und `content_hash` der Quelle. Bytegleiche Kopie mit gleichem DEK/noncePfx ist unkritisch, solange nie neuer Inhalt in einen Blob geschrieben wird; das garantiert Copy-on-Write (P2b) |
 | `create-empty` (~3064), Notizen (~3248, 3272), `templates/` | neue Dateien | P2b | schreiben verschlüsselt |
 | Thumbnail-Erzeugung (Schreiben in `uploads/thumbnails`) | abgeleiteter Klartext | P2b | Ausgabe als `<name>.enc` schreiben; Lese-/Auslieferungsseite steht |
 | Avatar-/Branding-Upload (~4400-4560, ~5560) | Schreiben | P2b (Entscheidung) | Es braucht ein Format-Merkmal: neue Spalte (`users.avatar_enc`) bzw. Suffix `.enc` im Pfad (wie bei Thumbnails). Empfehlung: Suffix `.enc` im Dateinamen, keine neue Spalte. Branding wird auch ohne Login ausgeliefert (Login-Hintergrund), das ist mit verschlüsselter Ablage vereinbar, weil die App entschlüsselt |
@@ -63,3 +63,19 @@ Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt**. Offen sind
 ## Nicht-Blob-Leser (zur Vollständigkeit)
 
 `openapi.yaml`, `public/index.html`, E-Mail-Templates, `.env`: App-eigene Dateien, keine Nutzerdaten.
+
+## Hintergrundjobs
+
+| Job | Behandlung |
+|---|---|
+| `runFaststartBackfill` | P2a: nur Zeilen mit `enc_version IS NULL` (verschlüsselte Blobs brauchen Copy-on-Write, P2b/P2c) |
+| `indexExistingFiles` (Text-/OCR-Reindex) | liest über `extractTextContent` mit `enc_version`, unkritisch |
+| Bereinigungsjobs (Shares, Papierkorb, Einmalnotizen) | nur `unlink`, unabhängig vom Format |
+
+## Externe Tools
+
+Alle `exec`-Aufrufe haben Timeouts (`EXEC_TIMEOUT_SHORT` 60 s für Thumbnails/EXIF, `EXEC_TIMEOUT_LONG` 300 s für OCR/Remux) mit `SIGKILL`, damit hängende Prozesse den Entschlüsselungs-Semaphor nicht dauerhaft belegen.
+
+## Reihenfolge
+
+**P2c (Migration) darf erst nach P2b laufen bzw. ausgerollt werden.** Solange Schreibpfade (In-Place-Writes, Remux, Callback) nicht Copy-on-Write sind, würden sie migrierte Blobs beschädigen.
