@@ -112,7 +112,7 @@ Alle Variablen sind optional und lassen sich alternativ bequem über die **Admin
 |---|---|
 | `EMAIL_SMTP_HOST` | Hostname des SMTP-Servers (z. B. `smtp.gmail.com`) |
 | `EMAIL_SMTP_PORT` | SMTP-Port (z. B. `587` oder `465`) |
-| `EMAIL_SMTP_USER` / `EMAIL_SMTP_PASS` | Zugangsdaten |
+| `EMAIL_SMTP_USER` / `EMAIL_SMTP_PASS` | Zugangsdaten. Das Passwort schreibt die App nie in die `.env` zurück (nur als Start-Vorgabe, solange in der DB noch keins steht) |
 | `EMAIL_FROM` | Absender-Adresse (Standard: `noreply@mycloud.local`) |
 
 </details>
@@ -123,7 +123,7 @@ Alle Variablen sind optional und lassen sich alternativ bequem über die **Admin
 | Variable | Beschreibung |
 |---|---|
 | `SSO_ENABLED` | SSO-Login aktivieren (`true` / `false`) |
-| `SSO_CLIENT_ID` / `SSO_CLIENT_SECRET` | Zugangsdaten deines OIDC-Providers (z. B. Authentik) |
+| `SSO_CLIENT_ID` / `SSO_CLIENT_SECRET` | Zugangsdaten deines OIDC-Providers (z. B. Authentik). Das Secret schreibt die App nie in die `.env` zurück (nur als Start-Vorgabe, solange in der DB noch keins steht) |
 | `SSO_ISSUER_URL` | Issuer-URL des Providers |
 
 Die Callback-URL (`.../auth/sso/callback`) ist nicht konfigurierbar — sie wird aus der Domain
@@ -173,7 +173,7 @@ lässt sich vollständig extern nutzen:
 
 ## Verschlüsselung (optional)
 
-myCloud kann Dateien mit einem Master-Key verschlüsselt ablegen (AES-256-GCM, Konzept: [`docs/Verschluesselung-und-Backup.md`](docs/Verschluesselung-und-Backup.md)). Mit aktivem Master-Key werden alle neuen Dateien, Thumbnails und Avatare verschlüsselt gespeichert, bestehende Dateien werden im Hintergrund migriert (siehe unten). Ohne Master-Key verhält sich die App unverändert (Branding-Bilder bleiben bewusst Klartext, Spalten-Verschlüsselung folgt in einer späteren Phase).
+myCloud kann Dateien mit einem Master-Key verschlüsselt ablegen (AES-256-GCM, Konzept: [`docs/Verschluesselung-und-Backup.md`](docs/Verschluesselung-und-Backup.md)). Mit aktivem Master-Key werden alle neuen Dateien, Thumbnails und Avatare verschlüsselt gespeichert, bestehende Dateien werden im Hintergrund migriert (siehe unten). Ohne Master-Key verhält sich die App unverändert (Branding-Bilder bleiben bewusst Klartext).
 
 1. Key erzeugen (die Datei bekommt Modus `0400`, ein vorhandener Key wird nie überschrieben):
    ```bash
@@ -189,7 +189,9 @@ myCloud kann Dateien mit einem Master-Key verschlüsselt ablegen (AES-256-GCM, K
 
 - **Vor der Aktivierung ein Backup anlegen.** Die Migration verändert den Datenbestand.
 - **Alte Backups und Snapshots enthalten weiterhin Klartext.** Erst nach der Migration angelegte Sicherungen sind verschlüsselt; ältere gezielt löschen oder selbst verschlüsseln.
-- Zusätzlich empfohlen: Volume-/Festplattenverschlüsselung (LUKS/ZFS) für die Datenbank und das Upload-Volume; Datenbankinhalte sind (bis Phase P3) nicht verschlüsselt.
+- Zusätzlich empfohlen: Volume-/Festplattenverschlüsselung (LUKS/ZFS) für die Datenbank und das Upload-Volume. Der Volltext-Index (`files.content`, Tiefensuche), Dateinamen und Ordnerstruktur bleiben bewusst unverschlüsselt.
+
+**Datenbankfelder:** Mit aktivem Master-Key werden zusätzlich `users.totp_secret` (2FA), das SMTP-Passwort und das SSO-Client-Secret (`settings`), der Versionsverlauf (`file_versions.content`) und Freigabe-Nachrichten (`shares.message`) als `enc:v1:<keyId>:<base64>` gespeichert (AES-256-GCM, Schlüssel per HKDF aus dem Master-Key, Spaltenname als authentisierter Kontext). Bestehende Werte migriert derselbe Hintergrund-Job (fortsetzbar, idempotent, Fortschritt in der Admin-Karte „Verschlüsselung“). Ohne Master-Key bleibt alles im Klartext wie bisher; ein bereits verschlüsselter Wert ist ohne Key nicht lesbar (klare Fehlermeldung, kein Klartext-Fallback). Das SMTP-Passwort und das SSO-Secret werden nicht mehr in die `.env` zurückgeschrieben; steht dort noch ein Wert, dient er nur als Vorgabe, solange die DB keinen hat.
 
 Beim ersten Start mit Key speichert die App einen Prüfwert in der Datenbank. Passt der Key später nicht (oder fehlt er bei einer schon verschlüsselten Instanz), beendet sich die App mit einer Fehlermeldung, statt Dateien unlesbar zu machen. Die Key-Datei enthält 32 Bytes als Hex oder Base64 (eine Zeile) oder JSON `{ "current": 1, "keys": { "1": "<hex>" } }` für spätere Schlüsselrotation.
 

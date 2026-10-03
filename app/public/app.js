@@ -5049,15 +5049,22 @@ function renderEncryptionStatus(d) {
     return;
   }
   const pct = d.total > 0 ? Math.round((d.encrypted / d.total) * 100) : 100;
+  const colRunning = !!(d.columnMigration && d.columnMigration.running);
+  const running = d.running || colRunning;
   statusEl.innerHTML = `Master-Key aktiv: <strong>ja</strong> (Key-ID ${escapeHtml(String(d.keyId))}). ` +
-    (d.running ? `Migration läuft…${d.current ? ' (gerade: ' + escapeHtml(d.current) + ')' : ''}` : (d.plain > 0 ? `${d.plain} Datei(en) noch unverschlüsselt.` : 'Alle Dateien sind verschlüsselt.'));
+    (running ? `Migration läuft…${d.current ? ' (gerade: ' + escapeHtml(d.current) + ')' : ''}` : (d.plain > 0 ? `${d.plain} Datei(en) noch unverschlüsselt.` : 'Alle Dateien sind verschlüsselt.'));
   wrap.style.display = 'block';
   document.getElementById('admin-enc-progress').style.width = pct + '%';
   document.getElementById('admin-enc-counts').textContent =
     `${d.encrypted} von ${d.total} verschlüsselt (${pct} %), ${d.plain} offen, ${d.missing} fehlend, ${d.failed} fehlgeschlagen. Thumbnails entfernt: ${d.thumbnailsRemoved}, Avatare migriert: ${d.avatarsMigrated}.`;
+  const cols = Object.values(d.columns || {});
+  const colTotal = cols.reduce((n, c) => n + c.total, 0);
+  const colEnc = cols.reduce((n, c) => n + c.encrypted, 0);
+  const colsEl = document.getElementById('admin-enc-columns');
+  if (colsEl) colsEl.textContent = `Datenbankfelder (2FA-Secrets, SMTP-/SSO-Secrets, Versionsverlauf, Freigabe-Nachrichten): ${colEnc} von ${colTotal} verschlüsselt, ${colTotal - colEnc} offen.`;
   btn.style.display = 'inline-flex';
-  btn.dataset.action = d.running ? 'stop' : 'start';
-  btn.textContent = d.running ? 'Migration stoppen' : 'Migration starten';
+  btn.dataset.action = running ? 'stop' : 'start';
+  btn.textContent = running ? 'Migration stoppen' : 'Migration starten';
 }
 
 async function loadEncryptionStatus() {
@@ -5067,9 +5074,10 @@ async function loadEncryptionStatus() {
     const data = await res.json();
     renderEncryptionStatus(data);
     const visible = document.getElementById('admin-system')?.classList.contains('active');
-    if ((data.running || visible) && !encPollTimer) {
+    const busy = data.running || (data.columnMigration && data.columnMigration.running);
+    if ((busy || visible) && !encPollTimer) {
       encPollTimer = setInterval(loadEncryptionStatus, 3000);
-    } else if (!data.running && !visible && encPollTimer) {
+    } else if (!busy && !visible && encPollTimer) {
       clearInterval(encPollTimer);
       encPollTimer = null;
     }

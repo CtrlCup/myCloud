@@ -24,6 +24,9 @@ const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 const { withDbRetry } = require('./db-retry');
 const cryptoStore = require('./crypto-store');
 const { createMigration } = require('./encrypt-migration');
+const { createColumnMigration, countColumns } = require('./column-migration');
+const { encryptColumn, decryptColumn } = require('./column-crypto');
+const { updateEnvFile } = require('./env-file');
 const { createOutbox } = require('./blob-outbox');
 const fileDelivery = require('./file-delivery');
 const { isEncRow } = fileDelivery;
@@ -1432,7 +1435,7 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
     if (user.two_factor_totp) {
       const speakeasy = require('speakeasy');
       const verified = speakeasy.totp.verify({
-        secret: user.totp_secret,
+        secret: decryptColumn(user.totp_secret, 'users.totp_secret'),
         encoding: 'base32',
         token: code,
         window: 1
@@ -1463,6 +1466,7 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
     });
   } catch (err) {
     console.error('2FA Verification error:', err);
+    if (err && String(err.code).startsWith('COLUMN_')) return res.status(500).json({ error: err.message });
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -3569,6 +3573,11 @@ app.get('/api/files/content/:id', requireAuth, async (req, res) => {
 // kept. Also caps total versions per file so history stays lean rather than growing forever.
 const FILE_VERSION_MIN_INTERVAL_MS = 3 * 60 * 1000;
 const FILE_VERSION_MAX_PER_FILE = 30;
+// content verschlüsselt (bei aktivem Master-Key); size = Klartext-Zeichenzahl, damit die Liste nicht entschlüsseln muss.
+async function insertFileVersion(fileId, content) {
+  const size = content == null ? null : Array.from(String(content)).length;
+  await pool.query('INSERT INTO file_versions (file_id, content, size) VALUES ($1, $2, $3)', [fileId, encryptColumn(content, 'file_versions.content'), size]);
+}
 async function maybeSaveFileVersion(fileId, oldContent) {
   if (!oldContent) return; // nothing meaningful to check-point yet (new/empty file)
   try {
@@ -3579,7 +3588,7 @@ async function maybeSaveFileVersion(fileId, oldContent) {
     const last = lastRes.rows[0];
     if (last && Date.now() - new Date(last.created_at).getTime() < FILE_VERSION_MIN_INTERVAL_MS) return;
 
-    await pool.query('INSERT INTO file_versions (file_id, content) VALUES ($1, $2)', [fileId, oldContent]);
+    await insertFileVersion(fileId, oldContent);
     await pool.query(
       `DELETE FROM file_versions WHERE file_id = $1 AND id NOT IN (
          SELECT id FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC LIMIT $2
@@ -3698,7 +3707,7 @@ app.get('/api/files/:id/versions', requireAuth, async (req, res) => {
     if (!isOwner) return res.status(403).json({ error: 'Access denied' });
 
     const result = await pool.query(
-      'SELECT id, created_at, LENGTH(content) as size FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC',
+      'SELECT id, created_at, COALESCE(size, LENGTH(content)) as size FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC',
       [fileId]
     );
     res.json(result.rows);
@@ -3722,7 +3731,9 @@ app.get('/api/files/:id/versions/:versionId', requireAuth, async (req, res) => {
       [versionId, fileId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
-    res.json(result.rows[0]);
+    const row = result.rows[0];
+    row.content = decryptColumn(row.content, 'file_versions.content');
+    res.json(row);
   } catch (err) {
     console.error('Error fetching file version:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -3744,7 +3755,7 @@ app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermi
       [versionId, fileId]
     );
     if (versionRes.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
-    const restoredContent = versionRes.rows[0].content;
+    const restoredContent = decryptColumn(versionRes.rows[0].content, 'file_versions.content');
 
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
     const file = fileRes.rows[0];
@@ -3754,7 +3765,7 @@ app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermi
     // usual throttle — a restore is a deliberate action the user should be able to undo too.
     // The FILE_VERSION_MAX_PER_FILE cap still applies though (only the throttle is skipped),
     // otherwise repeated restores would grow file_versions for this file forever.
-    await pool.query('INSERT INTO file_versions (file_id, content) VALUES ($1, $2)', [fileId, file.content]);
+    await insertFileVersion(fileId, file.content);
     await pool.query(
       `DELETE FROM file_versions WHERE file_id = $1 AND id NOT IN (
          SELECT id FROM file_versions WHERE file_id = $1 ORDER BY created_at DESC LIMIT $2
@@ -4067,9 +4078,10 @@ app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res
     const result = await pool.query(
       `INSERT INTO shares (slug, file_id, can_read, can_write, can_download, can_zip, expires_at, password_hash, max_downloads, only_upload, can_collab, message)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
-      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal, canCollab === true, messageVal]
+      [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal, canCollab === true, encryptColumn(messageVal, 'shares.message')]
     );
     const share = result.rows[0];
+    share.message = decryptColumn(share.message, 'shares.message');
 
     let notified = false;
     const recipientEmail = notifyEmail ? String(notifyEmail).trim() : '';
@@ -4177,8 +4189,9 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
       ? (canCollab === true)
       : share.can_collab;
 
+    // unverändert übernommener Wert bleibt der Rohwert aus der DB (bereits verschlüsselt)
     const messageVal = (message !== undefined)
-      ? (message ? String(message).trim().slice(0, 2000) || null : null)
+      ? encryptColumn(message ? String(message).trim().slice(0, 2000) || null : null, 'shares.message')
       : share.message;
 
     const result = await pool.query(
@@ -4193,7 +4206,9 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
        passwordHash, maxDownloadsVal, onlyUploadVal, canCollabVal, messageVal, shareId]
     );
 
-    res.json(result.rows[0]);
+    const updated = result.rows[0];
+    updated.message = decryptColumn(updated.message, 'shares.message');
+    res.json(updated);
   } catch (err) {
     console.error('Error updating share:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -4323,7 +4338,7 @@ app.get('/api/shares', requireAuth, async (req, res) => {
        WHERE f.owner_id = $1`,
       [userId]
     );
-    res.json(result.rows);
+    res.json(result.rows.map(r => ({ ...r, message: decryptColumn(r.message, 'shares.message') })));
   } catch (err) {
     console.error('Error fetching shares:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -4941,7 +4956,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         expires_at: share.expires_at,
         only_upload: share.only_upload,
         can_collab: share.can_collab,
-        message: share.message,
+        message: decryptColumn(share.message, 'shares.message'),
       },
       baseFile: {
         id: baseFile.id,
@@ -6191,7 +6206,7 @@ app.post('/api/settings/2fa/totp/confirm', requireAuth, denyApiKey, async (req, 
   try {
     await pool.query(
       'UPDATE users SET two_factor_totp = true, totp_secret = $1 WHERE id = $2',
-      [tempSecret, req.session.userId]
+      [encryptColumn(tempSecret, 'users.totp_secret'), req.session.userId]
     );
     delete req.session.tempTotpSecret;
     res.json({ success: true });
@@ -6257,63 +6272,6 @@ app.delete('/api/settings/passkeys/:id', requireAuth, denyApiKey, async (req, re
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
-// Helper to update the .env file with new configurations
-function updateEnvFile(configs) {
-  // Locate the .env file in the application working directory (mounted from host)
-  const envPath = path.join(__dirname, '.env');
-  if (!fs.existsSync(envPath)) {
-    console.log('.env file does not exist, skipping environment write.');
-    return;
-  }
-
-  try {
-    let content = fs.readFileSync(envPath, 'utf8');
-    const lines = content.split('\n');
-
-    // Mapping of DB config keys to .env variable names
-    const mapping = {
-      registration_enabled: 'REGISTRATION_ENABLED',
-      sso_enabled: 'SSO_ENABLED',
-      sso_issuer_url: 'SSO_ISSUER_URL',
-      sso_client_id: 'SSO_CLIENT_ID',
-      sso_client_secret: 'SSO_CLIENT_SECRET',
-      email_smtp_host: 'EMAIL_SMTP_HOST',
-      email_smtp_port: 'EMAIL_SMTP_PORT',
-      email_smtp_user: 'EMAIL_SMTP_USER',
-      email_smtp_pass: 'EMAIL_SMTP_PASS',
-      email_from: 'EMAIL_FROM'
-    };
-
-    for (const [key, value] of Object.entries(configs)) {
-      const envKey = mapping[key];
-      if (!envKey) continue;
-
-      // A settings value containing a newline would otherwise let it break out of its own
-      // "KEY=value" line and inject arbitrary extra environment variables into the .env file.
-      // Strip line breaks — none of the mapped settings (URLs, hosts, ports, credentials) are
-      // legitimately multi-line.
-      const safeValue = String(value).replace(/[\r\n]+/g, ' ');
-
-      let found = false;
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith(`${envKey}=`)) {
-          lines[i] = `${envKey}=${safeValue}`;
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        lines.push(`${envKey}=${safeValue}`);
-      }
-    }
-
-    fs.writeFileSync(envPath, lines.join('\n'), 'utf8');
-  } catch (err) {
-    console.error('Error updating .env file:', err);
-  }
-}
 
 // Update Admin Configuration settings
 app.post('/api/settings/admin/config', requireAdmin, async (req, res) => {
@@ -6515,6 +6473,10 @@ const encMigration = createMigration({
   swapFileBlob, tryDeleteBlob, newBlobPath, detectAvatarExt: detectAvatarImageExt, blobOutbox,
 });
 
+// Spaltenmigration (P3, column-migration.js): wird zusammen mit der Dateimigration gestartet/gestoppt (ein Schalter in
+// der Admin-Karte), hat aber eigenen Status/Zähler; beide sind unabhängig voneinander fortsetzbar.
+const colMigration = createColumnMigration({ pool });
+
 app.get('/api/settings/admin/encryption-status', requireAdmin, denyApiKey, async (req, res) => {
   try {
     const c = await pool.query(
@@ -6528,6 +6490,8 @@ app.get('/api/settings/admin/encryption-status', requireAdmin, denyApiKey, async
       keyId: cryptoStore.getCurrentKeyId(),
       ...c.rows[0],
       ...encMigration.getState(),
+      columns: await countColumns(pool),
+      columnMigration: colMigration.getState(),
       autoMigrate: (await getSetting('encryption_auto_migrate')) !== 'false',
     });
   } catch (err) {
@@ -6542,10 +6506,12 @@ app.post('/api/settings/admin/encryption-migration', requireAdmin, denyApiKey, (
   }
   const action = req.body && req.body.action;
   if (action === 'start') {
-    if (!encMigration.start()) return res.status(409).json({ error: 'Die Migration läuft bereits.' });
+    const startedFiles = encMigration.start();
+    const startedCols = colMigration.start();
+    if (!startedFiles && !startedCols) return res.status(409).json({ error: 'Die Migration läuft bereits.' });
     return res.json({ started: true });
   }
-  if (action === 'stop') return res.json({ stopping: encMigration.stop() });
+  if (action === 'stop') { const a = encMigration.stop(); const b = colMigration.stop(); return res.json({ stopping: a || b }); }
   res.status(400).json({ error: 'Ungültige Aktion (start oder stop erwartet).' });
 });
 
@@ -7456,7 +7422,7 @@ withDbRetry(initDb)
     await migrateUploadsToPerUserFolders();
     // Muss nach migrateUploadsToPerUserFolders() laufen (Pfade); Aus über Einstellung encryption_auto_migrate = 'false'.
     blobOutbox.start(); // läuft immer (auch ohne Key): räumt alte Blobs nach Abbrüchen ab
-    if (cryptoStore.isEnabled() && (await getSetting('encryption_auto_migrate')) !== 'false') encMigration.start();
+    if (cryptoStore.isEnabled() && (await getSetting('encryption_auto_migrate')) !== 'false') { encMigration.start(); colMigration.start(); }
     logVersionStatus();
     const server = app.listen(PORT, () => {
       console.log(`myCloud app is running on ${EXPECTED_ORIGIN}`);
