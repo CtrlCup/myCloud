@@ -157,9 +157,7 @@ isEncrypted(path)                            → exakte Magic-Bytes (nur Migrati
   Löschen alter Blobs läuft über die Outbox `pending_blob_deletes` (`app/blob-outbox.js`): `swapFileBlob` trägt den alten Pfad in
   derselben Transaktion wie den Pfad-Swap ein, nach dem Commit löscht `tryDeleteBlob` und entfernt den Eintrag; ein Worker
   (beim Start und alle 10 Minuten, immer aktiv) räumt Reste nach Abstürzen ab und löscht nur Pfade, die weder `files.path`
-  noch `users.avatar_path` noch ein Branding-Setting referenziert. Der neue Blob der Migration wird vor dem Umbenennen
-  ebenfalls vorgemerkt, sodass auch das Fenster Umbenennen/Commit abgedeckt ist (bleibt der Blob referenziert, wird nur der
-  Eintrag entfernt). Unverändert bleiben Reste, die nie in der Outbox standen (z. B. Absturz mitten in `writeEncrypted`):
+  noch `users.avatar_path` noch ein Branding-Setting referenziert. Alle Sofort-Löschstellen (`tryDeleteBlob`, Papierkorb, Ersetzen, Einmal-Notizen, Benutzer löschen) gehen über denselben Referenz-Re-Check. Die Outbox enthält ausschließlich alte, bereits entkoppelte Pfade (UUID-eindeutig, nie wieder vergeben); der NEUE Blob der Migration steht nie darin. Bricht der Prozess zwischen Umbenennen und Swap ab, bleibt höchstens ein verwaister verschlüsselter Blob (Speicherverschwendung, kein Klartext-Leck). Einträge mit Verzeichnis-Pfad werden verworfen, nach 20 Fehlversuchen mit Warnung ebenfalls. Reste ohne Outbox-Eintrag (z. B. Absturz mitten in `writeEncrypted`):
   `<name>.tmp-`/`.enc-tmp-`-Dateien entfernt `sweepOrphans` nach 1 h. P4 kann am Worker über `isBlocked` ("backup_in_progress")
   einhängen. Zeilen mit fehlender oder abweichender `size` zählen als `failed` und brauchen eine manuelle Prüfung. Steuerung:
   `MYCLOUD_MIGRATION_CONCURRENCY`, `MYCLOUD_MIGRATION_PAUSE_MS`, Einstellung `encryption_auto_migrate` (nur als DB-Setting).

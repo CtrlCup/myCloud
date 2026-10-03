@@ -119,14 +119,23 @@ function deleteBlob(blobPath) {
 }
 // Löschen eines ALTEN Blobs nach erfolgreichem DB-Commit: ein Fehler (EPERM/EIO) darf den neuen, bereits
 // referenzierten Blob nie gefährden. Ein verwaister alter Blob ist besser als ein verlorener neuer.
-function tryDeleteBlob(blobPath) {
-  try { deleteBlob(blobPath); } catch (e) { console.error(`Alter Blob konnte nicht gelöscht werden (${path.basename(blobPath)}):`, e.message); return; }
-  // Gelöscht: Outbox-Eintrag (falls swapFileBlob/hardDelete einen angelegt hat) entfernen; ein Fehler hier ist harmlos (Worker räumt auf).
-  pool.query('DELETE FROM pending_blob_deletes WHERE path = $1', [path.relative(UPLOADS_DIR, blobPath)]).catch(() => {});
+async function tryDeleteBlob(blobPath) {
+  // Mit Referenz-Re-Check (files.path/users.avatar_path/settings.value) und Entfernen eines evtl. Outbox-Eintrags; Fehler nur loggen,
+  // ein vorhandener Eintrag bleibt dann für den Worker liegen.
+  try { await blobOutbox.processOne(path.relative(UPLOADS_DIR, blobPath)); } catch (e) { console.error(`Alter Blob konnte nicht gelöscht werden (${path.basename(blobPath)}):`, e.message); }
 }
 // Outbox (blob-outbox.js): alte Blobs werden in der Transaktion des Umhängens/Löschens vorgemerkt und nach dem Commit gelöscht;
 // der Worker räumt Reste nach Abstürzen ab. P4-Hook: isBlocked -> "backup_in_progress" (Sicherung läuft, nichts löschen).
 const blobOutbox = createOutbox({ pool, uploadsDir: UPLOADS_DIR, deleteBlob, isBlocked: () => false });
+
+// Löscht eine files-Zeile (Datei) und danach ihren AKTUELLEN Blob: DELETE ... RETURNING path plus Outbox-Eintrag in einer Anweisung.
+async function deleteFileRowAndBlob(fileId) {
+  const del = await pool.query(
+    `WITH d AS (DELETE FROM files WHERE id = $1 RETURNING path),
+          q AS (INSERT INTO pending_blob_deletes (path) SELECT path FROM d ON CONFLICT DO NOTHING)
+     SELECT path FROM d`, [fileId]);
+  if (del.rows.length) await tryDeleteBlob(path.join(UPLOADS_DIR, del.rows[0].path));
+}
 
 // Schreib-Guard für die Key-AUS-Zweige: Eine Zeile mit enc_version > 0 darf nie in-place mit Klartext überschrieben
 // werden (der Blob wäre danach unlesbar). Wirft einen Fehler mit code ENC_NO_KEY; Routen antworten damit 409.
@@ -192,7 +201,7 @@ async function replaceBlobCow(file, input, extraCols = {}, swapOpts = {}) {
     throw err;
   }
   if (!r.ok) { try { deleteBlob(absPath); } catch { /* best-effort */ } return r; }
-  tryDeleteBlob(r.oldPath); // nach dem Commit, eigener Fehlerpfad
+  await tryDeleteBlob(r.oldPath); // nach dem Commit, eigener Fehlerpfad
   return { ...r, plainSize };
 }
 
@@ -2369,7 +2378,7 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
         return { status: 413, body: { error: swapped.error } };
       }
       committed = true; // ab hier ist der neue Blob referenziert und darf nie mehr gelöscht werden
-      tryDeleteBlob(swapped.oldPath);
+      await tryDeleteBlob(swapped.oldPath);
 
       const updatedFile = swapped.row;
       scheduleTextExtraction(currentPhysicalPath, safeMimeType, originalName, updatedFile.id, encrypted);
@@ -2704,7 +2713,7 @@ async function deleteFolderRecursive(folderId, userId) {
     [subtreeRes.rows.map(f => f.id)]
   );
   for (const file of del.rows) {
-    if (!file.is_folder) tryDeleteBlob(path.join(UPLOADS_DIR, file.path));
+    if (!file.is_folder) await tryDeleteBlob(path.join(UPLOADS_DIR, file.path));
   }
 }
 
@@ -2716,11 +2725,7 @@ async function hardDeleteTrashItem(file, userId) {
   if (file.is_folder) {
     await deleteFolderRecursive(file.id, userId);
   } else {
-    const del = await pool.query(
-      `WITH d AS (DELETE FROM files WHERE id = $1 RETURNING path),
-            q AS (INSERT INTO pending_blob_deletes (path) SELECT path FROM d ON CONFLICT DO NOTHING)
-       SELECT path FROM d`, [file.id]);
-    if (del.rows.length) tryDeleteBlob(path.join(UPLOADS_DIR, del.rows[0].path));
+    await deleteFileRowAndBlob(file.id);
   }
 }
 
@@ -2834,9 +2839,7 @@ app.put('/api/files/:id/rename', requireAuth, requirePermission('rename'), async
     }
 
     if (existing && onConflict === 'replace' && canReplace) {
-      const targetPhysicalPath = path.join(UPLOADS_DIR, existing.path);
-      await pool.query('DELETE FROM files WHERE id = $1', [existing.id]);
-      deleteBlob(targetPhysicalPath);
+      await deleteFileRowAndBlob(existing.id);
     }
 
     const resolvedName = (existing && onConflict === 'keep_both')
@@ -2931,9 +2934,7 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
       }
       const resolution = resolutionMap[item.id];
       if (resolution === 'replace' && conflict.canReplace) {
-        const oldTargetPhysicalPath = path.join(UPLOADS_DIR, conflict.existing.path);
-        await pool.query('DELETE FROM files WHERE id = $1', [conflict.existing.id]);
-        deleteBlob(oldTargetPhysicalPath);
+        await deleteFileRowAndBlob(conflict.existing.id);
         idsToMove.push(item.id);
       } else if (resolution === 'keep_both') {
         const uniqueName = await generateUniqueName(userId, targetFolderId, item.name, item.is_folder);
@@ -3082,14 +3083,23 @@ app.post('/api/files/copy-multiple', requireAuth, async (req, res) => {
       }
     }
 
+    // Pro Eintrag fangen: fehlende Quell-Blobs brechen den Rest nicht ab, die Fehler stehen in der Antwort (Teilkopie:
+    // bereits kopierte Dateien bleiben erhalten, bei einem Ordner die vor dem Fehler kopierten Teile).
+    const copyErrors = [];
     for (const id of parsedIds) {
-      await copyFileOrFolderRecursive(id, targetFolderId, userId);
+      try {
+        await copyFileOrFolderRecursive(id, targetFolderId, userId);
+      } catch (err) {
+        if (err.code !== 'COPY_SOURCE_MISSING') throw err;
+        copyErrors.push(err.message);
+      }
     }
+    if (copyErrors.length) return res.status(500).json({ success: false, error: copyErrors.join(' '), errors: copyErrors });
 
     res.json({ success: true });
   } catch (err) {
     console.error('Error copying multiple files:', err);
-    res.status(500).json({ error: err.code === 'COPY_SOURCE_MISSING' ? err.message : 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -3360,7 +3370,7 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
         { path: relativePath, mime_type: mimeType, size: fileSize, content: null, content_hash: newFileHash, enc_version: blob.encVersion },
         { expectPath: existing.path });
       rowCommitted = true;
-      tryDeleteBlob(swapped.oldPath);
+      await tryDeleteBlob(swapped.oldPath);
       return res.status(200).json(swapped.row);
     }
 
@@ -3483,7 +3493,7 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
     console.error('Error creating one-time note:', err);
     cleanupAttachments();
     // Halbfertige Notiz entfernen: Blobs, Container-Ordner samt Kind-Zeilen bzw. die einzelne Notiz-Zeile
-    for (const p of createdBlobs) tryDeleteBlob(p);
+    for (const p of createdBlobs) await tryDeleteBlob(p);
     if (containerFileId) await pool.query('DELETE FROM files WHERE id = $1 OR parent_id = $1', [containerFileId]).catch(() => {});
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -3668,7 +3678,7 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
       return res.status(413).json({ error: swapped.error });
     }
     committed = true;
-    tryDeleteBlob(swapped.oldPath);
+    await tryDeleteBlob(swapped.oldPath);
 
     res.json({ success: true, size: req.file.size });
   } catch (err) {
@@ -5218,7 +5228,7 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', preCheckPublicBinaryS
       return res.status(413).json({ error: swapped.error });
     }
     committed = true;
-    tryDeleteBlob(swapped.oldPath);
+    await tryDeleteBlob(swapped.oldPath);
 
     res.json({ success: true, size: req.file.size });
   } catch (err) {
@@ -5602,7 +5612,7 @@ app.post('/api/public/shares/:slug/file', async (req, res) => {
         [finalName, relativePath, targetFolderId, baseFile.owner_id, blob.encVersion ? blob.sha256 : null, blob.encVersion]
       );
     } catch (e) {
-      tryDeleteBlob(blobPath); // nicht referenzierten Blob nicht liegen lassen
+      await tryDeleteBlob(blobPath); // nicht referenzierten Blob nicht liegen lassen
       throw e;
     }
     res.status(201).json(result.rows[0]);
@@ -5667,7 +5677,7 @@ app.post('/api/public/shares/:slug/paste', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Public paste error:', err);
-    res.status(500).json({ error: 'Internal server error.' });
+    res.status(500).json({ error: err.code === 'COPY_SOURCE_MISSING' ? err.message : 'Internal server error.' });
   }
 });
 
@@ -6838,12 +6848,25 @@ app.post('/api/settings/admin/users/:id', requireAdmin, async (req, res) => {
   try {
     if (action === 'delete') {
       // Find files of user and remove physical files
-      const filesRes = await pool.query('SELECT path FROM files WHERE owner_id = $1 AND is_folder = false', [targetUserId]);
-      for (const file of filesRes.rows) {
-        deleteBlob(path.join(UPLOADS_DIR, file.path));
+      // Blob-Pfade (und Avatar) in derselben Transaktion wie das Löschen des Nutzers (FK-Cascade auf files) in die Outbox
+      const client = await pool.connect();
+      let doomed = [];
+      try {
+        await client.query('BEGIN');
+        const filesRes = await client.query('SELECT path FROM files WHERE owner_id = $1 AND is_folder = false', [targetUserId]);
+        const avRes = await client.query('SELECT avatar_path FROM users WHERE id = $1', [targetUserId]);
+        doomed = filesRes.rows.map(f => f.path);
+        if (avRes.rows[0] && avRes.rows[0].avatar_path) doomed.push(path.basename(avRes.rows[0].avatar_path));
+        for (const p of doomed) await blobOutbox.enqueue(client, p);
+        await client.query('DELETE FROM users WHERE id = $1', [targetUserId]);
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally {
+        client.release();
       }
-      
-      await pool.query('DELETE FROM users WHERE id = $1', [targetUserId]);
+      for (const p of doomed) await tryDeleteBlob(path.join(UPLOADS_DIR, p));
       return res.json({ success: true, message: 'Benutzer und alle seine Dateien wurden gelöscht.' });
     } else if (action === 'quota') {
       // (previously used `req.body.quotaBytes ? ... : null`, which silently treated an explicit
@@ -7027,8 +7050,7 @@ setInterval(async () => {
           if (file.is_folder) {
             await deleteFolderRecursive(file.id, file.owner_id);
           } else {
-            deleteBlob(path.join(UPLOADS_DIR, file.path));
-            await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+            await deleteFileRowAndBlob(file.id);
           }
           console.log(`Background clean: Expired self-destruct note ${file.name} deleted.`);
           continue;
@@ -7118,8 +7140,7 @@ app.post('/api/public/shares/:slug/burn', async (req, res) => {
           if (file.is_folder) {
             await deleteFolderRecursive(file.id, file.owner_id);
           } else {
-            deleteBlob(path.join(UPLOADS_DIR, file.path));
-            await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+            await deleteFileRowAndBlob(file.id);
           }
           console.log(`Self-destructed one-time note share ${slug} immediately via burn call.`);
         }
@@ -7151,8 +7172,7 @@ setInterval(async () => {
         if (file.is_folder) {
           await deleteFolderRecursive(file.id, file.owner_id);
         } else {
-          deleteBlob(path.join(UPLOADS_DIR, file.path));
-          await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+          await deleteFileRowAndBlob(file.id);
         }
         console.log(`Self-destructed expired one-time note share ${share.slug} (ID: ${file.id}) due to lost heartbeat.`);
       } else {

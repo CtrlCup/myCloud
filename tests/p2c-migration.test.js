@@ -27,7 +27,7 @@ function fakeEnv({ store = cryptoStore, swapHook, newBlobHook } = {}) {
   const rows = new Map();
   const users = new Map();
   const outboxRows = new Set();
-  const state = { failDelete: false };
+  const state = { failDelete: false, attempts: {} };
   const silent = { log() {}, error() {} };
   const run = async (sql, p) => {
     if (sql.startsWith('SELECT id, owner_id')) return { rows: [...rows.values()].filter((r) => r.enc_version == null && r.id > p[0]).sort((a, b) => a.id - b.id).slice(0, p[1]) };
@@ -51,15 +51,16 @@ function fakeEnv({ store = cryptoStore, swapHook, newBlobHook } = {}) {
       return { rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO pending_blob_deletes')) { outboxRows.add(p[0]); return { rowCount: 1 }; }
+    if (sql.startsWith('UPDATE pending_blob_deletes')) { state.attempts[p[0]] = (state.attempts[p[0]] || 0) + 1; return { rows: [{ attempts: state.attempts[p[0]] }] }; }
     if (sql.startsWith('DELETE FROM pending_blob_deletes')) { outboxRows.delete(p[0]); return { rowCount: 1 }; }
     if (sql.startsWith('SELECT path FROM pending_blob_deletes')) return { rows: [...outboxRows].map((x) => ({ path: x })) };
     if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) return {};
     throw new Error('unerwartetes SQL: ' + sql);
   };
   const pool = { query: run, connect: async () => ({ query: run, release() {} }) };
-  const blobOutbox = createOutbox({ pool, uploadsDir: dir, deleteBlob: (abs) => fs.rmSync(abs, { force: true }), minAgeMs: 0, log: silent });
+  const blobOutbox = createOutbox({ pool, uploadsDir: dir, deleteBlob: (abs) => { if (state.deleteHook) state.deleteHook(abs); fs.rmSync(abs, { force: true }); }, minAgeMs: 0, log: silent });
   const swapFileBlob = async (id, cols, opts) => {
-    if (swapHook) swapHook(rows.get(id));
+    if (swapHook) await swapHook(rows.get(id));
     const r = rows.get(id);
     if (!r) throw new Error('weg');
     if (opts.expectPath !== undefined && r.path !== opts.expectPath) throw new Error('geändert');
@@ -75,7 +76,7 @@ function fakeEnv({ store = cryptoStore, swapHook, newBlobHook } = {}) {
     if (newBlobHook) newBlobHook(out);
     return out;
   };
-  const tryDeleteBlob = (p) => { if (state.failDelete) return; fs.rmSync(p, { force: true }); outboxRows.delete(path.relative(dir, p)); };
+  const tryDeleteBlob = async (p) => { if (state.failDelete) return; await blobOutbox.processOne(path.relative(dir, p)); };
   const mig = createMigration({
     pool, cryptoStore: store, uploadsDir: dir, thumbnailsDir: path.join(dir, 'thumbnails'),
     swapFileBlob, tryDeleteBlob, newBlobPath, log: silent, pauseMs: 0, blobOutbox, detectAvatarExt: async () => 'png',
@@ -311,6 +312,85 @@ test('Outbox-Worker: referenzierter Pfad bleibt, unreferenzierter wird gelöscht
     assert.strictEqual(env.outboxRows.size, 0);
     fs.rmSync(outside);
     blocked = false;
+  } finally { env.cleanup(); }
+});
+
+test('MUSS 1: der neue Migrations-Blob steht nie in der Outbox, auch nicht bei langsamem Swap mit parallelem Worker', async () => {
+  let seen;
+  const env = fakeEnv({
+    swapHook: async () => {
+      // Der Swap hängt (Lock-Wait): der Worker läuft mit Mindestalter 0 über alles, was in der Outbox steht
+      seen = { outbox: [...env.outboxRows], files: env.files() };
+      await env.blobOutbox.sweep(0);
+    },
+  });
+  try {
+    const data = crypto.randomBytes(8000);
+    const row = env.addPlain(1, data);
+    assert.strictEqual(await env.mig.migrateFile({ ...row }), 'migrated');
+    assert.deepStrictEqual(seen.outbox, [], 'vor dem Swap ist die Outbox leer');
+    assert.strictEqual(seen.files.length, 2, 'Alt- und Neu-Blob liegen vor dem Swap');
+    assert.ok((await readAll(path.join(env.dir, env.rows.get(1).path))).equals(data), 'neuer Blob unversehrt und lesbar');
+    assert.strictEqual(env.files().length, 1);
+  } finally { env.cleanup(); }
+});
+
+test('Outbox: junge Einträge werden übersprungen (Mindestalter)', async () => {
+  const env = fakeEnv();
+  try {
+    const young = createOutbox({
+      pool: { query: async (sql, p) => { assert.ok(/created_at < NOW\(\) - \(\$1::int/.test(sql)); assert.strictEqual(p[0], 60000); return { rows: [] }; } },
+      uploadsDir: env.dir, deleteBlob: () => assert.fail('nicht löschen'), log: { log() {}, error() {} },
+    });
+    const r = await young.sweep();
+    assert.strictEqual(r.deleted, 0);
+  } finally { env.cleanup(); }
+});
+
+test('Outbox: Eintrag mit noch referenziertem Pfad löscht den Blob nicht (nur den Eintrag); Fenster zwischen Re-Check und unlink ist in blob-outbox.js dokumentiert', async () => {
+  const env = fakeEnv();
+  try {
+    const row = env.addPlain(1, Buffer.from('x'));
+    env.outboxRows.add(row.path);
+    const r = await env.blobOutbox.sweep(0);
+    assert.strictEqual(r.referenced, 1);
+    assert.ok(fs.existsSync(path.join(env.dir, row.path)));
+    assert.strictEqual(env.outboxRows.size, 0);
+  } finally { env.cleanup(); }
+});
+
+test('Outbox: Verzeichnis als Eintrag wird verworfen, Symlink nur als Link entfernt (Ziel bleibt), Fehlversuche werden gezählt und nach 20 verworfen', async () => {
+  const env = fakeEnv();
+  try {
+    fs.mkdirSync(path.join(env.dir, '1', 'ordner.bin'), { recursive: true });
+    fs.writeFileSync(path.join(env.dir, 'ziel.txt'), 'bleibt');
+    fs.symlinkSync(path.join(env.dir, 'ziel.txt'), path.join(env.dir, '1', 'link.bin'));
+    env.outboxRows.add('1/ordner.bin'); env.outboxRows.add('1/link.bin');
+    const r = await env.blobOutbox.sweep(0);
+    assert.deepStrictEqual([r.dropped, r.deleted], [1, 1]);
+    assert.ok(fs.existsSync(path.join(env.dir, '1', 'ordner.bin')), 'Verzeichnis unangetastet');
+    assert.ok(fs.existsSync(path.join(env.dir, 'ziel.txt')), 'Symlink-Ziel unangetastet');
+    assert.ok(!fs.existsSync(path.join(env.dir, '1', 'link.bin')));
+    // Fehlversuche: unlink wirft
+    fs.writeFileSync(path.join(env.dir, '1', 'zaeh.bin'), 'x');
+    env.outboxRows.add('1/zaeh.bin');
+    env.state.deleteHook = () => { throw new Error('EIO'); };
+    for (let i = 0; i < 19; i++) await env.blobOutbox.sweep(0);
+    assert.ok(env.outboxRows.has('1/zaeh.bin'), 'nach 19 Versuchen noch da');
+    await env.blobOutbox.sweep(0);
+    assert.ok(!env.outboxRows.has('1/zaeh.bin'), 'nach 20 Versuchen verworfen');
+  } finally { env.cleanup(); }
+});
+
+test('Altlast mit geteiltem Pfad: tryDeleteBlob löscht keinen noch referenzierten Blob', async () => {
+  const env = fakeEnv();
+  try {
+    const a = env.addPlain(1, crypto.randomBytes(100));
+    const shared = a.path;
+    env.rows.set(2, { id: 2, owner_id: 1, name: 'g.bin', path: shared, size: 100, enc_version: null });
+    await env.mig.migrateFile({ ...a });
+    assert.ok(fs.existsSync(path.join(env.dir, shared)), 'Blob bleibt, Zeile 2 referenziert ihn noch');
+    assert.strictEqual(env.rows.get(2).path, shared);
   } finally { env.cleanup(); }
 });
 

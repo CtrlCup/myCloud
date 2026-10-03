@@ -8,16 +8,28 @@
  * (beim Start und danach alle 10 Minuten) die Reste ab. Einträge jünger als `minAgeMs` fasst er nicht an, dort läuft das
  * Löschen des Aufrufers noch.
  *
+ * INVARIANTE: Einträge sind ausschließlich alte, bereits vom Swap/DELETE entkoppelte Pfade. Pfade sind UUID-eindeutig und
+ * werden nie wieder vergeben; ein einmal unreferenzierter Pfad wird daher nie wieder referenziert. Neue Blobs (z. B. der der
+ * Migration vor dem Swap) stehen NIE in der Outbox: ein Absturz hinterlässt dort höchstens einen Orphan aus Chiffrat
+ * (Speicherverschwendung, kein Klartext-Leck), den bei `.enc-tmp-`-Staging-Resten `sweepOrphans` abräumt.
+ *
  * Re-Check unmittelbar vor dem Löschen: der Pfad wird NIE gelöscht, solange er noch referenziert ist. Alle Spalten in
  * db.js, die Blob-Pfade enthalten (Stand P2c, geprüft): files.path (Blobs im Benutzerordner), users.avatar_path
  * (Dateiname im Upload-Root), settings.value für cloud_icon_path/seo_image_path/Hintergrund-Bilder (Dateiname im
  * Upload-Root). file_versions (nur Text in `content`), shares, api_keys, passkeys, roles, sessions enthalten keine Pfade.
- * Referenziert wird per Gleichheit mit dem Pfad; ist er referenziert, wird nur der Eintrag entfernt.
+ * Referenziert wird per Gleichheit mit dem Pfad; ist er referenziert, wird nur der Eintrag entfernt. Re-Check und unlink liegen
+ * direkt hintereinander (kein Advisory-Lock): Wegen der UUID-Eindeutigkeit gibt es kein legitimes Neu-Referenzieren eines
+ * Eintrags-Pfads, ein Lock würde nur Altlast mit geteiltem Pfad nicht besser schützen (die fängt der Re-Check ab).
+ * Verzeichnisse als Pfad werden verworfen, Symlinks wird nur der Link selbst entfernt (nie das Ziel). Nach MAX_ATTEMPTS
+ * Fehlversuchen wird ein Eintrag mit Warnung verworfen.
  *
  * P4-Hook: `isBlocked()` (z. B. "backup_in_progress") lässt den Worker pausieren, ohne Einträge zu verlieren.
  * Eine laufende Sicherung darf so nie einen Blob verlieren, den sie noch lesen will.
  */
+const fs = require('fs');
 const path = require('path');
+
+const MAX_ATTEMPTS = 20;
 
 function createOutbox({ pool, uploadsDir, deleteBlob, isBlocked = () => false, minAgeMs = 60000, log = console }) {
   const root = path.resolve(uploadsDir);
@@ -37,6 +49,13 @@ function createOutbox({ pool, uploadsDir, deleteBlob, isBlocked = () => false, m
     const abs = path.resolve(root, relPath);
     if (!abs.startsWith(root + path.sep)) { // Eintrag zeigt aus dem Upload-Verzeichnis heraus: nie löschen
       await pool.query('DELETE FROM pending_blob_deletes WHERE path = $1', [relPath]);
+      return 'dropped';
+    }
+    let st = null;
+    try { st = fs.lstatSync(abs); } catch { /* fehlt: ENOENT ist erledigt */ }
+    if (st && st.isDirectory()) {
+      log.error(`Blob-Outbox: ${relPath} ist ein Verzeichnis, Eintrag verworfen.`);
+      await dequeue(relPath);
       return 'dropped';
     }
     const ref = await pool.query(
@@ -64,7 +83,17 @@ function createOutbox({ pool, uploadsDir, deleteBlob, isBlocked = () => false, m
         [ageMs]);
       for (const r of rows) {
         if (isBlocked()) break;
-        try { out[await processOne(r.path)]++; } catch (e) { out.failed++; log.error(`Blob-Outbox: ${r.path} nicht gelöscht: ${e.message}`); }
+        try { out[await processOne(r.path)]++; } catch (e) {
+          out.failed++;
+          log.error(`Blob-Outbox: ${r.path} nicht gelöscht: ${e.message}`);
+          try {
+            const a = await pool.query('UPDATE pending_blob_deletes SET attempts = attempts + 1 WHERE path = $1 RETURNING attempts', [r.path]);
+            if (a.rows[0] && a.rows[0].attempts >= MAX_ATTEMPTS) {
+              log.error(`WARNUNG Blob-Outbox: ${r.path} nach ${MAX_ATTEMPTS} Versuchen verworfen, bitte manuell prüfen.`);
+              await dequeue(r.path);
+            }
+          } catch { /* beim nächsten Lauf erneut */ }
+        }
       }
     } catch (e) {
       log.error('Blob-Outbox-Sweep fehlgeschlagen:', e.message);

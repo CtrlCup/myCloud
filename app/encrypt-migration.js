@@ -90,12 +90,9 @@ function createMigration(deps) {
       if (res.plainSize !== expectedSize) throw new Error(`Größe ${res.plainSize} weicht von files.size ${expectedSize} ab`);
       const v = await hashStream(cryptoStore.createDecryptStream(staging, { encrypted: true }));
       if (v.sha256 !== res.sha256 || v.size !== res.plainSize) throw new Error('Verifikation des neuen Blobs fehlgeschlagen');
-      // Vor dem Umbenennen vormerken: stirbt der Prozess bis zum Swap, löscht der Outbox-Worker den (dann unreferenzierten) Blob.
-      await blobOutbox.enqueue(pool, relativePath);
       await fsp.rename(staging, absPath);
     } catch (e) {
       await unlinkQuiet(staging);
-      await blobOutbox.dequeue(relativePath).catch(() => {});
       log.error(`Migration: Datei ${row.id} nicht migriert: ${e.message}`);
       return 'failed';
     }
@@ -105,16 +102,13 @@ function createMigration(deps) {
       swapped = await swapFileBlob(row.id, { path: relativePath, enc_version: 1, content_hash: res.sha256 }, { expectPath: row.path });
     } catch (e) {
       await unlinkQuiet(absPath);
-      await blobOutbox.dequeue(relativePath).catch(() => {});
       const cur = (await pool.query('SELECT path, enc_version FROM files WHERE id = $1', [row.id])).rows[0];
       if (!cur || cur.path !== row.path || cur.enc_version != null) return 'skipped'; // zwischenzeitlich bearbeitet/gelöscht
       throw e;
     }
-    if (!swapped.ok) { await unlinkQuiet(absPath); await blobOutbox.dequeue(relativePath).catch(() => {}); return 'skipped'; }
-    await blobOutbox.dequeue(relativePath).catch(() => {}); // jetzt referenziert
-    // Nur löschen, wenn kein anderer Eintrag denselben Blob referenziert
-    const shared = await pool.query('SELECT 1 FROM files WHERE path = $1 AND id <> $2 LIMIT 1', [row.path, row.id]);
-    if (!shared.rows.length) tryDeleteBlob(swapped.oldPath);
+    if (!swapped.ok) { await unlinkQuiet(absPath); return 'skipped'; }
+    // Der NEUE Blob steht nie in der Outbox (siehe blob-outbox.js). Löschen des alten mit Referenz-Re-Check (tryDeleteBlob).
+    await tryDeleteBlob(swapped.oldPath);
     return 'migrated';
   }
 
@@ -153,7 +147,7 @@ function createMigration(deps) {
         throw e;
       } finally { client.release(); }
       if (!swapped) { await unlinkQuiet(newAbs); return; }
-      tryDeleteBlob(oldAbs);
+      await tryDeleteBlob(oldAbs);
       stats.avatarsMigrated++;
     } catch (e) {
       await unlinkQuiet(newAbs);

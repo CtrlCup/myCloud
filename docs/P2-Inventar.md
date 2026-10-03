@@ -130,3 +130,8 @@ P2b ist erledigt: Schreibpfade sind Copy-on-Write, damit darf P2c (Migration) la
   `settings.value` und hat den Hook `isBlocked` für das spätere "backup_in_progress" (P4).
 - Der Adopt-Pfad der Migration behandelt Blobs mit Magic, die sich nicht vollständig entschlüsseln lassen, als Klartext.
 - `copyFileOrFolderRecursive`: fehlt der Quell-Blob, wird die Zeile einmal neu gelesen, sonst kommt ein deutscher Fehler (500).
+- **Zweite Nachbesserung:** Der neue Migrations-Blob steht nie in der Outbox (Orphan nach Absturz = nur Chiffrat). `tryDeleteBlob` ist `async`
+  und nutzt `blobOutbox.processOne` (Referenz-Re-Check gegen `files.path`/`users.avatar_path`/`settings.value`); Ersetzen/Einmal-Notizen
+  (`deleteFileRowAndBlob`) und Benutzer löschen (Pfade und Avatar transaktional in die Outbox) laufen ebenfalls darüber. `copy-multiple`
+  fängt fehlende Quell-Blobs pro Eintrag (Teilkopie, Fehlerliste in `errors`), die Share-Kopie meldet den deutschen Text.
+  Outbox: `created_at` TIMESTAMPTZ, Spalte `attempts` (Verwerfen nach 20).
