@@ -23,6 +23,7 @@ const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 
 const { withDbRetry } = require('./db-retry');
 const cryptoStore = require('./crypto-store');
+const { createMigration } = require('./encrypt-migration');
 const fileDelivery = require('./file-delivery');
 const { isEncRow } = fileDelivery;
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
@@ -6477,6 +6478,47 @@ app.post('/api/settings/admin/faststart-backfill', requireAdmin, async (req, res
   res.json({ started: true });
 });
 
+// Verschlüsselungs-Migration (P2c): Klartext-Altbestand -> verschlüsselte Blobs, Details in encrypt-migration.js.
+// Läuft nur bei aktivem Master-Key; Laufstatus nur im Speicher, die Zähler kommen per COUNT aus files.enc_version.
+const encMigration = createMigration({
+  pool, cryptoStore, uploadsDir: UPLOADS_DIR, thumbnailsDir: THUMBNAILS_DIR,
+  swapFileBlob, tryDeleteBlob, newBlobPath, detectAvatarExt: detectAvatarImageExt,
+});
+
+app.get('/api/settings/admin/encryption-status', requireAdmin, denyApiKey, async (req, res) => {
+  try {
+    const c = await pool.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE enc_version > 0)::int AS encrypted,
+              COUNT(*) FILTER (WHERE enc_version IS NULL)::int AS plain
+       FROM files WHERE is_folder = false`);
+    const enabled = cryptoStore.isEnabled();
+    res.json({
+      enabled,
+      keyId: cryptoStore.getCurrentKeyId(),
+      ...c.rows[0],
+      ...encMigration.getState(),
+      autoMigrate: (await getSetting('encryption_auto_migrate')) !== 'false',
+    });
+  } catch (err) {
+    console.error('Error fetching encryption status:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/settings/admin/encryption-migration', requireAdmin, denyApiKey, (req, res) => {
+  if (!cryptoStore.isEnabled()) {
+    return res.status(409).json({ error: 'Die Verschlüsselung ist nicht aktiviert (kein Master-Key konfiguriert).' });
+  }
+  const action = req.body && req.body.action;
+  if (action === 'start') {
+    if (!encMigration.start()) return res.status(409).json({ error: 'Die Migration läuft bereits.' });
+    return res.json({ started: true });
+  }
+  if (action === 'stop') return res.json({ stopping: encMigration.stop() });
+  res.status(400).json({ error: 'Ungültige Aktion (start oder stop erwartet).' });
+});
+
 // Admin test SMTP connection
 app.post('/api/settings/admin/test-smtp', requireAdmin, async (req, res) => {
   const { to } = req.body;
@@ -7372,6 +7414,8 @@ withDbRetry(initDb)
     // it before the server accepts any request rules out any window where a request could race an
     // in-progress move for a given file.
     await migrateUploadsToPerUserFolders();
+    // Muss nach migrateUploadsToPerUserFolders() laufen (Pfade); Aus über Einstellung encryption_auto_migrate = 'false'.
+    if (cryptoStore.isEnabled() && (await getSetting('encryption_auto_migrate')) !== 'false') encMigration.start();
     logVersionStatus();
     const server = app.listen(PORT, () => {
       console.log(`myCloud app is running on ${EXPECTED_ORIGIN}`);

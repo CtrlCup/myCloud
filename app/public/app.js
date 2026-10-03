@@ -903,6 +903,10 @@ function closeSettingsOrAdmin() {
     clearInterval(faststartPollTimer);
     faststartPollTimer = null;
   }
+  if (encPollTimer) {
+    clearInterval(encPollTimer);
+    encPollTimer = null;
+  }
 }
 
 document.getElementById('back-to-dashboard-btn').onclick = () => {
@@ -5027,6 +5031,67 @@ document.getElementById('admin-faststart-backfill-btn')?.addEventListener('click
   }
 });
 
+/* ─── Verschlüsselung (Admin) ─── */
+let encPollTimer = null;
+const ENC_HINT = 'Ohne Master-Key sind die Daten verloren. Sichere den Recovery-Code. Alte Backups und Snapshots enthalten weiterhin Klartext. Details: docs/Verschluesselung-und-Backup.md und README, Abschnitt „Verschlüsselung (optional)“.';
+
+function renderEncryptionStatus(d) {
+  const statusEl = document.getElementById('admin-enc-status');
+  const wrap = document.getElementById('admin-enc-progress-wrap');
+  const btn = document.getElementById('admin-enc-btn');
+  const hint = document.getElementById('admin-enc-hint');
+  if (!statusEl || !btn) return;
+  hint.textContent = ENC_HINT;
+  if (!d.enabled) {
+    statusEl.innerHTML = '<strong>Nicht aktiviert.</strong> Es ist kein Master-Key konfiguriert, Dateien werden unverschlüsselt gespeichert. Anleitung: README, Abschnitt „Verschlüsselung (optional)“ (Key erzeugen, Recovery-Code sichern, Docker-Secret aktivieren).';
+    wrap.style.display = 'none';
+    btn.style.display = 'none';
+    return;
+  }
+  const pct = d.total > 0 ? Math.round((d.encrypted / d.total) * 100) : 100;
+  statusEl.innerHTML = `Master-Key aktiv: <strong>ja</strong> (Key-ID ${escapeHtml(String(d.keyId))}). ` +
+    (d.running ? `Migration läuft…${d.current ? ' (gerade: ' + escapeHtml(d.current) + ')' : ''}` : (d.plain > 0 ? `${d.plain} Datei(en) noch unverschlüsselt.` : 'Alle Dateien sind verschlüsselt.'));
+  wrap.style.display = 'block';
+  document.getElementById('admin-enc-progress').style.width = pct + '%';
+  document.getElementById('admin-enc-counts').textContent =
+    `${d.encrypted} von ${d.total} verschlüsselt (${pct} %), ${d.plain} offen, ${d.missing} fehlend, ${d.failed} fehlgeschlagen. Thumbnails entfernt: ${d.thumbnailsRemoved}, Avatare migriert: ${d.avatarsMigrated}.`;
+  btn.style.display = 'inline-flex';
+  btn.dataset.action = d.running ? 'stop' : 'start';
+  btn.textContent = d.running ? 'Migration stoppen' : 'Migration starten';
+}
+
+async function loadEncryptionStatus() {
+  try {
+    const res = await fetch('/api/settings/admin/encryption-status');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderEncryptionStatus(data);
+    const visible = document.getElementById('admin-system')?.classList.contains('active');
+    if ((data.running || visible) && !encPollTimer) {
+      encPollTimer = setInterval(loadEncryptionStatus, 3000);
+    } else if (!data.running && !visible && encPollTimer) {
+      clearInterval(encPollTimer);
+      encPollTimer = null;
+    }
+  } catch (err) {
+    console.error('Error loading encryption status:', err);
+  }
+}
+
+document.getElementById('admin-enc-btn')?.addEventListener('click', async (e) => {
+  try {
+    const res = await fetch('/api/settings/admin/encryption-migration', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: e.currentTarget.dataset.action }),
+    });
+    if (!res.ok) showToast((await res.json().catch(() => ({}))).error || 'Fehler bei der Migration.');
+    loadEncryptionStatus();
+  } catch (err) {
+    showToast('Verbindungsfehler.');
+  }
+});
+
 async function loadAdminSettings() {
   try {
     const res = await fetch('/api/settings');
@@ -5036,6 +5101,7 @@ async function loadAdminSettings() {
       const conf = data.adminConfig;
       loadVersionStatus();
       loadFaststartStatus();
+      loadEncryptionStatus();
 
       // Branding Sektion befüllen
       document.getElementById('admin-cloud-name').value = conf.cloud_name || 'myCloud';

@@ -1,11 +1,11 @@
 # P2-Inventar: Stellen, die Datei-Blobs lesen oder schreiben
 
-Stand: Phase P2b (Schreibpfade). Zeilennummern in den P2a-Tabellen beziehen sich auf `app/server.js` nach P2a und dienen nur der
+Stand: Phase P2c (Migration, damit P2 abgeschlossen). Zeilennummern in den P2a-Tabellen beziehen sich auf `app/server.js` nach P2a und dienen nur der
 Orientierung. Grundlage: `docs/Verschluesselung-und-Backup.md` 3.4/3.5. `enc` meint `files.enc_version > 0`
 (Spalte, nie Heuristik), "Thumb" meint den Suffix `.enc`.
 
-Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt, alle Schreibpfade in P2b**. Offen ist die Migration
-bestehender Dateien (P2c).
+Ergebnis: **alle Lese-/Auslieferungsstellen sind in P2a umgestellt, alle Schreibpfade in P2b**. Die Migration
+bestehender Dateien (P2c) ist ebenfalls erledigt.
 
 ## Auslieferung (Bytes an den Client)
 
@@ -63,7 +63,7 @@ Ohne Master-Key bleibt jedes Verhalten wie vorher (Klartext, `enc_version` NULL,
 | Thumbnail-Erzeugung | abgeleiteter Klartext | erledigt: bei aktivem Key schreiben ffmpeg/rsvg/exiftool in ein tmpfs-Temp-Verzeichnis, daraus `<name>.enc` (`writeEncrypted`), Temp wird gelöscht; Ersetzen/Löschen entfernt `<name>` und `<name>.enc` mit |
 | Avatar-Upload / -Auslieferung | Schreiben/Lesen | erledigt: bei aktivem Key `<uuid>.<ext>.enc` (Magic-Bytes aus dem entschlüsselten Anfang, Endungs-Allowlist und `setFileServeHeaders` aus #52 gelten weiter); die Auslieferung entscheidet am Suffix `.enc`, ältere Klartext-Avatare bleiben lesbar. Keine neue Spalte |
 | Branding-Assets (Logo, Hintergründe, SEO-Bild) | Schreiben | **bewusst Klartext** (`uploadSinglePlain`): sie werden öffentlich ausgeliefert (Login-Seite, Link-Vorschau, ohne Anmeldung), enthalten keinen vertraulichen Inhalt und liegen nicht in `files` |
-| Migration (idempotent, fortsetzbar, Admin-Fortschritt) | Bestand | P2c, noch offen (siehe Konzept 3.5) |
+| Migration (idempotent, fortsetzbar, Admin-Fortschritt) | Bestand | P2c erledigt: `app/encrypt-migration.js` (Dateien inkl. Papierkorb, Klartext-Thumbnails löschen, Avatare nach `.enc`), `GET /api/settings/admin/encryption-status`, `POST /api/settings/admin/encryption-migration`, Karte „Verschlüsselung“ in den Systemeinstellungen. `files.content`/`file_versions.content` bleiben Klartext (P3), `tmp-chunked`-Reste räumt der Start-Sweep ab |
 
 **Entscheidung Chunked-Upload (Variante A):** Jeder Chunk wird als eigener kleiner verschlüsselter Blob (`writeEncrypted`, atomar
 ersetzt, ein wiederholter Chunk überschreibt ihn) in `tmp-chunked/<uploadId>/<index>` abgelegt. Beim Zusammenbau werden die
@@ -98,7 +98,7 @@ Auch die Ausgabe-Temp-Dateien (Thumbnails, Remux) liegen nur im tmpfs (`withPriv
 
 ## Reihenfolge
 
-P2b ist erledigt: Schreibpfade sind Copy-on-Write, damit darf P2c (Migration) laufen. Bekannte Lücke bis P2c: Klartext-Thumbnails, die vor dem Aktivieren des Keys entstanden sind, bleiben bis zum Ersetzen/Löschen der Datei als Klartext liegen (P2c soll sie mit migrieren oder löschen).
+P2b ist erledigt: Schreibpfade sind Copy-on-Write, damit darf P2c (Migration) laufen. Klartext-Thumbnails aus der Zeit vor dem Key werden von der Migration (P2c) gelöscht.
 
 ## Nachbesserung P2b (Review)
 

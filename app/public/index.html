@@ -966,6 +966,19 @@
                 <i data-lucide="film" style="width: 14px; height: 14px;"></i> Bestehende Videos optimieren
               </button>
             </div>
+
+            <div class="card" style="background: rgba(0,0,0,0.15); margin-top: 2rem;">
+              <h3>Verschlüsselung</h3>
+              <div id="admin-enc-status" style="margin-top: 1rem; font-size: 0.85rem; color: var(--color-text-muted);">Wird geladen…</div>
+              <div id="admin-enc-progress-wrap" style="display: none; margin-top: 0.75rem;">
+                <div style="height: 8px; border-radius: 4px; background: rgba(255,255,255,0.1); overflow: hidden;">
+                  <div id="admin-enc-progress" style="height: 100%; width: 0%; background: var(--color-accent); transition: width 0.3s;"></div>
+                </div>
+                <div id="admin-enc-counts" style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--color-text-muted);"></div>
+              </div>
+              <button type="button" class="btn" id="admin-enc-btn" style="margin-top: 1rem; display: none;"></button>
+              <p id="admin-enc-hint" style="font-size: 0.8rem; color: var(--color-text-muted); margin-top: 1rem; line-height: 1.5;"></p>
+            </div>
           </section>
 
           <!-- Section 2b: Registrierung & SSO -->

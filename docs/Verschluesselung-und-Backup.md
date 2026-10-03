@@ -1,6 +1,6 @@
 # Konzept: Verschlüsselte Speicherung, Backup & Wiederherstellung
 
-Stand: 2026-10-01 · Status: **Entwurf, noch nicht umgesetzt** · Umsetzung in Phasen, siehe
+Stand: 2026-10-03 · Status: **P1 und P2 umgesetzt (inkl. Migration), P3 bis P7 offen** · Umsetzung in Phasen, siehe
 Abschnitt 8 und die GitHub-Issues mit dem Label `encryption`.
 
 Ziel: Dateien und sensible Datenbankinhalte von myCloud liegen **verschlüsselt auf der Platte**.
@@ -148,6 +148,15 @@ isEncrypted(path)                            → exakte Magic-Bytes (nur Migrati
   ersetzen, dann `enc_version = 1` setzen. Klartext- und verschlüsselte Blobs funktionieren
   während der Migration parallel (`isEncrypted()` per Magic-Bytes).
 - Fortschritt im Admin-Bereich anzeigen (wie der vorhandene Faststart-Backfill).
+- *Umsetzung (P2c, `app/encrypt-migration.js`):* Statt `rename()` über den Alt-Blob wird nie in-place geschrieben: neuer Blob
+  (neue UUID, `writeEncrypted`), Verifikation (Entschlüsseln, SHA-256, Größe gegen `files.size`), dann ein Transaktions-Swap
+  (`FOR UPDATE`, `expectPath`) von `path`/`enc_version`/`content_hash`, Löschen des Alt-Blobs erst nach dem Commit. Klartext-
+  Thumbnails werden gelöscht, Klartext-Avatare nach `<uuid>.<ext>.enc` migriert. Eine Zeile mit `enc_version NULL`, deren Blob
+  bereits vollständig mit dem aktiven Key lesbar ist (und zur Größe passt), bekommt nur die Spalte nachgezogen; ein Blob mit
+  Magic, der nicht lesbar ist, bleibt unangetastet und zählt als `failed`. Abbruch: verwaiste Staging-Blobs
+  (`<name>.enc-tmp-<hex>`) entfernt `sweepOrphans` nach 1 h; nur zwischen Umbenennen und DB-Commit könnte ein unreferenzierter
+  Blob mit endgültigem Namen zurückbleiben (Fenster von Millisekunden). Steuerung: `MYCLOUD_MIGRATION_CONCURRENCY`,
+  `MYCLOUD_MIGRATION_PAUSE_MS`, Einstellung `encryption_auto_migrate`.
 - Verschlüsselung ist **Opt-in**: Ohne konfigurierten Master-Key verhält sich die App wie heute.
 
 ## 4. Spaltenverschlüsselung in der Datenbank

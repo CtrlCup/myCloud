@@ -123,6 +123,12 @@ function isEnabled() {
   return !!getKeys();
 }
 
+/** keyId des aktuellen Schreib-Keys oder null (Verschlüsselung aus). */
+function getCurrentKeyId() {
+  const k = getKeys();
+  return k ? k.current : null;
+}
+
 /* ---------- Schlüsselableitung (Domain-Separation) ---------- */
 
 const hk = (master, info) => Buffer.from(crypto.hkdfSync('sha256', master, Buffer.alloc(0), info, 32));
@@ -592,7 +598,7 @@ async function withPrivateTempDir(fn) {
  */
 async function sweepOrphans({ uploads, tmp, chunked } = {}, { maxAgeMs = 3600000 } = {}) {
   const limit = Date.now() - maxAgeMs;
-  const fileRe = /^[0-9a-f-]{36}(\.[A-Za-z0-9]+){0,2}\.(enc-)?tmp-[0-9a-f]{12}$/;
+  const fileRe = /^[0-9a-f-]{36}(\.[A-Za-z0-9]+){0,2}(\.(enc-)?tmp-[0-9a-f]{12}){1,2}$/; // 2x: Staging-Name der Migration + writeEncrypted-tmp
   let n = 0;
   const walk = async (dir) => {
     let ents;
@@ -737,7 +743,7 @@ function parseRecoveryCode(code) {
 
 module.exports = {
   HEADER_SIZE, DEFAULT_SEG_SIZE,
-  parseKeyFile, loadMasterKeys, useKeys, isEnabled,
+  parseKeyFile, loadMasterKeys, useKeys, isEnabled, getCurrentKeyId,
   getKeyCheckValue, deriveColumnKey,
   isEncrypted, plainSizeOf,
   writeEncrypted, encryptFileInPlace, rewrapHeader, recoverRewrap, createDecryptStream, readDecrypted, withPlaintextTempFile, withPrivateTempDir, sweepOrphans,
