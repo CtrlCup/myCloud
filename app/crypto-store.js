@@ -376,6 +376,7 @@ async function writeEncrypted(filePath, input, { segSize = DEFAULT_SEG_SIZE } = 
   } catch (e) {
     if (fh) await fh.close().catch(() => {});
     await fsp.unlink(tmp).catch(() => {});
+    if (input && typeof input.destroy === 'function') input.destroy(); // Eingabestream nicht leaken (multer, createReadStream)
     throw e;
   }
 }
@@ -538,7 +539,16 @@ let warnedDiskTmp = false;
  */
 async function withPlaintextTempFile(filePath, fn, { encrypted, ext } = {}) {
   if (ext !== undefined && !/^[a-z0-9]{1,5}$/.test(ext)) throw new RangeError('Ungültige Dateiendung.');
-  if (!decide(filePath, encrypted)) return fn(filePath);
+  if (!decide(filePath, encrypted)) {
+    if (!isEnabled()) return fn(filePath);
+    // Klartext-Altbestand bei aktivem Key: Kopie im privaten Temp-Verzeichnis, damit Tool-Artefakte
+    // (z. B. <blob>.ocrpage-*.png) nie im Upload-Verzeichnis entstehen. Ohne Key unverändert (Originalpfad).
+    return withPrivateTempDir(async (dir) => {
+      const tmp = path.join(dir, ext ? `plain.${ext}` : 'plain');
+      await fsp.copyFile(filePath, tmp);
+      return fn(tmp);
+    });
+  }
   return withPrivateTempDir(async (dir) => {
     const tmp = path.join(dir, ext ? `plain.${ext}` : 'plain');
     const fh = await fsp.open(tmp, 'wx', 0o600);
@@ -624,6 +634,23 @@ async function sweepOrphans({ uploads, tmp, chunked } = {}, { maxAgeMs = 3600000
 
 /* ---------- Start-Prüfung ---------- */
 
+const FS_TYPE_TMPFS = 0x01021994, FS_TYPE_RAMFS = 0x858458f6;
+/**
+ * Bei aktivem Key muss MYCLOUD_TMP_DIR (falls gesetzt) auf tmpfs/ramfs liegen, sonst landen Klartext-Temp-Dateien
+ * auf der Platte. Anderer Typ: Fehler, außer MYCLOUD_ALLOW_DISK_TMP=1 (dann nur laute Warnung). Hinweis: tmpfs-Seiten
+ * können in den Swap geraten; Swap abschalten oder verschlüsseln. Ohne Key oder ohne MYCLOUD_TMP_DIR: no-op.
+ */
+function checkTmpDirAtStartup({ warn = console.warn } = {}) {
+  const dir = process.env.MYCLOUD_TMP_DIR;
+  if (!isEnabled() || !dir) return;
+  let type;
+  try { type = fs.statfsSync(dir).type; } catch (e) { throw fail('TMP_UNUSABLE', `MYCLOUD_TMP_DIR "${dir}" ist nicht nutzbar: ${e.code || e.message}`); }
+  if (type === FS_TYPE_TMPFS || type === FS_TYPE_RAMFS) return;
+  const msg = `MYCLOUD_TMP_DIR "${dir}" liegt nicht auf tmpfs/ramfs (Dateisystemtyp 0x${type.toString(16)}): entschlüsselte Temp-Dateien würden auf die Platte geschrieben.`;
+  if (process.env.MYCLOUD_ALLOW_DISK_TMP === '1') { warn(`WARNUNG (Verschlüsselung): ${msg} (MYCLOUD_ALLOW_DISK_TMP=1)`); return; }
+  throw fail('TMP_NOT_TMPFS', `${msg} tmpfs mounten oder bewusst MYCLOUD_ALLOW_DISK_TMP=1 setzen. Hinweis: tmpfs kann in den Swap ausgelagert werden (Swap abschalten oder verschlüsseln).`);
+}
+
 /**
  * Key-Check-Werte gegen die DB prüfen (Einstellungen "crypto_kcv:<keyId>"). `db` hat query(sql, params).
  * Wirft bei falschem/fehlendem Key mit deutscher Meldung. Ohne Key und ohne gespeicherte Werte: no-op.
@@ -637,7 +664,9 @@ async function checkMasterKeyAtStartup(db, { warn = console.warn } = {}) {
     if (/^[1-9]\d{0,8}$/.test(idStr)) stored.set(Number(idStr), x.value);
     else warn(`WARNUNG (Verschlüsselung): Einstellung "${x.key}" hat keine gültige keyId und wird ignoriert.`);
   }
+  const hasEncFiles = async () => (await db.query('SELECT 1 FROM files WHERE enc_version > 0 LIMIT 1')).rows.length > 0;
   if (!keys) {
+    if (!stored.size && await hasEncFiles()) throw fail('KEY_MISSING_ENC_FILES', 'MYCLOUD_MASTER_KEY_FILE ist nicht gesetzt, aber es existieren verschlüsselte Dateien (enc_version > 0). Start abgebrochen, damit sie nicht überschrieben oder als beschädigt behandelt werden. Key-Datei einbinden.');
     if (stored.size) throw fail('KCV_NO_KEY', 'Diese Instanz wurde mit einem Master-Key verschlüsselt, aber MYCLOUD_MASTER_KEY_FILE ist nicht gesetzt. Start abgebrochen, damit verschlüsselte Dateien nicht als beschädigt behandelt werden. Key-Datei wieder einbinden.');
     return;
   }
@@ -655,6 +684,8 @@ async function checkMasterKeyAtStartup(db, { warn = console.warn } = {}) {
     if (!back.rows[0] || back.rows[0].value !== v) throw fail('KCV_MISMATCH', mismatchMsg);
   };
   if (stored.size === 0) {
+    // P2-Regel: Erstinitialisierung nur, wenn keine verschlüsselte Datei existiert (sonst fehlt der Eintrag unerwartet)
+    if (await hasEncFiles()) throw fail('KCV_MISSING_ENC_FILES', 'Key-Check-Wert fehlt, aber verschlüsselte Dateien vorhanden (enc_version > 0). Start abgebrochen, damit ein fehlender settings-Eintrag nicht mit einem neuen Key überschrieben wird.');
     await insertCurrent();
     console.log('Verschlüsselung: Master-Key geladen, Key-Check-Wert gespeichert.');
     return;
@@ -710,5 +741,5 @@ module.exports = {
   getKeyCheckValue, deriveColumnKey,
   isEncrypted, plainSizeOf,
   writeEncrypted, encryptFileInPlace, rewrapHeader, recoverRewrap, createDecryptStream, readDecrypted, withPlaintextTempFile, withPrivateTempDir, sweepOrphans,
-  checkMasterKeyAtStartup, formatRecoveryCode, parseRecoveryCode,
+  checkMasterKeyAtStartup, checkTmpDirAtStartup, formatRecoveryCode, parseRecoveryCode,
 };

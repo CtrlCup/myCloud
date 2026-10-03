@@ -87,9 +87,14 @@ function newBlobPath(ownerId, fileName) {
 
 // Schreibt einen neuen Blob (Buffer oder Readable): bei aktivem Master-Key verschlüsselt, sonst Klartext.
 // Liefert { plainSize, sha256, encVersion } (encVersion 1 bzw. null passend zum geschriebenen Blob).
+// Ohne Key bleibt das Schreibverhalten (Dateirechte per umask statt 0600) exakt wie vor P2b (E16); `input` ist ein Buffer.
 async function writeNewBlob(absPath, input) {
+  if (!cryptoStore.isEnabled()) {
+    fs.writeFileSync(absPath, input);
+    return { plainSize: input.length, sha256: crypto.createHash('sha256').update(input).digest('hex'), encVersion: null };
+  }
   const r = await cryptoStore.writeEncrypted(absPath, input);
-  return { ...r, encVersion: cryptoStore.isEnabled() ? 1 : null };
+  return { ...r, encVersion: 1 };
 }
 
 // Einzige Stelle, die Blobs physisch löscht (P4 hängt hier die Backup-Warteschlange ein), samt zugehöriger
@@ -110,12 +115,30 @@ function deleteBlob(blobPath) {
   }
   deleteThumbnailsFor(blobPath);
 }
+// Löschen eines ALTEN Blobs nach erfolgreichem DB-Commit: ein Fehler (EPERM/EIO) darf den neuen, bereits
+// referenzierten Blob nie gefährden. Ein verwaister alter Blob ist besser als ein verlorener neuer.
+function tryDeleteBlob(blobPath) {
+  try { deleteBlob(blobPath); } catch (e) { console.error(`Alter Blob konnte nicht gelöscht werden (${path.basename(blobPath)}):`, e.message); }
+}
+
+// Schreib-Guard für die Key-AUS-Zweige: Eine Zeile mit enc_version > 0 darf nie in-place mit Klartext überschrieben
+// werden (der Blob wäre danach unlesbar). Wirft einen Fehler mit code ENC_NO_KEY; Routen antworten damit 409.
+const ENC_NO_KEY_MSG = 'Die Datei ist verschlüsselt, der Master-Key fehlt.';
+function assertPlainWritable(row) {
+  if (isEncRow(row) && !cryptoStore.isEnabled()) throw Object.assign(new Error(ENC_NO_KEY_MSG), { code: 'ENC_NO_KEY' });
+}
+// true, wenn der Fehler ein ENC_NO_KEY war und bereits mit 409 beantwortet wurde
+function replyEncNoKey(err, res) {
+  if (!err || err.code !== 'ENC_NO_KEY') return false;
+  res.status(409).json({ error: ENC_NO_KEY_MSG });
+  return true;
+}
 
 // Copy-on-Write-Umhängen: setzt in EINER Transaktion die Spalten `cols` (z. B. path, size, content_hash,
 // enc_version, content) der Zeile und liefert { ok, row, oldPath } (oldPath = der unter Zeilensperre gelesene
 // bisherige files.path, absolut). Optional unter Quota-Sperre (`quota`: { ownerId, netAdditionalBytes }) und nur,
 // wenn die Zeile noch auf `expectPath` (files.path-relativ) zeigt (sonst Fehler: zwischenzeitlich geändert).
-// Der Aufrufer löscht den alten Blob (deleteBlob) erst NACH dem Commit und bei einem Fehler den neuen.
+// Der Aufrufer löscht den alten Blob (tryDeleteBlob) erst NACH dem Commit und bei einem Fehler/ok:false den neuen.
 async function swapFileBlob(fileId, cols, { quota, expectPath } = {}) {
   const run = async (client) => {
     const cur = await client.query('SELECT path FROM files WHERE id = $1 FOR UPDATE', [fileId]);
@@ -153,15 +176,16 @@ async function swapFileBlob(fileId, cols, { quota, expectPath } = {}) {
 async function replaceBlobCow(file, input, extraCols = {}, swapOpts = {}) {
   const { relativePath, absPath } = newBlobPath(file.owner_id, file.path);
   const { plainSize, sha256 } = await cryptoStore.writeEncrypted(absPath, input);
+  let r;
   try {
-    const r = await swapFileBlob(file.id, { path: relativePath, size: plainSize, content_hash: sha256, enc_version: 1, ...extraCols }, swapOpts);
-    if (!r.ok) { deleteBlob(absPath); return r; }
-    deleteBlob(r.oldPath);
-    return { ...r, plainSize };
+    r = await swapFileBlob(file.id, { path: relativePath, size: plainSize, content_hash: sha256, enc_version: 1, ...extraCols }, swapOpts);
   } catch (err) {
     try { deleteBlob(absPath); } catch { /* best-effort */ }
     throw err;
   }
+  if (!r.ok) { try { deleteBlob(absPath); } catch { /* best-effort */ } return r; }
+  tryDeleteBlob(r.oldPath); // nach dem Commit, eigener Fehlerpfad
+  return { ...r, plainSize };
 }
 
 // SHA-256 of a file's content, hex-encoded. Streamed rather than read into memory at once since
@@ -300,6 +324,14 @@ function uploadSingle(fieldName) {
 // Branding-Assets (Logo, Hintergründe, SEO-Bild) werden öffentlich ausgeliefert und bleiben Klartext.
 function uploadSinglePlain(fieldName) {
   return (req, res, next) => multer({ storage: plainStorage, limits: { fileSize: maxUploadSizeBytes } }).single(fieldName)(req, res, next);
+}
+// Avatar: eigenes 2-MB-Limit schon im Upload (sonst würde ein großer Upload erst komplett verschlüsselt, dann abgelehnt).
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+function uploadAvatar(req, res, next) {
+  multer({ storage, limits: { fileSize: AVATAR_MAX_BYTES } }).single('avatar')(req, res, (err) => {
+    if (err && err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'Das Bild muss kleiner als 2 MB sein.' });
+    next(err);
+  });
 }
 function uploadArray(fieldName, maxCount) {
   return (req, res, next) => multer({ storage, limits: { fileSize: maxUploadSizeBytes } }).array(fieldName, maxCount)(req, res, next);
@@ -486,8 +518,11 @@ const pdfParse = require('pdf-parse');
 // existing ffmpeg/exiftool system tools) so images and scanned PDFs without a text layer are
 // still findable via deep search, not just by filename.
 // Obergrenzen für externe Tools: hängende Prozesse dürfen den Entschlüsselungs-Semaphor nicht dauerhaft belegen.
-const EXEC_TIMEOUT_SHORT = { timeout: 60 * 1000, killSignal: 'SIGKILL' };   // Thumbnails, EXIF
-const EXEC_TIMEOUT_LONG = { timeout: 300 * 1000, killSignal: 'SIGKILL' };   // OCR, Remux
+// Bei aktivem Key setzen die Tools TMPDIR auf das tmpfs (MYCLOUD_TMP_DIR), damit auch ihre eigenen Zwischendateien
+// nie auf der Platte landen (Getter: wird bei jedem Spread/Aufruf ausgewertet; sonst env undefined = Standard).
+const execTmpEnv = () => (cryptoStore.isEnabled() && process.env.MYCLOUD_TMP_DIR ? { ...process.env, TMPDIR: process.env.MYCLOUD_TMP_DIR } : undefined);
+const EXEC_TIMEOUT_SHORT = { timeout: 60 * 1000, killSignal: 'SIGKILL', get env() { return execTmpEnv(); } };   // Thumbnails, EXIF
+const EXEC_TIMEOUT_LONG = { timeout: 300 * 1000, killSignal: 'SIGKILL', get env() { return execTmpEnv(); } };   // OCR, Remux
 const OCR_IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif'];
 
 function ocrImage(imagePath) {
@@ -2200,11 +2235,16 @@ function remuxMp4Faststart(physicalPath, originalName, fileId, encrypted = false
       const file = fileRes.rows[0];
       const expectPath = path.relative(UPLOADS_DIR, physicalPath);
       if (!file || file.path !== expectPath) throw new Error('Datei wurde während des Remux geändert oder gelöscht');
-      const r = await replaceBlobCow(file, fs.createReadStream(outPath), { faststart_processed_at: new Date() }, { expectPath });
-      return r.plainSize;
+      const src = fs.createReadStream(outPath);
+      try {
+        const r = await replaceBlobCow(file, src, { faststart_processed_at: new Date() }, { expectPath });
+        return r.plainSize;
+      } finally { src.destroy(); }
     }), { encrypted: !!encrypted, ext: fileDelivery.tempExtFor(originalName) });
   }
-  return new Promise((resolve, reject) => {
+  return pool.query('SELECT enc_version FROM files WHERE id = $1', [fileId]).then((cur) => {
+    assertPlainWritable(cur.rows[0]); // Key aus, Zeile verschlüsselt: nie in-place überschreiben
+    return new Promise((resolve, reject) => {
     const tempPath = `${physicalPath}.faststart.mp4`;
     const cmd = `ffmpeg -y -i "${physicalPath}" -c copy -movflags +faststart -f mp4 "${tempPath}"`;
     exec(cmd, { maxBuffer: 1024 * 1024 * 10, ...EXEC_TIMEOUT_LONG }, async (err) => {
@@ -2229,6 +2269,7 @@ function remuxMp4Faststart(physicalPath, originalName, fileId, encrypted = false
         }
         reject(postErr);
       }
+    });
     });
   });
 }
@@ -2259,6 +2300,7 @@ function scheduleFaststartRemux(physicalPath, originalName, fileId, encrypted) {
 // both callers can wrap the returned { status, body } in whatever response shape they need.
 async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, originalName, fileSize, sha256, encrypted, onConflict }) {
   let currentPhysicalPath = path.join(UPLOADS_DIR, filenameAtRoot);
+  let committed = false;
   try {
     if (parentId !== null) {
       const isOwner = await verifyFileOwner(parentId, userId);
@@ -2303,7 +2345,6 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
     const safeMimeType = getSafeMimeType(originalName);
 
     if (existing && onConflict === 'replace' && canReplace) {
-      const oldPhysicalPath = path.join(UPLOADS_DIR, existing.path);
       const relativePath = relocateUploadToOwnerDir(userId, filenameAtRoot);
       currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
 
@@ -2311,22 +2352,17 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
       // includes this file's OLD size (its row hasn't been updated yet), same reasoning as
       // PUT /api/files/:id/binary-content.
       const netAdditionalBytes = fileSize - (existing.size || 0);
-      const doReplace = (client) => client.query(
-        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4, enc_version = $5 WHERE id = $6 RETURNING *`,
-        [relativePath, safeMimeType, fileSize, newFileHash, encVersion, existing.id]
-      );
-
-      const quotaResult = netAdditionalBytes > 0
-        ? await withStorageQuotaLock(userId, netAdditionalBytes, doReplace)
-        : { ok: true, data: await doReplace(pool) };
-      if (!quotaResult.ok) {
+      const swapped = await swapFileBlob(existing.id,
+        { path: relativePath, mime_type: safeMimeType, size: fileSize, content: null, content_hash: newFileHash, enc_version: encVersion },
+        { quota: { ownerId: userId, netAdditionalBytes }, expectPath: existing.path });
+      if (!swapped.ok) {
         fs.unlinkSync(currentPhysicalPath);
-        return { status: 413, body: { error: quotaResult.error } };
+        return { status: 413, body: { error: swapped.error } };
       }
+      committed = true; // ab hier ist der neue Blob referenziert und darf nie mehr gelöscht werden
+      tryDeleteBlob(swapped.oldPath);
 
-      deleteBlob(oldPhysicalPath);
-
-      const updatedFile = quotaResult.data.rows[0];
+      const updatedFile = swapped.row;
       scheduleTextExtraction(currentPhysicalPath, safeMimeType, originalName, updatedFile.id, encrypted);
       scheduleFaststartRemux(currentPhysicalPath, originalName, updatedFile.id, encrypted);
       return { status: 200, body: updatedFile };
@@ -2349,13 +2385,14 @@ async function finalizeUploadedFile({ userId, parentId, filenameAtRoot, original
       return { status: 413, body: { error: quotaResult.error } };
     }
 
+    committed = true;
     const insertedFile = quotaResult.data.rows[0];
     scheduleTextExtraction(currentPhysicalPath, safeMimeType, finalName, insertedFile.id, encrypted);
     scheduleFaststartRemux(currentPhysicalPath, finalName, insertedFile.id, encrypted);
     return { status: 201, body: insertedFile };
   } catch (err) {
     console.error(`Error finalizing upload "${originalName}" (${fileSize} bytes, user ${userId}):`, err);
-    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
+    if (!committed && currentPhysicalPath && fs.existsSync(currentPhysicalPath)) {
       fs.unlinkSync(currentPhysicalPath);
     }
     return { status: 500, body: { error: 'Internal server error' } };
@@ -2458,6 +2495,9 @@ app.put('/api/uploads/chunked/:uploadId/:index',
 app.post('/api/uploads/chunked/:uploadId/complete', async (req, res) => {
   const session = chunkedUploadSessions.get(req.params.uploadId);
   if (!session) return res.status(404).json({ error: 'Upload-Session nicht gefunden oder abgelaufen.' });
+  // Zweiter paralleler complete-Aufruf würde dieselben Chunks doppelt zusammenbauen (und im finally die Session löschen)
+  if (session.completing) return res.status(409).json({ error: 'Der Upload wird bereits abgeschlossen.' });
+  session.completing = true;
 
   try {
     const { filenameAtRoot, fileSize, sha256, encrypted } = await assembleChunkedUpload(session);
@@ -3186,6 +3226,7 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
   const { name, parentId, type, onConflict } = req.body;
   const userId = req.session.userId;
   const parsedParentId = parentId ? parseInt(parentId) : null;
+  let createdBlobPath = null, rowCommitted = false; // Aufräumen eines nicht referenzierten Blobs im Fehlerfall
 
   if (!name) {
     return res.status(400).json({ error: 'File name is required' });
@@ -3268,6 +3309,7 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     // Vorlage lesen (klein) und als neuen Blob schreiben: bei aktivem Key verschlüsselt.
     const templateData = (templateFile && fs.existsSync(templateFile)) ? fs.readFileSync(templateFile) : Buffer.alloc(0);
     const blob = await writeNewBlob(physicalPath, templateData);
+    createdBlobPath = physicalPath;
     const fileSize = blob.plainSize;
     // Content is tiny (empty, or a small office template) — always hashing it here, unlike the
     // upload route's "only hash on an actual collision" rule, is cheap enough to just always do.
@@ -3292,13 +3334,12 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
     }
 
     if (existing && onConflict === 'replace' && canReplace) {
-      const oldPhysicalPath = path.join(UPLOADS_DIR, existing.path);
-      const result = await pool.query(
-        `UPDATE files SET path = $1, mime_type = $2, size = $3, content = NULL, content_hash = $4, enc_version = $5 WHERE id = $6 RETURNING *`,
-        [relativePath, mimeType, fileSize, newFileHash, blob.encVersion, existing.id]
-      );
-      deleteBlob(oldPhysicalPath);
-      return res.status(200).json(result.rows[0]);
+      const swapped = await swapFileBlob(existing.id,
+        { path: relativePath, mime_type: mimeType, size: fileSize, content: null, content_hash: newFileHash, enc_version: blob.encVersion },
+        { expectPath: existing.path });
+      rowCommitted = true;
+      tryDeleteBlob(swapped.oldPath);
+      return res.status(200).json(swapped.row);
     }
 
     const resolvedName = (existing && onConflict === 'keep_both')
@@ -3310,10 +3351,12 @@ app.post('/api/files/create-empty', requireAuth, requirePermission('upload'), as
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       [resolvedName, relativePath, mimeType, fileSize, false, parsedParentId, userId, newFileHash, blob.encVersion]
     );
+    rowCommitted = true;
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Error creating empty file:', err);
+    if (createdBlobPath && !rowCommitted) { try { deleteBlob(createdBlobPath); } catch { /* best-effort */ } }
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -3328,6 +3371,8 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
   const userId = req.session.userId;
   const parsedParentId = parentId && parentId !== 'null' ? parseInt(parentId) : null;
   const attachments = req.files || [];
+  const createdBlobs = []; // bereits geschriebene/verschobene Blobs, für das Aufräumen im Fehlerfall
+  let containerFileId;
 
   const cleanupAttachments = () => {
     attachments.forEach(f => { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); });
@@ -3351,8 +3396,6 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + (parseInt(expiresHours) || 24));
 
-    let containerFileId;
-
     if (attachments.length > 0) {
       const folderRes = await pool.query(
         `INSERT INTO files (name, path, is_folder, parent_id, owner_id, is_one_time_note)
@@ -3360,10 +3403,12 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
         [cleanName.replace(/\.txt$/i, ''), parsedParentId, userId]
       );
       const folderId = folderRes.rows[0].id;
+      containerFileId = folderId;
 
       const uniqueFilename = crypto.randomUUID() + '.txt';
       const relativePath = `${userId}/${uniqueFilename}`;
       const noteBlob = await writeNewBlob(path.join(ensureUserUploadDir(userId), uniqueFilename), Buffer.from(content, 'utf8'));
+      createdBlobs.push(path.join(UPLOADS_DIR, relativePath));
       // Children are also flagged is_one_time_note so the flat "exclude one-time notes from
       // listing/search" filter catches them too, without needing a recursive ancestor check.
       await pool.query(
@@ -3375,6 +3420,7 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
       for (const att of attachments) {
         const safeMimeType = getSafeMimeType(att.originalname);
         const attRelativePath = relocateUploadToOwnerDir(userId, att.filename);
+        createdBlobs.push(path.join(UPLOADS_DIR, attRelativePath));
         await pool.query(
           `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content_hash, enc_version)
            VALUES ($1, $2, $3, $4, false, $5, $6, true, $7, $8)`,
@@ -3382,11 +3428,11 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
         );
       }
 
-      containerFileId = folderId;
     } else {
       const uniqueFilename = crypto.randomUUID() + '.txt';
       const relativePath = `${userId}/${uniqueFilename}`;
       const noteBlob = await writeNewBlob(path.join(ensureUserUploadDir(userId), uniqueFilename), Buffer.from(content, 'utf8'));
+      createdBlobs.push(path.join(UPLOADS_DIR, relativePath));
       const fileRes = await pool.query(
         `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, is_one_time_note, content, content_hash, enc_version)
          VALUES ($1, $2, $3, $4, false, $5, $6, true, $7, $8, $9) RETURNING id`,
@@ -3414,6 +3460,9 @@ app.post('/api/files/create-note', requireAuth, uploadArray('attachments', 10), 
   } catch (err) {
     console.error('Error creating one-time note:', err);
     cleanupAttachments();
+    // Halbfertige Notiz entfernen: Blobs, Container-Ordner samt Kind-Zeilen bzw. die einzelne Notiz-Zeile
+    for (const p of createdBlobs) tryDeleteBlob(p);
+    if (containerFileId) await pool.query('DELETE FROM files WHERE id = $1 OR parent_id = $1', [containerFileId]).catch(() => {});
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -3525,6 +3574,7 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
     const file = fileRes.rows[0];
     if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
 
+    assertPlainWritable(file);
     await maybeSaveFileVersion(fileId, file.content);
 
     let size;
@@ -3540,6 +3590,7 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
 
     res.json({ success: true, size });
   } catch (err) {
+    if (replyEncNoKey(err, res)) return;
     console.error('Error saving file content:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -3550,10 +3601,19 @@ app.put('/api/files/content/:id', requireAuth, requirePermission('edit_files'), 
 // not JSON text, and keeps the same file id/row — only the on-disk path changes (multer already
 // wrote the upload under a fresh UUID name, so we just point the row at it and drop the old
 // physical file, same idea as the trash/copy routes swapping `path` without touching `id`).
+// Spalten für das Umhängen einer Zeile auf einen frisch hochgeladenen Blob (multer-Engine); content_hash nur,
+// wenn die Engine ihn geliefert hat (Key aus: Hash bleibt wie bisher unverändert).
+function binaryContentCols(file, relativePath, textContent) {
+  const cols = { path: relativePath, size: file.size, content: textContent, enc_version: file.encrypted ? 1 : null };
+  if (file.sha256) cols.content_hash = file.sha256;
+  return cols;
+}
+
 app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_files'), uploadSingle('file'), async (req, res) => {
   const fileId = parseInt(req.params.id);
   const userId = req.session.userId;
   let currentPhysicalPath = req.file && req.file.path;
+  let committed = false;
 
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -3571,7 +3631,7 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
       return res.status(400).json({ error: 'File not found or is a folder' });
     }
 
-    const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
+    assertPlainWritable(file);
     const relativePath = relocateUploadToOwnerDir(userId, req.file.filename);
     currentPhysicalPath = path.join(UPLOADS_DIR, relativePath);
     const textContent = await extractTextContent(currentPhysicalPath, file.mime_type, file.name, { encrypted: !!req.file.encrypted }); // frischer Blob (multer-Engine)
@@ -3579,27 +3639,20 @@ app.put('/api/files/:id/binary-content', requireAuth, requirePermission('edit_fi
     // Only the net size increase counts against quota — usedBytes inside the lock still
     // includes this file's OLD size (its row hasn't been updated yet), so checking the full
     // new size on top of that would double-count the very file being replaced.
-    const netAdditionalBytes = req.file.size - (file.size || 0);
-    const doUpdate = (client) => client.query(
-      'UPDATE files SET path = $1, size = $2, content = $3, enc_version = $4, content_hash = COALESCE($5, content_hash) WHERE id = $6',
-      [relativePath, req.file.size, textContent, req.file.encrypted ? 1 : null, req.file.sha256 || null, fileId]
-    );
-    if (netAdditionalBytes > 0) {
-      const quotaResult = await withStorageQuotaLock(userId, netAdditionalBytes, doUpdate);
-      if (!quotaResult.ok) {
-        fs.unlinkSync(currentPhysicalPath);
-        return res.status(413).json({ error: quotaResult.error });
-      }
-    } else {
-      await doUpdate(pool);
+    const swapped = await swapFileBlob(fileId, binaryContentCols(req.file, relativePath, textContent),
+      { quota: { ownerId: userId, netAdditionalBytes: req.file.size - (file.size || 0) }, expectPath: file.path });
+    if (!swapped.ok) {
+      fs.unlinkSync(currentPhysicalPath);
+      return res.status(413).json({ error: swapped.error });
     }
-
-    deleteBlob(oldPhysicalPath);
+    committed = true;
+    tryDeleteBlob(swapped.oldPath);
 
     res.json({ success: true, size: req.file.size });
   } catch (err) {
+    if (replyEncNoKey(err, res)) { try { fs.unlinkSync(currentPhysicalPath); } catch {} return; }
     console.error('Error saving binary file content:', err);
-    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) fs.unlinkSync(currentPhysicalPath);
+    if (!committed && currentPhysicalPath && fs.existsSync(currentPhysicalPath)) fs.unlinkSync(currentPhysicalPath);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -3663,6 +3716,7 @@ app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermi
 
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
     const file = fileRes.rows[0];
+    assertPlainWritable(file);
 
     // Checkpoint the current (about-to-be-overwritten) state unconditionally, ignoring the
     // usual throttle — a restore is a deliberate action the user should be able to undo too.
@@ -3687,6 +3741,7 @@ app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermi
 
     res.json({ success: true, content: restoredContent });
   } catch (err) {
+    if (replyEncNoKey(err, res)) return;
     console.error('Error restoring file version:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -3769,7 +3824,8 @@ async function generateThumbnailFromPlain(inputPath, physicalFilename, lowerExt)
   return cryptoStore.withPrivateTempDir(async (dir) => {
     const tmpOut = path.join(dir, 'thumb' + path.extname(finalPath));
     if (!(await runThumbnailTool(inputPath, tmpOut, physicalFilename, lowerExt))) return null;
-    await cryptoStore.writeEncrypted(finalPath + '.enc', fs.createReadStream(tmpOut));
+    const src = fs.createReadStream(tmpOut);
+    try { await cryptoStore.writeEncrypted(finalPath + '.enc', src); } finally { src.destroy(); }
     return finalPath + '.enc';
   });
 }
@@ -4451,6 +4507,7 @@ app.post('/api/eurooffice/callback/:id', async (req, res) => {
           discard: deleteBlob,
         });
       } else {
+        assertPlainWritable(file); // Key aus, Zeile verschlüsselt: nie in-place mit Klartext überschreiben
         saved = await saveDownloadedFile(url, filePath);
         const textContent = await extractTextContent(filePath, file.mime_type, file.name, { encrypted: false }); // Key aus: Klartext-Blob
         await pool.query(
@@ -5052,6 +5109,7 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
     const { file, share } = access;
     if (!share.can_write) return res.status(403).json({ error: 'Write permission denied.' });
     if (file.is_folder) return res.status(400).json({ error: 'Folders do not have text content' });
+    assertPlainWritable(file);
 
     let size;
     if (cryptoStore.isEnabled()) {
@@ -5065,6 +5123,7 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
 
     res.json({ success: true, size });
   } catch (err) {
+    if (replyEncNoKey(err, res)) return;
     console.error('Public content save error:', err);
     res.status(500).json({ error: 'Internal server error.' });
   }
@@ -5072,9 +5131,35 @@ app.put('/api/public/shares/:slug/content/:fileId', async (req, res) => {
 
 // Overwrite a publicly-shared file's binary content in place — the writable-share counterpart
 // to PUT /api/files/:id/binary-content above (e.g. a guest filling in/annotating a shared PDF).
-app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'), async (req, res) => {
+// Berechtigungsprüfung VOR multer (S4): ein Anonymer soll keine großen Uploads verschlüsseln lassen, die danach
+// ohnehin abgewiesen werden. Die Prüfungen in den Routen selbst bleiben unverändert bestehen.
+function preCheckPublic(check) {
+  return async (req, res, next) => {
+    try {
+      const err = await check(req);
+      if (err) return res.status(err.status).json({ error: err.error });
+      next();
+    } catch (e) {
+      console.error('Public pre-check error:', e);
+      res.status(500).json({ error: 'Internal server error.' });
+    }
+  };
+}
+const preCheckPublicBinarySave = preCheckPublic(async (req) => {
+  const access = await verifyPublicShareAccess(req.params.slug, req.params.fileId, req);
+  if (access.error) return access;
+  if (!access.share.can_write) return { status: 403, error: 'Write permission denied.' };
+  return null;
+});
+const preCheckPublicUpload = preCheckPublic(async (req) => {
+  const access = await verifyPublicWriteAccess(req.params.slug, req);
+  return access.error ? access : null;
+});
+
+app.put('/api/public/shares/:slug/binary-content/:fileId', preCheckPublicBinarySave, uploadSingle('file'), async (req, res) => {
   const { slug, fileId } = req.params;
   let currentPhysicalPath = req.file && req.file.path;
+  let committed = false;
 
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -5095,7 +5180,7 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'),
       return res.status(400).json({ error: 'Folders do not have binary content' });
     }
 
-    const oldPhysicalPath = path.join(UPLOADS_DIR, file.path);
+    assertPlainWritable(file);
     // Charged/organized under the file OWNER's account — there's no uploader account on a
     // public share, and the file already belongs to whoever created the share.
     const relativePath = relocateUploadToOwnerDir(file.owner_id, req.file.filename);
@@ -5104,27 +5189,20 @@ app.put('/api/public/shares/:slug/binary-content/:fileId', uploadSingle('file'),
 
     // Only the net size increase counts against quota — usedBytes inside the lock still
     // includes this file's OLD size until the UPDATE below runs.
-    const netAdditionalBytes = req.file.size - (file.size || 0);
-    const doUpdate = (client) => client.query(
-      'UPDATE files SET path = $1, size = $2, content = $3, enc_version = $4, content_hash = COALESCE($5, content_hash) WHERE id = $6',
-      [relativePath, req.file.size, textContent, req.file.encrypted ? 1 : null, req.file.sha256 || null, file.id]
-    );
-    if (netAdditionalBytes > 0) {
-      const quotaResult = await withStorageQuotaLock(file.owner_id, netAdditionalBytes, doUpdate);
-      if (!quotaResult.ok) {
-        fs.unlinkSync(currentPhysicalPath);
-        return res.status(413).json({ error: quotaResult.error });
-      }
-    } else {
-      await doUpdate(pool);
+    const swapped = await swapFileBlob(file.id, binaryContentCols(req.file, relativePath, textContent),
+      { quota: { ownerId: file.owner_id, netAdditionalBytes: req.file.size - (file.size || 0) }, expectPath: file.path });
+    if (!swapped.ok) {
+      fs.unlinkSync(currentPhysicalPath);
+      return res.status(413).json({ error: swapped.error });
     }
-
-    deleteBlob(oldPhysicalPath);
+    committed = true;
+    tryDeleteBlob(swapped.oldPath);
 
     res.json({ success: true, size: req.file.size });
   } catch (err) {
+    if (replyEncNoKey(err, res)) { try { fs.unlinkSync(currentPhysicalPath); } catch {} return; }
     console.error('Public binary content save error:', err);
-    if (currentPhysicalPath && fs.existsSync(currentPhysicalPath)) fs.unlinkSync(currentPhysicalPath);
+    if (!committed && currentPhysicalPath && fs.existsSync(currentPhysicalPath)) fs.unlinkSync(currentPhysicalPath);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
@@ -5312,7 +5390,7 @@ async function finalizePublicUploadedFile({ ownerId, targetFolderId, filenameAtR
   }
 }
 
-app.post('/api/public/shares/:slug/upload', uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
+app.post('/api/public/shares/:slug/upload', preCheckPublicUpload, uploadSingle('file'), fixUploadFilenameEncoding, async (req, res) => {
   const { slug } = req.params;
   const parentId = req.body.parentId ? parseInt(req.body.parentId) : null;
   let currentPhysicalPath = req.file && req.file.path;
@@ -5491,13 +5569,20 @@ app.post('/api/public/shares/:slug/file', async (req, res) => {
     const finalName = await generateUniqueName(baseFile.owner_id, targetFolderId, cleanName, false);
     const uniqueFilename = crypto.randomUUID() + '.txt';
     const relativePath = `${baseFile.owner_id}/${uniqueFilename}`;
-    const blob = await writeNewBlob(path.join(ensureUserUploadDir(baseFile.owner_id), uniqueFilename), Buffer.alloc(0));
+    const blobPath = path.join(ensureUserUploadDir(baseFile.owner_id), uniqueFilename);
+    const blob = await writeNewBlob(blobPath, Buffer.alloc(0));
 
-    const result = await pool.query(
-      `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, content_hash, enc_version)
-       VALUES ($1, $2, 'text/plain', 0, false, $3, $4, '', $5, $6) RETURNING *`,
-      [finalName, relativePath, targetFolderId, baseFile.owner_id, blob.encVersion ? blob.sha256 : null, blob.encVersion]
-    );
+    let result;
+    try {
+      result = await pool.query(
+        `INSERT INTO files (name, path, mime_type, size, is_folder, parent_id, owner_id, content, content_hash, enc_version)
+         VALUES ($1, $2, 'text/plain', 0, false, $3, $4, '', $5, $6) RETURNING *`,
+        [finalName, relativePath, targetFolderId, baseFile.owner_id, blob.encVersion ? blob.sha256 : null, blob.encVersion]
+      );
+    } catch (e) {
+      tryDeleteBlob(blobPath); // nicht referenzierten Blob nicht liegen lassen
+      throw e;
+    }
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Public create-file error:', err);
@@ -5714,7 +5799,7 @@ async function detectAvatarImageExt(filePath, encrypted) {
 }
 
 // Upload Avatar
-app.post('/api/settings/avatar', requireAuth, uploadSingle('avatar'), async (req, res) => {
+app.post('/api/settings/avatar', requireAuth, uploadAvatar, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided.' });
   }
@@ -7261,6 +7346,12 @@ withDbRetry(initDb)
   .then(async () => {
     try {
       await cryptoStore.checkMasterKeyAtStartup(pool);
+    } catch (err) {
+      console.error(`FEHLER (Verschlüsselung): ${err.message}`);
+      process.exit(1);
+    }
+    try {
+      cryptoStore.checkTmpDirAtStartup();
     } catch (err) {
       console.error(`FEHLER (Verschlüsselung): ${err.message}`);
       process.exit(1);

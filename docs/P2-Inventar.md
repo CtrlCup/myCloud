@@ -99,3 +99,24 @@ Auch die Ausgabe-Temp-Dateien (Thumbnails, Remux) liegen nur im tmpfs (`withPriv
 ## Reihenfolge
 
 P2b ist erledigt: Schreibpfade sind Copy-on-Write, damit darf P2c (Migration) laufen. Bekannte Lücke bis P2c: Klartext-Thumbnails, die vor dem Aktivieren des Keys entstanden sind, bleiben bis zum Ersetzen/Löschen der Datei als Klartext liegen (P2c soll sie mit migrieren oder löschen).
+
+## Nachbesserung P2b (Review)
+
+- **Copy-on-Write-Regel:** Eine Kopie teilt DEK und noncePfx mit der Quelle. Blobs dürfen deshalb NIE in-place mit neuem Inhalt
+  beschrieben werden; die einzige erlaubte In-Place-Operation ist `rewrapHeader`. Jeder neue Inhalt ist ein neuer Blob.
+- **Löschen nach dem Commit:** Der alte Blob wird erst nach dem DB-Commit und in einem eigenen `try` (`tryDeleteBlob`) gelöscht;
+  ein Fehler dort lässt höchstens einen verwaisten alten Blob zurück, nie einen verlorenen neuen. `swapFileBlob` (Zeilensperre,
+  `expectPath`, Quota-Prüfung unter Lock bei Wachstum, 413 wie bei Uploads) wird auch von Upload-Ersetzen, `create-empty`-Ersetzen
+  und beiden `binary-content`-Routen genutzt.
+- **Key-AUS-Guard (`assertPlainWritable`):** Zeilen mit `enc_version > 0` werden ohne Master-Key nie in-place überschrieben
+  (Routen: 409 "Die Datei ist verschlüsselt, der Master-Key fehlt.", EuroOffice-Callback `{error: 1}`, Remux: Fehler).
+  Start: `checkMasterKeyAtStartup` bricht ab, wenn der Key fehlt, aber `enc_version > 0` existiert, und legt keinen
+  Key-Check-Wert an, solange verschlüsselte Dateien existieren.
+- **tmpfs-Prüfung beim Start:** Bei aktivem Key muss `MYCLOUD_TMP_DIR` (falls gesetzt) auf tmpfs/ramfs liegen
+  (`statfsSync`), sonst Abbruch; Ausnahme `MYCLOUD_ALLOW_DISK_TMP=1` mit lauter Warnung. tmpfs-Seiten können in den Swap geraten:
+  Swap abschalten oder verschlüsseln.
+- Öffentliche Upload-/Speichern-Routen prüfen Freigabe und Schreibrecht VOR multer; der Avatar-Upload hat ein 2-MB-Limit im Upload.
+- Altbestand (Klartext) wird bei aktivem Key für Tools zuerst in ein privates Temp-Verzeichnis kopiert; die Tools bekommen `TMPDIR`
+  auf das tmpfs. `writeNewBlob` behält ohne Key die alten Dateirechte (umask).
+- Fehlerpfade räumen auf: create-empty, create-note (Blobs und halbfertige Container), öffentliches Anlegen; `writeEncrypted`
+  zerstört den Eingabestream bei Fehlern; paralleles `complete` eines Chunk-Uploads liefert 409.

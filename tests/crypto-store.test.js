@@ -334,6 +334,29 @@ test('sweepOrphans chunked: UUID-Verzeichnisse (auch gefüllt) weg, Rest und Sym
   assert.strictEqual(await cs.sweepOrphans({ chunked: ch }), 0);
 });
 
+test('Start-Check MYCLOUD_TMP_DIR: nur tmpfs/ramfs, Ausnahme per MYCLOUD_ALLOW_DISK_TMP', withKey(KEY, async () => {
+  const saved = { t: process.env.MYCLOUD_TMP_DIR, a: process.env.MYCLOUD_ALLOW_DISK_TMP };
+  try {
+    delete process.env.MYCLOUD_TMP_DIR; delete process.env.MYCLOUD_ALLOW_DISK_TMP;
+    cs.checkTmpDirAtStartup(); // ohne Verzeichnis: no-op
+    process.env.MYCLOUD_TMP_DIR = path.join(tmpRoot, 'gibt-es-nicht');
+    assert.throws(() => cs.checkTmpDirAtStartup(), { code: 'TMP_UNUSABLE' });
+    if (fs.existsSync('/proc/self')) { // procfs ist weder tmpfs noch ramfs
+      process.env.MYCLOUD_TMP_DIR = '/proc';
+      assert.throws(() => cs.checkTmpDirAtStartup(), { code: 'TMP_NOT_TMPFS' });
+      const warns = [];
+      process.env.MYCLOUD_ALLOW_DISK_TMP = '1';
+      cs.checkTmpDirAtStartup({ warn: m => warns.push(m) });
+      assert.ok(warns.length === 1 && /MYCLOUD_ALLOW_DISK_TMP/.test(warns[0]));
+    }
+    cs.useKeys(null);
+    process.env.MYCLOUD_TMP_DIR = '/proc'; delete process.env.MYCLOUD_ALLOW_DISK_TMP;
+    cs.checkTmpDirAtStartup(); // ohne Key no-op
+  } finally {
+    for (const [k, v] of [['MYCLOUD_TMP_DIR', saved.t], ['MYCLOUD_ALLOW_DISK_TMP', saved.a]]) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  }
+}));
+
 test('Leere Datei: legitim lesbar, Abschneiden/Tag-Flip erkannt', withKey(KEY, async () => {
   process.env.MYCLOUD_TMP_DIR = fs.mkdtempSync(path.join(tmpRoot, 'et-'));
   try {
@@ -492,7 +515,9 @@ test('Key-Check-Wert, Spaltenschlüssel, Recovery-Code', () => {
 
 test('Start-Check (kcv pro keyId): Erststart, gleicher Key, falscher Key, Key fehlt, Rotation', async () => {
   const rows = new Map();
+  let encFiles = false;
   const db = { query: async (sql, p) => {
+    if (/FROM files/.test(sql)) return { rows: encFiles ? [{ '?column?': 1 }] : [] };
     if (/^SELECT/.test(sql)) return { rows: [...rows].filter(([key]) => !p || key === p[0]).map(([key, value]) => ({ key, value })) };
     if (!rows.has(p[0])) rows.set(p[0], p[1]);
     return { rows: [] };
@@ -505,6 +530,13 @@ test('Start-Check (kcv pro keyId): Erststart, gleicher Key, falscher Key, Key fe
     cs.useKeys(null);
     await cs.checkMasterKeyAtStartup(db, opts);          // ohne Key, ohne kcv: no-op
     assert.strictEqual(rows.size, 0);
+    // P2: verschlüsselte Dateien vorhanden -> ohne Key Abbruch, und keine KCV-Erstinitialisierung
+    encFiles = true;
+    await assert.rejects(cs.checkMasterKeyAtStartup(db, opts), { code: 'KEY_MISSING_ENC_FILES' });
+    cs.useKeys(cfg(1, 1));
+    await assert.rejects(cs.checkMasterKeyAtStartup(db, opts), { code: 'KCV_MISSING_ENC_FILES' });
+    assert.strictEqual(rows.size, 0);
+    encFiles = false;
     cs.useKeys(cfg(1, 1));
     await cs.checkMasterKeyAtStartup(db, opts);
     assert.strictEqual(rows.get('crypto_kcv:1'), cs.getKeyCheckValue(KEY));

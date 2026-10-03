@@ -103,7 +103,9 @@ test('E7: Upload -> Download byteidentisch; Blob verschlüsselt (Enc-Stack) bzw.
   const j = await upload('e7.txt', data);
   textId = j.id; textRow = j;
   assert.strictEqual(Number(j.size), data.length, 'files.size = Klartextgröße');
-  assert.strictEqual(j.content_hash, ENC ? crypto.createHash('sha256').update(data).digest('hex') : j.content_hash);
+  const sha = crypto.createHash('sha256').update(data).digest('hex');
+  if (ENC) assert.strictEqual(j.content_hash, sha);
+  else if (j.content_hash) assert.strictEqual(j.content_hash, sha); // ohne Key darf er fehlen, ist er gesetzt, muss er stimmen
   assert.ok((await bytes(await download(textId))).equals(data));
   if (ENC) {
     assert.strictEqual(j.enc_version, 1);
@@ -395,10 +397,10 @@ test('Öffentlicher Upload über Freigabe (Ordner mit Schreibrecht)', async () =
 
 /* ---------------- Faststart-Remux (COW) ---------------- */
 
-test('Faststart-Remux: neuer Blob (Enc-Stack), Datei bleibt abspielbar', async () => {
+test('Faststart-Remux: neuer Blob (Enc-Stack), Datei bleibt abspielbar', async (t) => {
   let mp4;
   try { mp4 = execFileSync('docker', [...COMPOSE_ARGS, 'exec', '-T', 'app', 'sh', '-c', 'ffmpeg -loglevel error -y -f lavfi -i testsrc=duration=1:size=64x64:rate=10 -c:v mpeg4 /tmp/p2b.mp4 && cat /tmp/p2b.mp4 && rm -f /tmp/p2b.mp4'], { cwd: ROOT, maxBuffer: 20 * 1024 * 1024 }); } catch { /* ffmpeg ohne mpeg4 */ }
-  if (!mp4 || mp4.length < 100) return; // Encoder nicht verfügbar: Remux wird ohnehin vom Hintergrundjob abgedeckt
+  if (!mp4 || mp4.length < 100) return t.skip('ffmpeg-Encoder mpeg4 im Container nicht verfügbar');
   const j = await upload('cam.mp4', mp4);
   let row;
   for (let i = 0; i < 40; i++) {
@@ -416,6 +418,8 @@ test('Faststart-Remux: neuer Blob (Enc-Stack), Datei bleibt abspielbar', async (
     assert.strictEqual(row[2], '1');
     assert.strictEqual(blobHead(row[0]), 'MCENC1');
     await assertTmpEmpty();
+  } else {
+    assert.strictEqual(row[0], j.path, 'ohne Key bleibt der Blob-Pfad in-place wie vorher');
   }
 });
 
@@ -485,9 +489,118 @@ test('Enc-Stack: Klartext-Altdatei (enc_version NULL) wandert beim Bearbeiten in
   assert.strictEqual(await (await api(`/api/files/content/${id}`)).text(), 'bearbeitet ' + MARKER);
 });
 
+/* ---------------- Fehlerpfade ---------------- */
+
+test('Quota: Upload über dem Limit -> 413, kein Blob und keine Zeile', async () => {
+  psql(`UPDATE users SET storage_quota = 1000 WHERE id = ${userId}`);
+  try {
+    const before = sh(`ls ${UP}/${userId} | wc -l; ls ${UP} | wc -l`).trim();
+    const rows = psql(`SELECT count(*) FROM files WHERE owner_id = ${userId}`);
+    const fd = new FormData();
+    fd.append('file', new Blob([crypto.randomBytes(5000)]), 'zugross.bin');
+    const res = await api('/api/files/upload', { method: 'POST', body: fd });
+    assert.strictEqual(res.status, 413);
+    await res.json();
+    assert.strictEqual(sh(`ls ${UP}/${userId} | wc -l; ls ${UP} | wc -l`).trim(), before, 'Blob liegt noch herum');
+    assert.strictEqual(psql(`SELECT count(*) FROM files WHERE owner_id = ${userId}`), rows);
+  } finally {
+    psql(`UPDATE users SET storage_quota = NULL WHERE id = ${userId}`);
+  }
+});
+
+test('Chunked-Upload mit fehlendem Chunk -> Fehler, nichts bleibt liegen', async () => {
+  const before = sh(`ls ${UP} | wc -l`).trim();
+  const init = await json('POST', '/api/files/upload/chunked/init', { name: 'luecke.bin', size: 9 * 1024 * 1024, parentId: null });
+  const { uploadId, chunkSize } = await init.json();
+  await api(`/api/uploads/chunked/${uploadId}/0`, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: crypto.randomBytes(chunkSize) });
+  const done = await json('POST', `/api/uploads/chunked/${uploadId}/complete`, {});
+  assert.ok(done.status >= 400, 'complete ' + done.status);
+  await done.json();
+  assert.ok(!blobExists('tmp-chunked/' + uploadId));
+  assert.strictEqual(sh(`ls ${UP} | wc -l`).trim(), before);
+  if (ENC) await assertTmpEmpty();
+});
+
+test('Chunked-Upload: paralleles Doppel-complete -> eines gewinnt, das andere 409/404', async () => {
+  const data = crypto.randomBytes(300000);
+  const init = await json('POST', '/api/files/upload/chunked/init', { name: 'doppelt.bin', size: data.length, parentId: null });
+  const { uploadId } = await init.json();
+  const put = await api(`/api/uploads/chunked/${uploadId}/0`, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: data });
+  assert.strictEqual(put.status, 200);
+  const [a, b] = await Promise.all([json('POST', `/api/uploads/chunked/${uploadId}/complete`, {}), json('POST', `/api/uploads/chunked/${uploadId}/complete`, {})]);
+  const codes = [a.status, b.status].sort();
+  assert.strictEqual(codes[0], 201, 'Status ' + codes);
+  assert.ok([404, 409].includes(codes[1]), 'Status ' + codes);
+  await a.arrayBuffer(); await b.arrayBuffer();
+});
+
+test('Zwei parallele binary-content-Saves: genau ein Blob bleibt, Inhalt gehört zu einem der beiden', async () => {
+  const j = await upload('race.bin', crypto.randomBytes(3000));
+  const A = crypto.randomBytes(40000), B = crypto.randomBytes(50000);
+  const before = Number(sh(`ls ${UP}/${userId} | wc -l`).trim());
+  const put = (buf) => { const fd = new FormData(); fd.append('file', new Blob([buf]), 'race.bin'); return api(`/api/files/${j.id}/binary-content`, { method: 'PUT', body: fd }); };
+  const [ra, rb] = await Promise.all([put(A), put(B)]);
+  const codes = [ra.status, rb.status];
+  await ra.arrayBuffer(); await rb.arrayBuffer();
+  assert.ok(codes.includes(200), 'Status ' + codes);
+  assert.ok(codes.every(c => [200, 500].includes(c)), 'Status ' + codes);
+  const got = await bytes(await download(j.id));
+  assert.ok(got.equals(A) || got.equals(B));
+  assert.strictEqual(Number(sh(`ls ${UP}/${userId} | wc -l`).trim()), before, 'verwaister Blob');
+});
+
+test('Öffentlicher Upload ohne Schreibrecht wird vor dem Verschlüsseln abgewiesen (403), nichts bleibt liegen', async () => {
+  const f = await (await json('POST', '/api/files/folder', { name: 'readonly', parentId: null })).json();
+  const s = await json('POST', '/api/shares', { fileId: f.id, canRead: true, canWrite: false, canDownload: true });
+  const slug = (await s.json()).slug;
+  const before = sh(`ls ${UP} | wc -l`).trim();
+  const fd = new FormData();
+  fd.append('file', new Blob([crypto.randomBytes(100000)]), 'x.bin');
+  const res = await fetch(`${BASE}/api/public/shares/${slug}/upload`, { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 403);
+  await res.json();
+  assert.strictEqual(sh(`ls ${UP} | wc -l`).trim(), before);
+});
+
+test('Avatar über 2 MB -> 400 mit deutscher Meldung', async () => {
+  const fd = new FormData();
+  fd.append('avatar', new Blob([PNG, Buffer.alloc(3 * 1024 * 1024)], { type: 'image/png' }), 'gross.png');
+  const res = await api('/api/settings/avatar', { method: 'POST', body: fd });
+  assert.strictEqual(res.status, 400);
+  assert.match((await res.json()).error, /2 MB/);
+});
+
+/* ---------------- 409-Guards: Key AUS, Zeile verschlüsselt (nur normaler Stack) ---------------- */
+
+test('Key aus + enc_version=1: Schreibrouten antworten 409, Blob bleibt unverändert', { skip: ENC }, async () => {
+  const j = await upload('guard.txt', Buffer.from('unveraendert ' + MARKER));
+  psql(`UPDATE files SET enc_version = 1 WHERE id = ${j.id}`);
+  const share = await json('POST', '/api/shares', { fileId: j.id, canRead: true, canWrite: true, canDownload: true });
+  const slug = (await share.json()).slug;
+  const ver = psql(`INSERT INTO file_versions (file_id, content) VALUES (${j.id}, 'alt') RETURNING id`).split('\n')[0];
+  try {
+    let res = await json('PUT', `/api/files/content/${j.id}`, { content: 'neu' });
+    assert.strictEqual(res.status, 409); assert.match((await res.json()).error, /Master-Key/);
+    res = await json('POST', `/api/files/${j.id}/versions/${ver}/restore`, {});
+    assert.strictEqual(res.status, 409); await res.json();
+    res = await fetch(`${BASE}/api/public/shares/${slug}/content/${j.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'neu' }) });
+    assert.strictEqual(res.status, 409); await res.json();
+    for (const url of [`/api/files/${j.id}/binary-content`, null]) {
+      const fd = new FormData(); fd.append('file', new Blob([Buffer.from('neu')]), 'guard.txt');
+      res = url ? await api(url, { method: 'PUT', body: fd }) : await fetch(`${BASE}/api/public/shares/${slug}/binary-content/${j.id}`, { method: 'PUT', body: fd });
+      assert.strictEqual(res.status, 409, String(url)); await res.json();
+    }
+    const r = await getRow(j.id);
+    assert.strictEqual(r.path, j.path);
+    assert.ok(containsOnDisk('unveraendert ' + MARKER, [UP + '/' + j.path]), 'Blob wurde verändert');
+  } finally {
+    psql(`UPDATE files SET enc_version = NULL WHERE id = ${j.id}`);
+  }
+});
+
 /* ---------------- Aufräumen ---------------- */
 
 test('keine Temp-Reste: tmp-chunked und MYCLOUD_TMP_DIR sauber', async () => {
-  assert.strictEqual(sh(`ls -A ${UP}/tmp-chunked | wc -l`).trim(), '0');
+  assert.strictEqual(sh(`ls -A ${UP}/tmp-chunked 2>/dev/null | wc -l`).trim(), '0');
   if (ENC) await assertTmpEmpty();
 });
