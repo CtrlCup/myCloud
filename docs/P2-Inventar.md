@@ -120,3 +120,13 @@ P2b ist erledigt: Schreibpfade sind Copy-on-Write, damit darf P2c (Migration) la
   auf das tmpfs. `writeNewBlob` behält ohne Key die alten Dateirechte (umask).
 - Fehlerpfade räumen auf: create-empty, create-note (Blobs und halbfertige Container), öffentliches Anlegen; `writeEncrypted`
   zerstört den Eingabestream bei Fehlern; paralleles `complete` eines Chunk-Uploads liefert 409.
+
+## Nachbesserung P2c (Review)
+
+- **Outbox `pending_blob_deletes`** (`app/blob-outbox.js`, Tabelle in `initDb()`): `swapFileBlob` (alle Copy-on-Write-Nutzer) und das
+  endgültige Löschen (`hardDeleteTrashItem`, `deleteFolderRecursive`: `DELETE ... RETURNING path` samt Eintrag in einer Anweisung,
+  mit dem aktuellen statt eines veralteten Pfads) tragen alte Blob-Pfade transaktional ein; `tryDeleteBlob` löscht nach dem Commit und
+  entfernt den Eintrag. Der Worker läuft immer (Start, dann alle 10 min), prüft vor dem Löschen `files.path`, `users.avatar_path` und
+  `settings.value` und hat den Hook `isBlocked` für das spätere "backup_in_progress" (P4).
+- Der Adopt-Pfad der Migration behandelt Blobs mit Magic, die sich nicht vollständig entschlüsseln lassen, als Klartext.
+- `copyFileOrFolderRecursive`: fehlt der Quell-Blob, wird die Zeile einmal neu gelesen, sonst kommt ein deutscher Fehler (500).

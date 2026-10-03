@@ -152,11 +152,17 @@ isEncrypted(path)                            → exakte Magic-Bytes (nur Migrati
   (neue UUID, `writeEncrypted`), Verifikation (Entschlüsseln, SHA-256, Größe gegen `files.size`), dann ein Transaktions-Swap
   (`FOR UPDATE`, `expectPath`) von `path`/`enc_version`/`content_hash`, Löschen des Alt-Blobs erst nach dem Commit. Klartext-
   Thumbnails werden gelöscht, Klartext-Avatare nach `<uuid>.<ext>.enc` migriert. Eine Zeile mit `enc_version NULL`, deren Blob
-  bereits vollständig mit dem aktiven Key lesbar ist (und zur Größe passt), bekommt nur die Spalte nachgezogen; ein Blob mit
-  Magic, der nicht lesbar ist, bleibt unangetastet und zählt als `failed`. Abbruch: verwaiste Staging-Blobs
-  (`<name>.enc-tmp-<hex>`) entfernt `sweepOrphans` nach 1 h; nur zwischen Umbenennen und DB-Commit könnte ein unreferenzierter
-  Blob mit endgültigem Namen zurückbleiben (Fenster von Millisekunden). Steuerung: `MYCLOUD_MIGRATION_CONCURRENCY`,
-  `MYCLOUD_MIGRATION_PAUSE_MS`, Einstellung `encryption_auto_migrate`.
+  bereits vollständig mit dem aktiven Key lesbar ist (und zur Größe passt), bekommt nur die Spalte nachgezogen; besteht ein
+  Blob mit Magic diese Prüfung nicht, ist er Klartext (`enc_version NULL` heißt immer Klartext) und wird normal migriert.
+  Löschen alter Blobs läuft über die Outbox `pending_blob_deletes` (`app/blob-outbox.js`): `swapFileBlob` trägt den alten Pfad in
+  derselben Transaktion wie den Pfad-Swap ein, nach dem Commit löscht `tryDeleteBlob` und entfernt den Eintrag; ein Worker
+  (beim Start und alle 10 Minuten, immer aktiv) räumt Reste nach Abstürzen ab und löscht nur Pfade, die weder `files.path`
+  noch `users.avatar_path` noch ein Branding-Setting referenziert. Der neue Blob der Migration wird vor dem Umbenennen
+  ebenfalls vorgemerkt, sodass auch das Fenster Umbenennen/Commit abgedeckt ist (bleibt der Blob referenziert, wird nur der
+  Eintrag entfernt). Unverändert bleiben Reste, die nie in der Outbox standen (z. B. Absturz mitten in `writeEncrypted`):
+  `<name>.tmp-`/`.enc-tmp-`-Dateien entfernt `sweepOrphans` nach 1 h. P4 kann am Worker über `isBlocked` ("backup_in_progress")
+  einhängen. Zeilen mit fehlender oder abweichender `size` zählen als `failed` und brauchen eine manuelle Prüfung. Steuerung:
+  `MYCLOUD_MIGRATION_CONCURRENCY`, `MYCLOUD_MIGRATION_PAUSE_MS`, Einstellung `encryption_auto_migrate` (nur als DB-Setting).
 - Verschlüsselung ist **Opt-in**: Ohne konfigurierten Master-Key verhält sich die App wie heute.
 
 ## 4. Spaltenverschlüsselung in der Datenbank

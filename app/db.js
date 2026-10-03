@@ -220,6 +220,14 @@ async function initDb() {
     // Verschlüsselungs-Format des Blobs (files.path): NULL = Klartext, 1 = crypto-store Format v1. Einzige
     // Wahrheit für jede Lese-/Auslieferungsentscheidung (docs/Verschluesselung-und-Backup.md 3.5).
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_version SMALLINT');
+    // Outbox für das Löschen ALTER Blobs (siehe blob-outbox.js): swapFileBlob trägt den ersetzten Pfad in derselben
+    // Transaktion wie den Pfad-Swap ein, damit nach einem Absturz zwischen Commit und unlink kein (Klartext-)Rest bleibt.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pending_blob_deletes (
+        path TEXT PRIMARY KEY,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     // Normalise legacy rows that stored an active document type (see getSafeMimeType in server.js).
     // Order matters: first everything html/xml/svg/javascript -> text/plain (office types excluded),
     // then .svg files -> image/svg+xml. IS DISTINCT FROM keeps reboots from rewriting unchanged rows.

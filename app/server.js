@@ -24,6 +24,7 @@ const { isoBase64URL } = require('@simplewebauthn/server/helpers');
 const { withDbRetry } = require('./db-retry');
 const cryptoStore = require('./crypto-store');
 const { createMigration } = require('./encrypt-migration');
+const { createOutbox } = require('./blob-outbox');
 const fileDelivery = require('./file-delivery');
 const { isEncRow } = fileDelivery;
 const { pool, initDb, getSetting, setSetting, getAllSettings } = require('./db');
@@ -119,8 +120,13 @@ function deleteBlob(blobPath) {
 // Löschen eines ALTEN Blobs nach erfolgreichem DB-Commit: ein Fehler (EPERM/EIO) darf den neuen, bereits
 // referenzierten Blob nie gefährden. Ein verwaister alter Blob ist besser als ein verlorener neuer.
 function tryDeleteBlob(blobPath) {
-  try { deleteBlob(blobPath); } catch (e) { console.error(`Alter Blob konnte nicht gelöscht werden (${path.basename(blobPath)}):`, e.message); }
+  try { deleteBlob(blobPath); } catch (e) { console.error(`Alter Blob konnte nicht gelöscht werden (${path.basename(blobPath)}):`, e.message); return; }
+  // Gelöscht: Outbox-Eintrag (falls swapFileBlob/hardDelete einen angelegt hat) entfernen; ein Fehler hier ist harmlos (Worker räumt auf).
+  pool.query('DELETE FROM pending_blob_deletes WHERE path = $1', [path.relative(UPLOADS_DIR, blobPath)]).catch(() => {});
 }
+// Outbox (blob-outbox.js): alte Blobs werden in der Transaktion des Umhängens/Löschens vorgemerkt und nach dem Commit gelöscht;
+// der Worker räumt Reste nach Abstürzen ab. P4-Hook: isBlocked -> "backup_in_progress" (Sicherung läuft, nichts löschen).
+const blobOutbox = createOutbox({ pool, uploadsDir: UPLOADS_DIR, deleteBlob, isBlocked: () => false });
 
 // Schreib-Guard für die Key-AUS-Zweige: Eine Zeile mit enc_version > 0 darf nie in-place mit Klartext überschrieben
 // werden (der Blob wäre danach unlesbar). Wirft einen Fehler mit code ENC_NO_KEY; Routen antworten damit 409.
@@ -145,6 +151,7 @@ async function swapFileBlob(fileId, cols, { quota, expectPath } = {}) {
     const cur = await client.query('SELECT path FROM files WHERE id = $1 FOR UPDATE', [fileId]);
     if (cur.rows.length === 0) throw new Error(`Datei ${fileId} existiert nicht mehr.`);
     if (expectPath !== undefined && cur.rows[0].path !== expectPath) throw new Error(`Datei ${fileId} wurde zwischenzeitlich geändert.`);
+    if (cols.path !== undefined && cols.path !== cur.rows[0].path) await blobOutbox.enqueue(client, cur.rows[0].path); // alter Blob: Löschen nach dem Commit, Rest räumt der Worker
     const keys = Object.keys(cols);
     const upd = await client.query(
       `UPDATE files SET ${keys.map((k, i) => `${k} = $${i + 1}`).join(', ')} WHERE id = $${keys.length + 1} RETURNING *`,
@@ -2688,17 +2695,17 @@ async function deleteFolderRecursive(folderId, userId) {
     [folderId, userId]
   );
 
-  for (const file of subtreeRes.rows) {
-    if (file.is_folder) continue;
-    const filePath = path.join(UPLOADS_DIR, file.path);
-    // fs.existsSync() + fs.unlinkSync() is a TOCTOU race: if the file disappears between
-    // the check and the unlink (e.g. an overlapping delete-multiple call on the same
-    // subtree), unlinkSync throws ENOENT here and aborts the recursion partway through,
-    // leaving some rows deleted and others not. deleteBlob ignores ENOENT (best-effort).
-    deleteBlob(filePath);
+  // Zeilen löschen und die AKTUELLEN Blob-Pfade (RETURNING, kein veralteter Snapshot, z. B. nach einem Migrations-Swap)
+  // in derselben Anweisung in die Outbox eintragen; danach die Blobs löschen (Fehler: Worker räumt auf).
+  const del = await pool.query(
+    `WITH d AS (DELETE FROM files WHERE id = ANY($1) RETURNING path, is_folder),
+          q AS (INSERT INTO pending_blob_deletes (path) SELECT path FROM d WHERE NOT is_folder ON CONFLICT DO NOTHING)
+     SELECT path, is_folder FROM d`,
+    [subtreeRes.rows.map(f => f.id)]
+  );
+  for (const file of del.rows) {
+    if (!file.is_folder) tryDeleteBlob(path.join(UPLOADS_DIR, file.path));
   }
-
-  await pool.query('DELETE FROM files WHERE id = ANY($1)', [subtreeRes.rows.map(f => f.id)]);
 }
 
 // Permanently removes a single trash item (file or folder) — physical file(s) plus DB
@@ -2709,8 +2716,11 @@ async function hardDeleteTrashItem(file, userId) {
   if (file.is_folder) {
     await deleteFolderRecursive(file.id, userId);
   } else {
-    deleteBlob(path.join(UPLOADS_DIR, file.path));
-    await pool.query('DELETE FROM files WHERE id = $1', [file.id]);
+    const del = await pool.query(
+      `WITH d AS (DELETE FROM files WHERE id = $1 RETURNING path),
+            q AS (INSERT INTO pending_blob_deletes (path) SELECT path FROM d ON CONFLICT DO NOTHING)
+       SELECT path FROM d`, [file.id]);
+    if (del.rows.length) tryDeleteBlob(path.join(UPLOADS_DIR, del.rows[0].path));
   }
 }
 
@@ -2953,7 +2963,7 @@ app.post('/api/files/move-multiple', requireAuth, requirePermission('rename'), a
 async function copyFileOrFolderRecursive(fileId, targetFolderId, userId, isRoot = true) {
   const fileRes = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [fileId, userId]);
   if (fileRes.rows.length === 0) return;
-  const file = fileRes.rows[0];
+  let file = fileRes.rows[0];
 
   if (file.is_folder) {
     const folderName = isRoot ? await generateUniqueName(userId, targetFolderId, `${file.name} (Kopie)`, true) : file.name;
@@ -2969,12 +2979,22 @@ async function copyFileOrFolderRecursive(fileId, targetFolderId, userId, isRoot 
       await copyFileOrFolderRecursive(child.id, newFolder.id, userId, false);
     }
   } else {
-    const oldPath = path.join(UPLOADS_DIR, file.path);
-    if (!fs.existsSync(oldPath)) return;
-
     const newFilename = crypto.randomUUID() + safeFileExtension(file.name);
     const newRelativePath = `${userId}/${newFilename}`;
-    fs.copyFileSync(oldPath, path.join(ensureUserUploadDir(userId), newFilename));
+    // Fehlt der Quell-Blob (z. B. weil die Migration/ein Speichern ihn zwischen Lesen der Zeile und Kopieren ersetzt hat),
+    // die Zeile EINMAL neu lesen und mit dem neuen Pfad wiederholen; sonst Fehler statt stillem Überspringen.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        fs.copyFileSync(path.join(UPLOADS_DIR, file.path), path.join(ensureUserUploadDir(userId), newFilename));
+        break;
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+        if (attempt > 0) throw Object.assign(new Error(`Die Datei "${file.name}" konnte nicht kopiert werden: Der gespeicherte Inhalt fehlt.`), { code: 'COPY_SOURCE_MISSING' });
+        const again = await pool.query('SELECT * FROM files WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL', [fileId, userId]);
+        if (again.rows.length === 0) return;
+        file = again.rows[0];
+      }
+    }
 
     const newName = !isRoot ? file.name : file.name.includes('.')
       ? file.name.replace(/(\.[^.]+)$/, ' (Kopie)$1')
@@ -3069,7 +3089,7 @@ app.post('/api/files/copy-multiple', requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Error copying multiple files:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: err.code === 'COPY_SOURCE_MISSING' ? err.message : 'Internal server error' });
   }
 });
 
@@ -6482,7 +6502,7 @@ app.post('/api/settings/admin/faststart-backfill', requireAdmin, async (req, res
 // Läuft nur bei aktivem Master-Key; Laufstatus nur im Speicher, die Zähler kommen per COUNT aus files.enc_version.
 const encMigration = createMigration({
   pool, cryptoStore, uploadsDir: UPLOADS_DIR, thumbnailsDir: THUMBNAILS_DIR,
-  swapFileBlob, tryDeleteBlob, newBlobPath, detectAvatarExt: detectAvatarImageExt,
+  swapFileBlob, tryDeleteBlob, newBlobPath, detectAvatarExt: detectAvatarImageExt, blobOutbox,
 });
 
 app.get('/api/settings/admin/encryption-status', requireAdmin, denyApiKey, async (req, res) => {
@@ -7415,6 +7435,7 @@ withDbRetry(initDb)
     // in-progress move for a given file.
     await migrateUploadsToPerUserFolders();
     // Muss nach migrateUploadsToPerUserFolders() laufen (Pfade); Aus über Einstellung encryption_auto_migrate = 'false'.
+    blobOutbox.start(); // läuft immer (auch ohne Key): räumt alte Blobs nach Abbrüchen ab
     if (cryptoStore.isEnabled() && (await getSetting('encryption_auto_migrate')) !== 'false') encMigration.start();
     logVersionStatus();
     const server = app.listen(PORT, () => {

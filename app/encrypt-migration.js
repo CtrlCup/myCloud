@@ -8,8 +8,8 @@
  *   1. Alt-Blob fehlt -> `missing`.
  *   2. Defensiv: trägt der Blob am Pfad bereits die MCENC1-Magic UND lässt er sich komplett mit dem aktiven Key
  *      entschlüsseln UND stimmt die Größe mit files.size, wurde er schon verschlüsselt (Abbruch zwischen Schreiben und
- *      DB-Update einer früheren Strategie): nur die Spalte nachziehen (`adopted`). Magic allein reicht nie. Trägt er die
- *      Magic, besteht aber die Prüfung nicht, wird er NICHT angefasst (`failed`), damit nie doppelt verschlüsselt wird.
+ *      DB-Update einer früheren Strategie): nur die Spalte nachziehen (`adopted`). Magic allein reicht nie. Besteht die
+ *      Prüfung nicht, ist der Blob Klartext (enc_version NULL heißt immer Klartext) und wird normal migriert.
  *   3. Klartext -> NEUER Blob (neue UUID, gleiche Endung, selber Benutzerordner) über writeEncrypted, zunächst unter einem
  *      Staging-Namen `<name>.enc-tmp-<hex>` (den sweepOrphans nach 1 h entfernt, falls der Prozess stirbt).
  *   4. Verifikation vor dem Umhängen: neuer Blob komplett mit createDecryptStream lesen, SHA-256 und Größe gegen das
@@ -51,7 +51,7 @@ function hashStream(stream) {
 const unlinkQuiet = (p) => fsp.unlink(p).catch(() => {});
 
 function createMigration(deps) {
-  const { pool, cryptoStore, uploadsDir, thumbnailsDir, swapFileBlob, tryDeleteBlob, newBlobPath, detectAvatarExt } = deps;
+  const { pool, cryptoStore, uploadsDir, thumbnailsDir, swapFileBlob, tryDeleteBlob, newBlobPath, detectAvatarExt, blobOutbox } = deps;
   const log = deps.log || console;
   const concurrency = deps.concurrency ?? envInt(process.env.MYCLOUD_MIGRATION_CONCURRENCY, 1, 1, 8);
   const pauseMs = deps.pauseMs ?? envInt(process.env.MYCLOUD_MIGRATION_PAUSE_MS, 50, 0, 10000);
@@ -78,8 +78,8 @@ function createMigration(deps) {
           [h.sha256, row.id, row.path]);
         return r.rowCount ? 'adopted' : 'skipped';
       }
-      log.error(`Migration: Datei ${row.id} hat einen Verschlüsselungs-Header, ist aber nicht lesbar oder hat eine abweichende Größe; unverändert gelassen.`);
-      return 'failed';
+      // Magic ohne vollständig gültigen Inhalt: enc_version NULL heißt laut Copy-on-Write-Konzept Klartext, also normal
+      // migrieren (neuer Blob, Alt-Blob bleibt bis nach dem Commit).
     }
 
     const { relativePath, absPath } = newBlobPath(row.owner_id, row.path);
@@ -90,9 +90,12 @@ function createMigration(deps) {
       if (res.plainSize !== expectedSize) throw new Error(`Größe ${res.plainSize} weicht von files.size ${expectedSize} ab`);
       const v = await hashStream(cryptoStore.createDecryptStream(staging, { encrypted: true }));
       if (v.sha256 !== res.sha256 || v.size !== res.plainSize) throw new Error('Verifikation des neuen Blobs fehlgeschlagen');
+      // Vor dem Umbenennen vormerken: stirbt der Prozess bis zum Swap, löscht der Outbox-Worker den (dann unreferenzierten) Blob.
+      await blobOutbox.enqueue(pool, relativePath);
       await fsp.rename(staging, absPath);
     } catch (e) {
       await unlinkQuiet(staging);
+      await blobOutbox.dequeue(relativePath).catch(() => {});
       log.error(`Migration: Datei ${row.id} nicht migriert: ${e.message}`);
       return 'failed';
     }
@@ -102,11 +105,13 @@ function createMigration(deps) {
       swapped = await swapFileBlob(row.id, { path: relativePath, enc_version: 1, content_hash: res.sha256 }, { expectPath: row.path });
     } catch (e) {
       await unlinkQuiet(absPath);
+      await blobOutbox.dequeue(relativePath).catch(() => {});
       const cur = (await pool.query('SELECT path, enc_version FROM files WHERE id = $1', [row.id])).rows[0];
       if (!cur || cur.path !== row.path || cur.enc_version != null) return 'skipped'; // zwischenzeitlich bearbeitet/gelöscht
       throw e;
     }
-    if (!swapped.ok) { await unlinkQuiet(absPath); return 'skipped'; }
+    if (!swapped.ok) { await unlinkQuiet(absPath); await blobOutbox.dequeue(relativePath).catch(() => {}); return 'skipped'; }
+    await blobOutbox.dequeue(relativePath).catch(() => {}); // jetzt referenziert
     // Nur löschen, wenn kein anderer Eintrag denselben Blob referenziert
     const shared = await pool.query('SELECT 1 FROM files WHERE path = $1 AND id <> $2 LIMIT 1', [row.path, row.id]);
     if (!shared.rows.length) tryDeleteBlob(swapped.oldPath);
@@ -134,9 +139,21 @@ function createMigration(deps) {
       const res = await cryptoStore.writeEncrypted(newAbs, fs.createReadStream(oldAbs));
       const v = await hashStream(cryptoStore.createDecryptStream(newAbs, { encrypted: true }));
       if (res.plainSize !== expected || v.sha256 !== res.sha256 || v.size !== expected) throw new Error('Verifikation fehlgeschlagen');
-      const r = await pool.query('UPDATE users SET avatar_path = $1 WHERE id = $2 AND avatar_path = $3', [name, user.id, user.avatar_path]);
-      if (!r.rowCount) { await unlinkQuiet(newAbs); return; }
-      await unlinkQuiet(oldAbs);
+      // UPDATE und Outbox-Eintrag des alten Avatars in EINER Transaktion; der Klartext wird erst nach dem Commit gelöscht
+      const client = await pool.connect();
+      let swapped = false;
+      try {
+        await client.query('BEGIN');
+        const r = await client.query('UPDATE users SET avatar_path = $1 WHERE id = $2 AND avatar_path = $3', [name, user.id, user.avatar_path]);
+        if (r.rowCount) await blobOutbox.enqueue(client, path.basename(user.avatar_path));
+        await client.query(r.rowCount ? 'COMMIT' : 'ROLLBACK');
+        swapped = r.rowCount > 0;
+      } catch (e) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw e;
+      } finally { client.release(); }
+      if (!swapped) { await unlinkQuiet(newAbs); return; }
+      tryDeleteBlob(oldAbs);
       stats.avatarsMigrated++;
     } catch (e) {
       await unlinkQuiet(newAbs);
