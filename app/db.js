@@ -1,4 +1,10 @@
 const { Pool } = require('pg');
+const { encryptColumn, decryptColumn } = require('./column-crypto');
+
+// Geheime Einstellungen: bei aktivem Master-Key verschlüsselt in der DB (Phase P3), Kontext "settings.<key>".
+const SECRET_SETTING_KEYS = ['email_smtp_pass', 'sso_client_secret'];
+const encSetting = (key, value) => (SECRET_SETTING_KEYS.includes(key) && value !== '' ? encryptColumn(value, `settings.${key}`) : value);
+const decSetting = (key, value) => (SECRET_SETTING_KEYS.includes(key) ? decryptColumn(value, `settings.${key}`) : value);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -258,6 +264,8 @@ async function initDb() {
       )
     `);
     await client.query('CREATE INDEX IF NOT EXISTS idx_file_versions_file_id ON file_versions(file_id)');
+    // Klartext-Größe (Zeichen): content kann verschlüsselt sein (P3), LENGTH(content) wäre dann die Größe des Ciphertexts.
+    await client.query('ALTER TABLE file_versions ADD COLUMN IF NOT EXISTS size INTEGER');
 
     // Settings Table
     await client.query(`
@@ -327,18 +335,26 @@ async function initDb() {
         (seed.key === 'email_from' && process.env.EMAIL_FROM)
       );
 
-      if (isEnvValueProvided) {
+      if (isEnvValueProvided && SECRET_SETTING_KEYS.includes(seed.key)) {
+        // Secrets stehen nicht mehr in der .env, die die App zurückschreibt (F3): ein in der DB gesetzter (z. B. im
+        // Admin-Panel geänderter) Wert darf beim Start nicht vom alten .env-Wert überschrieben werden.
+        await client.query(`
+          INSERT INTO settings (key, value)
+          VALUES ($1, $2)
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value WHERE settings.value IS NULL OR settings.value = ''
+        `, [seed.key, encSetting(seed.key, seed.value)]);
+      } else if (isEnvValueProvided) {
         await client.query(`
           INSERT INTO settings (key, value)
           VALUES ($1, $2)
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-        `, [seed.key, seed.value]);
+        `, [seed.key, encSetting(seed.key, seed.value)]);
       } else {
         await client.query(`
           INSERT INTO settings (key, value)
           VALUES ($1, $2)
           ON CONFLICT (key) DO NOTHING
-        `, [seed.key, seed.value]);
+        `, [seed.key, encSetting(seed.key, seed.value)]);
       }
     }
 
@@ -358,7 +374,7 @@ async function getSetting(key) {
   try {
     const res = await pool.query('SELECT value FROM settings WHERE key = $1', [key]);
     if (res.rows.length > 0) {
-      return res.rows[0].value;
+      return decSetting(key, res.rows[0].value);
     }
     return null;
   } catch (err) {
@@ -374,7 +390,7 @@ async function setSetting(key, value) {
       INSERT INTO settings (key, value)
       VALUES ($1, $2)
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-    `, [key, String(value)]);
+    `, [key, encSetting(key, String(value))]);
     return true;
   } catch (err) {
     console.error(`Error setting ${key}:`, err);
@@ -388,7 +404,13 @@ async function getAllSettings() {
     const res = await pool.query('SELECT key, value FROM settings');
     const settings = {};
     res.rows.forEach(row => {
-      settings[row.key] = row.value;
+      try {
+        settings[row.key] = decSetting(row.key, row.value);
+      } catch (e) {
+        // Secret nicht lesbar (Key fehlt/falsch): Rohwert belassen, damit "gesetzt" erkennbar bleibt; die UI maskiert Secrets
+        console.error(`Einstellung ${row.key} nicht entschlüsselbar: ${e.message}`);
+        settings[row.key] = row.value;
+      }
     });
     return settings;
   } catch (err) {
@@ -403,4 +425,5 @@ module.exports = {
   getSetting,
   setSetting,
   getAllSettings,
+  SECRET_SETTING_KEYS,
 };
