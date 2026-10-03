@@ -421,6 +421,7 @@ async function assembleChunkedUpload(session) {
     }
   } catch (err) {
     out.end();
+    fs.unlink(outPath, () => {}); // halb geschriebene Ausgabe nicht liegen lassen
     throw err;
   }
   await new Promise((resolve, reject) => {
