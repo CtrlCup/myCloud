@@ -137,3 +137,26 @@ test('F3: updateEnvFile schreibt keine Secrets, nicht-geheime Werte weiter, vorh
     assert.match(c, /^OTHER=1$/m);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('Klartext-Escape: ohne Key wird Klartext mit enc:v1:-Prefix als enc:v1:p:<base64> gespeichert und gelesen (mit und ohne Key)', () => {
+  cs.useKeys(null);
+  for (const v of ['enc:v1:foo', 'enc:v1:', 'enc:v1:1:AAAA', 'enc:v1:p:xyz ä']) {
+    const e = encryptColumn(v, CTX);
+    assert.match(e, /^enc:v1:p:[A-Za-z0-9+/]+=*$/);
+    assert.strictEqual(decryptColumn(e, CTX), v);
+    cs.useKeys(K1);
+    assert.strictEqual(decryptColumn(e, CTX), v, 'auch mit Key lesbar (bis zur Migration)');
+    cs.useKeys(null);
+  }
+  assert.strictEqual(encryptColumn('normal', CTX), 'normal', 'sonstiger Klartext bleibt unverändert');
+  assert.strictEqual(codeOf(() => decryptColumn('enc:v1:p:!!', CTX)).code, 'COLUMN_FORMAT');
+  assert.strictEqual(codeOf(() => decryptColumn('enc:v1:p:' + Buffer.from('a').toString('base64').replace('=', ''), CTX)).code, 'COLUMN_FORMAT');
+});
+
+test('Mit Key wird Klartext mit enc:v1:-Prefix normal verschlüsselt', () => {
+  cs.useKeys(K1);
+  const e = encryptColumn('enc:v1:foo', CTX);
+  assert.match(e, /^enc:v1:1:/);
+  assert.strictEqual(decryptColumn(e, CTX), 'enc:v1:foo');
+  assert.strictEqual(codeOf(() => decryptColumn('enc:v1:foo', CTX)).code, 'COLUMN_FORMAT');
+});

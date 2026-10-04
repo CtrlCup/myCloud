@@ -5061,7 +5061,9 @@ function renderEncryptionStatus(d) {
   const colTotal = cols.reduce((n, c) => n + c.total, 0);
   const colEnc = cols.reduce((n, c) => n + c.encrypted, 0);
   const colsEl = document.getElementById('admin-enc-columns');
-  if (colsEl) colsEl.textContent = `Datenbankfelder (2FA-Secrets, SMTP-/SSO-Secrets, Versionsverlauf, Freigabe-Nachrichten): ${colEnc} von ${colTotal} verschlüsselt, ${colTotal - colEnc} offen.`;
+  if (colsEl) colsEl.textContent = `Datenbankfelder (2FA-Secrets, SMTP-/SSO-Secrets, Versionsverlauf, Freigabe-Nachrichten): ${colEnc} von ${colTotal} verschlüsselt, ${colTotal - colEnc} offen.` +
+    ((d.columnMigration && d.columnMigration.failed) ? ` Fehlgeschlagen: ${d.columnMigration.failed}.` : '') +
+    (cols.reduce((n, c) => n + (c.unreadable || 0), 0) ? ` Nicht lesbar (Key/Daten prüfen): ${cols.reduce((n, c) => n + (c.unreadable || 0), 0)}.` : '');
   btn.style.display = 'inline-flex';
   btn.dataset.action = running ? 'stop' : 'start';
   btn.textContent = running ? 'Migration stoppen' : 'Migration starten';

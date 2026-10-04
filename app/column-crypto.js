@@ -13,6 +13,9 @@
  *   - ein `enc:v1:`-Wert ohne Key: Fehler COLUMN_NO_KEY (kein Klartext-Fallback);
  *   - Klartext-Wert mit Key (Altbestand vor der Migration): wird unverändert zurückgegeben;
  *   - ungültiges Format, unbekannte keyId, falscher Key, manipulierter Wert oder falscher Kontext: Fehler mit `code`.
+ *   - Klartext, der selbst mit `enc:v1:` beginnt, würde sonst als Chiffrat missverstanden: Ohne Key wird er als
+ *     `enc:v1:p:<base64(klartext)>` gespeichert (keyId `p` = Plaintext-Escape); decryptColumn dekodiert ihn mit und
+ *     ohne Key (die Migration verschlüsselt ihn später normal). Mit Key wird er wie jeder Klartext verschlüsselt.
  * null/undefined werden unverändert durchgereicht.
  */
 const crypto = require('crypto');
@@ -21,6 +24,8 @@ const cryptoStore = require('./crypto-store');
 const PREFIX = 'enc:v1:';
 const NONCE = 12;
 const TAG = 16;
+const ESCAPE_PREFIX = 'enc:v1:p:';
+const ESCAPE_RE = /^enc:v1:p:([A-Za-z0-9+/]+={0,2})$/;
 const VALUE_RE = /^enc:v1:([1-9]\d{0,8}):([A-Za-z0-9+/]+={0,2})$/;
 
 class ColumnCryptoError extends Error {
@@ -47,7 +52,9 @@ function encryptColumn(plain, context) {
   if (plain === null || plain === undefined) return plain;
   const a = aad(context);
   const keyId = cryptoStore.getCurrentKeyId();
-  if (keyId === null) return plain;
+  if (keyId === null) {
+    return typeof plain === 'string' && plain.startsWith(PREFIX) ? ESCAPE_PREFIX + Buffer.from(plain, 'utf8').toString('base64') : plain;
+  }
   const master = cryptoStore.getMasterKey(keyId);
   const nonce = crypto.randomBytes(NONCE);
   const c = crypto.createCipheriv('aes-256-gcm', columnKey(master), nonce, { authTagLength: TAG });
@@ -59,6 +66,12 @@ function encryptColumn(plain, context) {
 function decryptColumn(value, context) {
   if (typeof value !== 'string' || !isEncryptedColumn(value)) return value;
   const a = aad(context);
+  if (value.startsWith(ESCAPE_PREFIX)) {
+    const e = ESCAPE_RE.exec(value);
+    const raw = e && Buffer.from(e[1], 'base64');
+    if (!raw || raw.toString('base64') !== e[1]) throw new ColumnCryptoError('COLUMN_FORMAT', 'Verschlüsselter Datenbankwert hat ein ungültiges Format.');
+    return raw.toString('utf8');
+  }
   const m = VALUE_RE.exec(value);
   if (!m) throw new ColumnCryptoError('COLUMN_FORMAT', 'Verschlüsselter Datenbankwert hat ein ungültiges Format.');
   const raw = Buffer.from(m[2], 'base64');
@@ -77,4 +90,4 @@ function decryptColumn(value, context) {
   }
 }
 
-module.exports = { encryptColumn, decryptColumn, isEncryptedColumn, ColumnCryptoError, PREFIX };
+module.exports = { encryptColumn, decryptColumn, isEncryptedColumn, ColumnCryptoError, PREFIX, ESCAPE_PREFIX };
