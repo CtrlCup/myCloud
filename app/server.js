@@ -1465,8 +1465,11 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
       user: { id: user.id, username: user.username, role: user.role, hasCustomUsername: user.has_custom_username }
     });
   } catch (err) {
-    console.error('2FA Verification error:', err);
-    if (err && String(err.code).startsWith('COLUMN_')) return res.status(500).json({ error: err.message });
+    if (!(err && String(err.code).startsWith('COLUMN_'))) console.error('2FA Verification error:', err);
+    if (err && String(err.code).startsWith('COLUMN_')) {
+      console.error(`2FA-Login: TOTP-Secret von Nutzer ${tempUserId} nicht lesbar: ${err.code}`);
+      return res.status(500).json({ error: 'Die Zwei-Faktor-Anmeldung ist vorübergehend nicht verfügbar. Bitte wende dich an einen Administrator.' });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -3573,6 +3576,16 @@ app.get('/api/files/content/:id', requireAuth, async (req, res) => {
 // kept. Also caps total versions per file so history stays lean rather than growing forever.
 const FILE_VERSION_MIN_INTERVAL_MS = 3 * 60 * 1000;
 const FILE_VERSION_MAX_PER_FILE = 30;
+// Entschlüsselt einen Listen-/Meta-Wert; bei unlesbarem Wert (Key fehlt/falsch, defekt) null + Log mit Code und Zeilen-ID
+// (nie dem Wert), damit EINE Zeile nie eine ganze Liste scheitern lässt.
+function safeDecryptColumn(value, context, id) {
+  try { return decryptColumn(value, context); }
+  catch (err) {
+    console.error(`${context} (${id}) nicht lesbar: ${err.code || err.message}`);
+    return null;
+  }
+}
+const VERSION_UNREADABLE = 'Diese Version ist wegen der Datenbankverschlüsselung nicht lesbar.';
 // content verschlüsselt (bei aktivem Master-Key); size = Klartext-Zeichenzahl, damit die Liste nicht entschlüsseln muss.
 async function insertFileVersion(fileId, content) {
   const size = content == null ? null : Array.from(String(content)).length;
@@ -3732,7 +3745,11 @@ app.get('/api/files/:id/versions/:versionId', requireAuth, async (req, res) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
     const row = result.rows[0];
-    row.content = decryptColumn(row.content, 'file_versions.content');
+    try { row.content = decryptColumn(row.content, 'file_versions.content'); }
+    catch (err) {
+      console.error(`file_versions.content (${versionId}) nicht lesbar: ${err.code || err.message}`);
+      return res.status(409).json({ error: VERSION_UNREADABLE });
+    }
     res.json(row);
   } catch (err) {
     console.error('Error fetching file version:', err);
@@ -3755,7 +3772,12 @@ app.post('/api/files/:id/versions/:versionId/restore', requireAuth, requirePermi
       [versionId, fileId]
     );
     if (versionRes.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
-    const restoredContent = decryptColumn(versionRes.rows[0].content, 'file_versions.content');
+    let restoredContent;
+    try { restoredContent = decryptColumn(versionRes.rows[0].content, 'file_versions.content'); }
+    catch (err) {
+      console.error(`file_versions.content (${versionId}) nicht lesbar: ${err.code || err.message}`);
+      return res.status(409).json({ error: VERSION_UNREADABLE });
+    }
 
     const fileRes = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
     const file = fileRes.rows[0];
@@ -4081,7 +4103,7 @@ app.post('/api/shares', requireAuth, requirePermission('share'), async (req, res
       [slug, fileId, canRead !== false, canWrite === true, canDownload !== false, canZip !== false, expiresAt, passwordHash, maxDownloadsVal, onlyUploadVal, canCollab === true, encryptColumn(messageVal, 'shares.message')]
     );
     const share = result.rows[0];
-    share.message = decryptColumn(share.message, 'shares.message');
+    share.message = safeDecryptColumn(share.message, 'shares.message', share.id);
 
     let notified = false;
     const recipientEmail = notifyEmail ? String(notifyEmail).trim() : '';
@@ -4207,7 +4229,7 @@ app.put('/api/shares/:id', requireAuth, async (req, res) => {
     );
 
     const updated = result.rows[0];
-    updated.message = decryptColumn(updated.message, 'shares.message');
+    updated.message = safeDecryptColumn(updated.message, 'shares.message', updated.id);
     res.json(updated);
   } catch (err) {
     console.error('Error updating share:', err);
@@ -4338,7 +4360,7 @@ app.get('/api/shares', requireAuth, async (req, res) => {
        WHERE f.owner_id = $1`,
       [userId]
     );
-    res.json(result.rows.map(r => ({ ...r, message: decryptColumn(r.message, 'shares.message') })));
+    res.json(result.rows.map(r => ({ ...r, message: safeDecryptColumn(r.message, 'shares.message', r.id) })));
   } catch (err) {
     console.error('Error fetching shares:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -4956,7 +4978,7 @@ app.get('/api/public/shares/:slug', async (req, res) => {
         expires_at: share.expires_at,
         only_upload: share.only_upload,
         can_collab: share.can_collab,
-        message: decryptColumn(share.message, 'shares.message'),
+        message: safeDecryptColumn(share.message, 'shares.message', share.id),
       },
       baseFile: {
         id: baseFile.id,
@@ -6169,7 +6191,7 @@ app.post('/api/settings/2fa/totp/setup', requireAuth, denyApiKey, async (req, re
       length: 20
     });
 
-    req.session.tempTotpSecret = secret.base32;
+    req.session.tempTotpSecret = encryptColumn(secret.base32, 'session.totp_temp'); // Sitzungen liegen in der DB
 
     res.json({
       success: true,
@@ -6185,10 +6207,14 @@ app.post('/api/settings/2fa/totp/setup', requireAuth, denyApiKey, async (req, re
 // Confirm TOTP 2FA setup
 app.post('/api/settings/2fa/totp/confirm', requireAuth, denyApiKey, async (req, res) => {
   const { code } = req.body;
-  const tempSecret = req.session.tempTotpSecret;
-
-  if (!tempSecret || !code) {
+  if (!req.session.tempTotpSecret || !code) {
     return res.status(400).json({ error: 'Setup-Sitzung nicht gefunden oder Code fehlt.' });
+  }
+  let tempSecret;
+  try { tempSecret = decryptColumn(req.session.tempTotpSecret, 'session.totp_temp'); }
+  catch (err) {
+    console.error(`TOTP-Bestätigung: temporäres Secret nicht lesbar: ${err.code}`);
+    return res.status(400).json({ error: 'Setup-Sitzung nicht lesbar. Bitte starte die Einrichtung neu.' });
   }
 
   const speakeasy = require('speakeasy');
@@ -6490,7 +6516,8 @@ app.get('/api/settings/admin/encryption-status', requireAdmin, denyApiKey, async
       keyId: cryptoStore.getCurrentKeyId(),
       ...c.rows[0],
       ...encMigration.getState(),
-      columns: await countColumns(pool),
+      columns: Object.fromEntries(Object.entries(await countColumns(pool, { cache: !colMigration.getState().running }))
+        .map(([k, v]) => [k, { ...v, unreadable: colMigration.getState().unreadableByColumn[k] || 0 }])),
       columnMigration: colMigration.getState(),
       autoMigrate: (await getSetting('encryption_auto_migrate')) !== 'false',
     });

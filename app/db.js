@@ -338,6 +338,12 @@ async function initDb() {
       if (isEnvValueProvided && SECRET_SETTING_KEYS.includes(seed.key)) {
         // Secrets stehen nicht mehr in der .env, die die App zurückschreibt (F3): ein in der DB gesetzter (z. B. im
         // Admin-Panel geänderter) Wert darf beim Start nicht vom alten .env-Wert überschrieben werden.
+        const existing = (await client.query('SELECT value FROM settings WHERE key = $1', [seed.key])).rows[0];
+        if (existing && existing.value) {
+          let differs = true;
+          try { differs = decSetting(seed.key, existing.value) !== seed.value; } catch { /* unlesbar: auch abweichend */ }
+          if (differs) console.warn(`${seed.key === 'email_smtp_pass' ? 'EMAIL_SMTP_PASS' : 'SSO_CLIENT_SECRET'} in .env weicht von der Datenbank ab und wird ignoriert (Admin-Einstellungen gelten).`);
+        }
         await client.query(`
           INSERT INTO settings (key, value)
           VALUES ($1, $2)
@@ -378,6 +384,12 @@ async function getSetting(key) {
     }
     return null;
   } catch (err) {
+    // Secret nicht lesbar (Key fehlt/falsch/manipuliert): fail closed, kein stiller Fallback auf einen .env-Wert.
+    // Nur Schlüsselname und Fehlercode loggen, nie den Wert.
+    if (err && String(err.code).startsWith('COLUMN_')) {
+      console.error(`Secret ${key} nicht lesbar: ${err.code}`);
+      throw err;
+    }
     console.error(`Error getting setting ${key}:`, err);
     return null;
   }
@@ -408,7 +420,7 @@ async function getAllSettings() {
         settings[row.key] = decSetting(row.key, row.value);
       } catch (e) {
         // Secret nicht lesbar (Key fehlt/falsch): Rohwert belassen, damit "gesetzt" erkennbar bleibt; die UI maskiert Secrets
-        console.error(`Einstellung ${row.key} nicht entschlüsselbar: ${e.message}`);
+        console.error(`Secret ${row.key} nicht lesbar: ${e.code}`);
         settings[row.key] = row.value;
       }
     });
