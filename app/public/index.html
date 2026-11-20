@@ -23,7 +23,7 @@
   <!-- SimpleWebAuthn Browser helper — pinned + SRI, see lucide comment above for the policy. -->
   <script src="https://unpkg.com/@simplewebauthn/browser@9.0.1/dist/bundle/index.umd.min.js" integrity="sha384-9+Bm5pUMP2324xMjhRahdomA9HaTxP6JcMhbl3tUAcV2+Jiohq8/T+dGj/rx/MaM" crossorigin="anonymous"></script>
   <!-- Custom Stylesheet -->
-  <link rel="stylesheet" href="/styles.css?v=0.4.32">
+  <link rel="stylesheet" href="/styles.css?v=0.4.33">
   <!-- PDF.js viewer component styles (page/text-layer rendering) -->
   <link rel="stylesheet" href="/pdfjs/web/pdf_viewer.css">
 </head>
@@ -200,6 +200,22 @@
 
     <!-- 2. DASHBOARD / FILE-EXPLORER -->
     <main id="dashboard-view" class="explorer" style="display: none;">
+      <!-- Mobile-App-Bar (#29), nur Nova ≤768px (styles.css): Hamburger, Ordnername mit Zurück-Pfeil,
+           Avatar für das Kontomenü. LiquidGlass hat dafür schon header#app-header oben. -->
+      <div id="mobile-appbar">
+        <!-- Opens the Nova sidebar as an off-canvas drawer (see mobile-ui.js initOffCanvasNav). -->
+        <button type="button" class="btn-icon" id="nova-hamburger-btn" title="Menü öffnen" aria-label="Menü öffnen">
+          <i data-lucide="menu"></i>
+        </button>
+        <button type="button" class="btn-icon" id="mobile-appbar-back" title="Zurück" aria-label="Zurück zum übergeordneten Ordner" style="display: none;">
+          <i data-lucide="arrow-left"></i>
+        </button>
+        <span id="mobile-appbar-title">Meine Dateien</span>
+        <button type="button" class="btn-icon" id="mobile-appbar-avatar" title="Konto" aria-label="Kontomenü öffnen">
+          <img id="mobile-appbar-avatar-img" class="user-avatar" src="" alt="">
+        </button>
+      </div>
+
       <!-- Only shown under the Nova theme (see styles.css); text filled in by updateNovaPageHeader() -->
       <div id="nova-page-header">
         <h1>Willkommen zurück, <span id="nova-welcome-name"></span>!</h1>
@@ -208,12 +224,6 @@
 
       <div class="toolbar">
         <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;">
-          <!-- Mobile-only: opens the Nova sidebar as an off-canvas drawer (see mobile-ui.js
-               initOffCanvasNav + styles.css @media max-width:768px). Hidden on wider viewports,
-               where the sidebar is either fully expanded or the desktop-narrow icon rail. -->
-          <button type="button" class="btn-icon" id="nova-hamburger-btn" title="Menü öffnen">
-            <i data-lucide="menu"></i>
-          </button>
           <div class="view-toggle">
             <button class="btn-icon" id="view-grid-btn" title="Kachelansicht"><i data-lucide="layout-grid"></i></button>
             <button class="btn-icon" id="view-list-btn" title="Listenansicht"><i data-lucide="list"></i></button>
@@ -2143,6 +2153,6 @@
 
   <!-- Client-side Logic Script -->
   <script src="/mobile-ui.js?v=1.0.0"></script>
-  <script src="/app.js?v=1.1.37"></script>
+  <script src="/app.js?v=1.1.38"></script>
 </body>
 </html>

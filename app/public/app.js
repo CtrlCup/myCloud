@@ -364,6 +364,7 @@ async function checkAuthStatus() {
 
       // Set nav avatar
       document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${Date.now()}`;
+      document.getElementById('mobile-appbar-avatar-img').src = document.getElementById('nav-avatar').src;
       
       // Admin Button anzeigen falls Admin
       const adminBtn = document.getElementById('dropdown-admin-btn');
@@ -550,6 +551,7 @@ function updateNovaPageHeader(viewName) {
     admin: 'Admin-Einstellungen'
   };
   subEl.textContent = subtitles[viewName] || '';
+  updateMobileAppBar();
 }
 
 window.addEventListener('hashchange', () => {
@@ -1308,6 +1310,57 @@ function renderBreadcrumbs() {
       container.appendChild(link);
     }
   });
+
+  updateMobileAppBar();
+}
+
+// Mobile-App-Bar (#29): aktueller Ordnername statt Breadcrumbs, Zurück-Pfeil in Unterordnern.
+function updateMobileAppBar() {
+  const title = document.getElementById('mobile-appbar-title');
+  const back = document.getElementById('mobile-appbar-back');
+  if (!title || !back) return;
+  // "Zuletzt hinzugefügt" lädt ohne renderBreadcrumbs(), deshalb hier eigens abgefragt.
+  const current = viewingRecents ? null : breadcrumbsHistory[breadcrumbsHistory.length - 1];
+  title.textContent = viewingRecents ? 'Zuletzt hinzugefügt' : (current ? current.name : 'Meine Dateien');
+  back.style.display = current ? '' : 'none';
+}
+
+const mobileAppBarBack = document.getElementById('mobile-appbar-back');
+if (mobileAppBarBack) {
+  mobileAppBarBack.onclick = () => {
+    breadcrumbsHistory = breadcrumbsHistory.slice(0, -1);
+    const parent = breadcrumbsHistory[breadcrumbsHistory.length - 1];
+    clearSelection();
+    loadFiles(parent ? parent.id : null);
+  };
+}
+
+// Avatar in der App-Bar: Kontomenü als Bottom-Sheet. Löst die vorhandenen Einträge des
+// Profil-Dropdowns aus, damit Sichtbarkeit (Admin, Einmalnotizen) und Logik nur dort leben.
+const mobileAppBarAvatar = document.getElementById('mobile-appbar-avatar');
+if (mobileAppBarAvatar && window.MobileUI) {
+  mobileAppBarAvatar.onclick = () => {
+    const entries = [
+      { id: 'dropdown-settings-btn', label: 'Einstellungen', icon: 'user' },
+      { id: 'dropdown-notes-btn', label: 'Einmalnotizen', icon: 'shield-alert' },
+      { id: 'dropdown-admin-btn', label: 'Admin-Einstellungen', icon: 'sliders' },
+      { id: 'dropdown-logout-btn', label: 'Abmelden', icon: 'log-out', danger: true }
+    ];
+    MobileUI.openBottomSheet({
+      title: (currentUser && currentUser.username) || 'Konto',
+      items: entries
+        .filter(entry => {
+          const el = document.getElementById(entry.id);
+          return el && el.style.display !== 'none';
+        })
+        .map(entry => ({
+          label: entry.label,
+          icon: entry.icon,
+          danger: entry.danger,
+          action: () => document.getElementById(entry.id).click()
+        }))
+    });
+  };
 }
 
 function applyLayoutDensity() {
@@ -6499,6 +6552,7 @@ window.onload = () => {
           // Cache busting forcing browser image reload
           const t = Date.now();
           document.getElementById('nav-avatar').src = `/api/users/${currentUser.id}/avatar?t=${t}`;
+          document.getElementById('mobile-appbar-avatar-img').src = `/api/users/${currentUser.id}/avatar?t=${t}`;
           document.getElementById('settings-avatar-preview').src = `/api/users/${currentUser.id}/avatar?t=${t}`;
         } else {
           showToast(data.error || 'Fehler beim Hochladen.');
@@ -9709,6 +9763,19 @@ if (searchInput && searchDeepCheck) {
       triggerSearch();
     }
   };
+
+  // Mobil ist das Suchfeld immer offen (#29, styles.css); der Desktop-Platzhalter mit
+  // Tastenkürzel wäre dort abgeschnitten und nutzlos.
+  const searchInputEl = document.getElementById('dashboard-search-input');
+  if (searchInputEl) {
+    const desktopPlaceholder = searchInputEl.placeholder;
+    const narrowQuery = window.matchMedia('(max-width: 768px)');
+    const applySearchPlaceholder = () => {
+      searchInputEl.placeholder = narrowQuery.matches ? 'Dateien durchsuchen' : desktopPlaceholder;
+    };
+    narrowQuery.addEventListener('change', applySearchPlaceholder);
+    applySearchPlaceholder();
+  }
 
   // Lupe-Button: Suchfeld umschalten (aus-/einklappen)
   const searchContainer = document.getElementById('search-container');

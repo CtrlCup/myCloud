@@ -4360,3 +4360,130 @@ tbody tr {
   }
 
 }
+
+/* ─── Mobiler Kopfbereich (#29) ───
+   Nova: fixierte App-Bar (Hamburger, Ordnername/Zurück, Avatar) statt Begrüßung. LiquidGlass hat
+   oben schon header#app-header mit Avatar und bekommt nur die kompakte Toolbar. Alles auf
+   .app-authed begrenzt, weil share.html .explorer/.toolbar mit anderem Aufbau nutzt. */
+#mobile-appbar {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  /* Einheitlicher Seitenrand, damit die App-Bar per negativem Margin randlos anliegen kann. */
+  [data-visual-theme="nova"].app-authed .container {
+    --mobile-gutter: 1rem;
+    padding-top: 0;
+    padding-left: var(--mobile-gutter);
+    padding-right: var(--mobile-gutter);
+  }
+
+  [data-visual-theme="nova"].app-authed #nova-page-header {
+    display: none;
+  }
+
+  [data-visual-theme="nova"].app-authed #mobile-appbar {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    position: sticky;
+    top: 0;
+    z-index: 1100;
+    height: calc(56px + env(safe-area-inset-top));
+    margin: 0 calc(-1 * var(--mobile-gutter));
+    padding: env(safe-area-inset-top) 0.5rem 0;
+    background: var(--dropdown-bg);
+    background-image: var(--glass-highlight);
+    border-bottom: 1px solid var(--glass-border);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+  }
+
+  #mobile-appbar .btn-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--color-text);
+  }
+
+  #mobile-appbar-title {
+    flex: 1;
+    min-width: 0;
+    padding: 0 0.25rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #mobile-appbar .user-avatar {
+    width: 32px;
+    height: 32px;
+  }
+
+  /* Engere Abstände zwischen App-Bar, Toolbar und Dateiliste (Desktop: 1.25rem). */
+  html.app-authed #dashboard-view {
+    gap: 0.75rem;
+  }
+
+  /* Toolbar: Suchzeile zuerst, darunter eine schlanke Zeile mit Ansicht und Sortierung. */
+  html.app-authed .toolbar {
+    gap: 0.5rem;
+  }
+  html.app-authed .toolbar > div:last-child {
+    order: -1;
+    gap: 0.5rem;
+  }
+  html.app-authed .toolbar > div:first-child {
+    gap: 0.5rem;
+  }
+
+  /* Suchfeld immer offen statt hinter der Lupe. ID-Selektor, weil die Aufklapp-Regel
+     (.search-container.search-expanded .search-expandable) spezifischer ist. */
+  html.app-authed #search-container {
+    flex: 1;
+    min-width: 0;
+  }
+  html.app-authed #search-toggle-btn {
+    display: none;
+  }
+  html.app-authed #search-expandable {
+    flex: 1;
+    max-width: none;
+    margin-left: 0;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  /* 16px: kleinere Schrift lässt iOS beim Antippen in die Seite zoomen. Inline-Styles, daher !important. */
+  html.app-authed #dashboard-search-input {
+    width: 100% !important;
+    height: 44px !important;
+    font-size: 16px !important;
+  }
+
+  /* Papierkorb steht schon in der Tab-Leiste. */
+  html.app-authed #trash-nav-btn {
+    display: none !important;
+  }
+
+  /* Nova zeigt den Ordner in der App-Bar, LiquidGlass behält die Breadcrumbs. */
+  [data-visual-theme="nova"].app-authed .toolbar .breadcrumbs {
+    display: none;
+  }
+
+  html.app-authed .view-toggle .btn-icon,
+  html.app-authed #sort-toggle-btn,
+  html.app-authed #dashboard-zip-current-folder-btn {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+}
