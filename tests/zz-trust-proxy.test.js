@@ -3,7 +3,7 @@
 // daher als LETZTE Suite laufen; danach stoppt Registrierung im Stack bis zum App-Neustart.
 const test = require('node:test');
 const assert = require('node:assert');
-const BASE = process.env.BASE_URL || 'http://localhost:3099';
+const { BASE } = require('./_env');
 
 test('rotierendes X-Forwarded-For umgeht das Registrierungs-Limit nicht', async () => {
   const statuses = [];

@@ -217,6 +217,20 @@ async function initDb() {
     // automatically; this also drives the admin-triggered backfill over files uploaded before
     // that existed — NULL there just means "not processed yet", not "processing failed".
     await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS faststart_processed_at TIMESTAMP');
+    // Verschlüsselungs-Format des Blobs (files.path): NULL = Klartext, 1 = crypto-store Format v1. Einzige
+    // Wahrheit für jede Lese-/Auslieferungsentscheidung (docs/Verschluesselung-und-Backup.md 3.5).
+    await client.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS enc_version SMALLINT');
+    // Outbox für das Löschen ALTER Blobs (siehe blob-outbox.js): swapFileBlob trägt den ersetzten Pfad in derselben
+    // Transaktion wie den Pfad-Swap ein, damit nach einem Absturz zwischen Commit und unlink kein (Klartext-)Rest bleibt.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS pending_blob_deletes (
+        path TEXT PRIMARY KEY,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        attempts INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    await client.query('ALTER TABLE pending_blob_deletes ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0');
+    await client.query('ALTER TABLE pending_blob_deletes ALTER COLUMN created_at TYPE TIMESTAMPTZ');
     // Normalise legacy rows that stored an active document type (see getSafeMimeType in server.js).
     // Order matters: first everything html/xml/svg/javascript -> text/plain (office types excluded),
     // then .svg files -> image/svg+xml. IS DISTINCT FROM keeps reboots from rewriting unchanged rows.

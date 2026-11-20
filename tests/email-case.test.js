@@ -4,12 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { execSync } = require('node:child_process');
 
-const BASE = process.env.BASE_URL || 'http://localhost:3099';
+const { BASE } = require('./_env');
 const stamp = Date.now();
 const user = 'emailcase' + stamp;
 const mixed = `Mixed.${stamp}@Example.TEST`;
 const password = 'Test-Passwort-12345!';
-const COMPOSE = 'docker compose -p mycloudtest -f tests/docker-compose.test.yml';
+const { COMPOSE_CMD: COMPOSE } = require('./_env');
 const psql = (sql) => execSync(`${COMPOSE} exec -T db psql -U mycloud -d mycloud -At`, { input: sql, cwd: __dirname + '/..' }).toString().trim();
 
 const post = (path, body) => fetch(BASE + path, {

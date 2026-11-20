@@ -42,3 +42,6 @@ backups/
 
 CLAUDE.md
 .claude
+
+# Lokale Secret-Dateien (z. B. Master-Key, siehe README)
+secrets/

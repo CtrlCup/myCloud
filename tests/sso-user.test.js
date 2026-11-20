@@ -6,8 +6,7 @@ const assert = require('node:assert');
 const { execFileSync } = require('node:child_process');
 const { sanitizeUsername, pickUsernameBase } = require('../app/sso-user');
 
-const BASE = process.env.BASE_URL || 'http://localhost:3099';
-const COMPOSE = ['compose', '-p', 'mycloudtest', '-f', __dirname + '/docker-compose.test.yml'];
+const { BASE, COMPOSE_ARGS: COMPOSE } = require('./_env');
 const RUN = Date.now().toString(36);
 
 test('sanitizeUsername: Bereinigung und Kürzung auf 50 Zeichen', () => {

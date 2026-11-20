@@ -1,6 +1,6 @@
 # Konzept: Verschlüsselte Speicherung, Backup & Wiederherstellung
 
-Stand: 2026-10-01 · Status: **Entwurf, noch nicht umgesetzt** · Umsetzung in Phasen, siehe
+Stand: 2026-10-03 · Status: **P1 und P2 umgesetzt (inkl. Migration), P3 bis P7 offen** · Umsetzung in Phasen, siehe
 Abschnitt 8 und die GitHub-Issues mit dem Label `encryption`.
 
 Ziel: Dateien und sensible Datenbankinhalte von myCloud liegen **verschlüsselt auf der Platte**.
@@ -61,33 +61,59 @@ ohne vollständiges Entschlüsseln funktionieren:
 Header (fest, 96 Byte):
   magic      "MCENC1\0\0"  (8 B)
   version    uint16 = 1
-  keyId      uint32        — welcher Master-Key (für Rotation)
-  segSize    uint32        — Klartext-Segmentgröße, Standard 65536
-  plainSize  uint64        — Klartextgröße in Byte
+  keyId      uint32        — welcher Master-Key (für Rotation, per Rewrap änderbar)
+  segSize    uint32        — Klartext-Segmentgröße, Standard 65536 (erlaubt 4096 .. 16 MiB)
+  plainSize  uint64        — Klartextgröße in Byte (beim Streamen erst am Ende bekannt)
   noncePfx   8 B zufällig  — Nonce-Präfix dieser Datei
-  wrappedDek 40 B          — DEK, mit KEK per AES-256-GCM-Keywrap (12 B Nonce + 16 B Tag inkl.)
-  reserviert/padding
+  wrappedDek 60 B          — Wrap-IV 12 B || DEK 32 B (verschlüsselt) || GCM-Tag 16 B
+  reserviert 2 B           — 0
 Segmente i = 0..n-1:
   ciphertext (segSize bzw. Rest) + 16 B GCM-Tag
   Nonce = noncePfx || uint32(i)
-  AAD   = Header-Hash || uint32(i) || isLast-Flag   — verhindert Vertauschen/Abschneiden
+  AAD   = SHA256(magic||version||segSize||noncePfx||reserviert) || uint32(i) || isLast-Byte
+          [|| plainSize uint64, nur beim letzten Segment]
 ```
+- **Segment-AAD nur über unveränderliche Felder.** `keyId` und `wrappedDek` stehen bewusst nicht
+  darin: Der DEK ist durch den GCM-Wrap authentisiert (AAD des Wraps: magic, version, keyId,
+  segSize, noncePfx). So ändert eine Schlüsselrotation (`rewrapHeader`) nur die 96 Header-Bytes,
+  die Segmente bleiben byte-identisch.
+- `plainSize` ist in der AAD des letzten Segments gebunden und wird beim Öffnen exakt gegen die
+  Dateigröße geprüft (`96 + plainSize + nseg*16`). Eine **leere Datei** hat genau ein leeres
+  letztes Segment, damit Abschneiden erkennbar bleibt. Weil `plainSize` nicht im Wrap-AAD steht, wird bei `plainSize = 0` dieses Segment beim
+  Lesen immer verifiziert (sonst ließe sich jede Datei auf 112 Byte kürzen und `plainSize=0` setzen).
+  `plainSizeOf()` liest nur den Header und prüft das nicht.
+- **Rewrap-Invariante (hartes Verbot):** Nach einem Rewrap, und generell, darf nie neuer Inhalt mit
+  demselben DEK und `noncePfx` geschrieben werden (Nonce-Wiederverwendung bricht GCM). Neuer
+  Inhalt bedeutet neue Datei mit neuem DEK (Copy-on-Write, Abschnitt 3.4).
+- **Domain-Separation:** Der Master-Key ist nie direkt Cipher-Key. Per HKDF-SHA256 (leeres Salt)
+  entstehen je Master-Key `kek_wrap` (info `mycloud-file-wrap-v1`), `kcv_key` (`mycloud-kcv-v1`)
+  und `col_key` (`mycloud-column-v1`, Abschnitt 4).
+- **Ob eine Datei verschlüsselt ist, entscheidet der Aufrufer** (später `files.enc_version`) über den
+  Parameter `encrypted`, nicht die Magic-Heuristik. `encrypted: true` ist strikt (ungültiger Header
+  ist ein Fehler, nie Klartext), `false` liest Klartext auch bei Header-ähnlichen Bytes. Die
+  Heuristik (`isEncrypted`, exakte 8-Byte-Magic) ist nur für Migration und Recovery gedacht.
 - Klartextposition p liegt in Segment `floor(p / segSize)`. Ein Range-Request entschlüsselt
   nur die betroffenen Segmente.
 - Ein manipuliertes Segment führt zu einem Fehler beim Entschlüsseln (GCM-Tag), der Stream bricht
   sauber ab.
 - Nur Node-`crypto`, keine neue Abhängigkeit.
+- **Grenzen:** Ein Angreifer mit DB- **und** Plattenzugriff ist nicht abgedeckt (er kann
+  `files.enc_version` und Dateien gemeinsam zurückdrehen oder ersetzen). `plainSize` im Header ist
+  für `plainSizeOf()` nicht authentisiert. Nach der Migration können Klartextreste auf der Platte
+  bleiben (freigegebene Blöcke, Snapshots, Thumbnails, alte Backups), sie werden durch die
+  Verschlüsselung nicht geschützt.
 
 ### 3.3 Neues Modul `app/crypto-store.js`
 Einziger Ort, der Blobs liest oder schreibt. Alle Stellen in `server.js`, die heute direkt über
 `fs` gehen, stellen darauf um.
 ```
-encryptFileInPlace(path) / writeEncrypted(path, readableOrBuffer) → { plainSize, sha256 }
-createDecryptStream(path, { start, end })   → Readable (Range-fähig)
-readDecrypted(path) → Buffer                (nur für kleine Dateien, z. B. Texteditor)
-withPlaintextTempFile(path, async tmp => …) → für ffmpeg/exiftool/tesseract/pdftoppm/rsvg
+encryptFileInPlace(path, { assumePlain }) / writeEncrypted(path, readableOrBuffer) → { plainSize, sha256 }
+createDecryptStream(path, { start, end, encrypted }) → Readable (Range-fähig)
+readDecrypted(path, { encrypted, maxBytes }) → Buffer (nur für kleine Dateien, z. B. Texteditor)
+withPlaintextTempFile(path, async tmp => …, { encrypted, ext }) → für ffmpeg/exiftool/tesseract/pdftoppm/rsvg
+plainSizeOf(path, { encrypted }), rewrapHeader(path, { toKeyId }), sweepOrphans(dirs)
 sendFileDecrypted(req, res, path, headers)  → Ersatz für res.sendFile/res.download inkl. Range, ETag
-isEncrypted(path)                            → Magic-Bytes prüfen (für Migration/Mischbetrieb)
+isEncrypted(path)                            → exakte Magic-Bytes (nur Migration/Recovery-Heuristik)
 ```
 
 ### 3.4 Betroffene Stellen im Code (Bestand 2026-10-01)
@@ -104,6 +130,12 @@ isEncrypted(path)                            → Magic-Bytes prüfen (für Migra
   verschlüsseln. Besser: eigener multer-StorageEngine, der direkt verschlüsselt schreibt, dann
   liegt nie Klartext auf der Platte. Chunks im `tmp-chunked`-Verzeichnis ebenfalls
   verschlüsselt oder auf tmpfs.
+  *Entscheidung (P2b):* Avatare (persönliche Fotos) werden bei aktivem Key verschlüsselt als `<uuid>.<ext>.enc`
+  abgelegt (Auslieferung entscheidet am Suffix `.enc`, wie bei Thumbnails; ältere Klartext-Avatare bleiben lesbar).
+  Branding-Assets (Logo, Hintergründe, SEO-Bild) bleiben bewusst Klartext: sie werden öffentlich ausgeliefert
+  (Login-Seite, Link-Vorschau) und enthalten keinen vertraulichen Inhalt.
+  Chunked-Upload: jeder Chunk liegt als eigener kleiner verschlüsselter Blob in `tmp-chunked`, der Zusammenbau
+  streamt sie entschlüsselt in ein einziges `writeEncrypted` (Details: `docs/P2-Inventar.md`).
 - **Thumbnails** (`uploads/thumbnails/`) sind abgeleiteter Klartext und werden genauso
   verschlüsselt gespeichert.
 - `files.size` bleibt die **Klartextgröße** (Quota, Anzeige). `content_hash` wird über den
@@ -116,6 +148,19 @@ isEncrypted(path)                            → Magic-Bytes prüfen (für Migra
   ersetzen, dann `enc_version = 1` setzen. Klartext- und verschlüsselte Blobs funktionieren
   während der Migration parallel (`isEncrypted()` per Magic-Bytes).
 - Fortschritt im Admin-Bereich anzeigen (wie der vorhandene Faststart-Backfill).
+- *Umsetzung (P2c, `app/encrypt-migration.js`):* Statt `rename()` über den Alt-Blob wird nie in-place geschrieben: neuer Blob
+  (neue UUID, `writeEncrypted`), Verifikation (Entschlüsseln, SHA-256, Größe gegen `files.size`), dann ein Transaktions-Swap
+  (`FOR UPDATE`, `expectPath`) von `path`/`enc_version`/`content_hash`, Löschen des Alt-Blobs erst nach dem Commit. Klartext-
+  Thumbnails werden gelöscht, Klartext-Avatare nach `<uuid>.<ext>.enc` migriert. Eine Zeile mit `enc_version NULL`, deren Blob
+  bereits vollständig mit dem aktiven Key lesbar ist (und zur Größe passt), bekommt nur die Spalte nachgezogen; besteht ein
+  Blob mit Magic diese Prüfung nicht, ist er Klartext (`enc_version NULL` heißt immer Klartext) und wird normal migriert.
+  Löschen alter Blobs läuft über die Outbox `pending_blob_deletes` (`app/blob-outbox.js`): `swapFileBlob` trägt den alten Pfad in
+  derselben Transaktion wie den Pfad-Swap ein, nach dem Commit löscht `tryDeleteBlob` und entfernt den Eintrag; ein Worker
+  (beim Start und alle 10 Minuten, immer aktiv) räumt Reste nach Abstürzen ab und löscht nur Pfade, die weder `files.path`
+  noch `users.avatar_path` noch ein Branding-Setting referenziert. Alle Sofort-Löschstellen (`tryDeleteBlob`, Papierkorb, Ersetzen, Einmal-Notizen, Benutzer löschen) gehen über denselben Referenz-Re-Check. Die Outbox enthält ausschließlich alte, bereits entkoppelte Pfade (UUID-eindeutig, nie wieder vergeben); der NEUE Blob der Migration steht nie darin. Bricht der Prozess zwischen Umbenennen und Swap ab, bleibt höchstens ein verwaister verschlüsselter Blob (Speicherverschwendung, kein Klartext-Leck). Einträge mit Verzeichnis-Pfad werden verworfen, nach 20 Fehlversuchen mit Warnung ebenfalls. Reste ohne Outbox-Eintrag (z. B. Absturz mitten in `writeEncrypted`):
+  `<name>.tmp-`/`.enc-tmp-`-Dateien entfernt `sweepOrphans` nach 1 h. P4 kann am Worker über `isBlocked` ("backup_in_progress")
+  einhängen. Zeilen mit fehlender oder abweichender `size` zählen als `failed` und brauchen eine manuelle Prüfung. Steuerung:
+  `MYCLOUD_MIGRATION_CONCURRENCY`, `MYCLOUD_MIGRATION_PAUSE_MS`, Einstellung `encryption_auto_migrate` (nur als DB-Setting).
 - Verschlüsselung ist **Opt-in**: Ohne konfigurierten Master-Key verhält sich die App wie heute.
 
 ## 4. Spaltenverschlüsselung in der Datenbank
@@ -150,12 +195,22 @@ Passwort-Hashes (bcrypt) und API-Key-Hashes bleiben, wie sie sind: Sie sind bere
 - **Ohne Master-Key sind die Daten verloren.** Das muss in UI und Doku unmissverständlich
   stehen. Der Admin-Bereich zeigt einen Hinweis, solange der Recovery-Code nicht als „gesichert“
   bestätigt ist.
-- Beim Start prüft die App einen **Key-Check-Wert** (in `settings`, z. B. `HMAC(KEK, "mycloud-kcv")`).
-  Falscher Schlüssel bedeutet: Start mit klarer Fehlermeldung abbrechen, statt Dateien
-  unlesbar zu „verschlüsseln“.
+- Beim Start prüft die App **Key-Check-Werte** pro `keyId` (in `settings` als `crypto_kcv:<keyId>`,
+  Wert `HMAC(kcv_key, "mycloud-kcv")`). Passt der Wert des `current`-Keys nicht, bricht der Start mit
+  klarer Fehlermeldung ab, statt Dateien unlesbar zu „verschlüsseln“. Eine neue `keyId` wird erst
+  angelegt, wenn ein anderer konfigurierter Key zu seinem Eintrag passt. Ist ein alter Key entfernt,
+  aber sein Eintrag noch da, gibt es nur eine Warnung (Dateien mit dieser `keyId` prüfen P2/P5).
 - **Rotation:** Neuer Key bekommt eine neue `keyId`. Ein Hintergrund-Job wrappt alle DEKs in den
   Headern neu (nur je ~100 Byte pro Datei) und verschlüsselt die Spalten neu. Alte Keys bleiben
   lesbar, bis der Job fertig ist.
+  - **Risiko Torn-Write:** Der Header-Rewrap überschreibt 96 Byte in place und ist nicht
+    crash-atomar. Deshalb sichert `rewrapHeader` vorher den alten Header in `<datei>.rewrap-bak`
+    (0600, fsync), verifiziert nach dem Schreiben per Rücklesen, stellt bei Fehlern den alten Header
+    zurück und löscht das Backup erst danach. Nach einem Absturz stellt `recoverRewrap(path)` den alten
+    Header wieder her, falls der aktuelle nicht entpackbar ist, sonst löscht es nur das Backup.
+  - Vor einem Massen-Rewrap ein Backup (Abschnitt 6) erstellen. Der Rewrap läuft im Wartungsfenster
+    oder mit Retry bei gleichzeitigen Lesern: Leser können kurz `KEY_MISMATCH` sehen. Der Lesepfad
+    wiederholt den Header-Unwrap deshalb einmal nach 50 ms.
 
 ## 6. Backup
 
@@ -248,12 +303,25 @@ IdP ggf. anpassen. Nutzer müssen sich neu einloggen.
 | Phase | Inhalt | Abhängig von |
 |---|---|---|
 | **P1** | `crypto-store.js` (Format v1, Stream-/Range-Entschlüsselung), Master-Key-Laden, Key-Check, `scripts/keys.js init` | – |
-| **P2** | Alle Lese- und Schreibstellen auf `crypto-store` umstellen, Copy-on-Write, Temp-Klartext über tmpfs, Thumbnails, Migration bestehender Dateien, Admin-Anzeige | P1 |
+| **P2** | Alle Lese- und Schreibstellen auf `crypto-store` umstellen, Copy-on-Write, Temp-Klartext über tmpfs, Thumbnails, Migration bestehender Dateien, Admin-Anzeige (Vorgaben siehe unten) | P1 |
 | **P3** | Spaltenverschlüsselung (Abschnitt 4) inkl. Migration; `.env`-Rückschreiben der Secrets entfernen (F3) | P1 |
 | **P4** | Backup: Format, `scripts/backup.js create/verify`, Konsistenz-Flag, Admin-UI, Zeitplan und Aufbewahrung | P1 (P2 für Copy-on-Write-Konsistenz) |
 | **P5** | Restore-CLI, Kompatibilitätsprüfungen, Doku im README | P4 |
 | **P6** | Schlüsselrotation | P2, P3 |
 | **P7** | Keine Klartext-Passwörter mehr: Docker-Secrets für Startgeheimnisse, Reset-Tokens nur gehasht (Abschnitt 12) | P1, P3 |
+
+**Vorgaben für P2 (aus dem Krypto-Review):**
+- `files.enc_version` ist die Wahrheit für jede Lese-, Schreib- und Auslieferungsentscheidung und wird
+  als `encrypted` an `crypto-store` übergeben, keine Magic-Heuristik im Normalbetrieb.
+- `files.size` gegen die Header-`plainSize` abgleichen, bei Abweichung Antwort 500.
+- Bei Stream-Fehlern nach bereits gesendetem Header `res.destroy(err)`, nie einen Teilinhalt als
+  erfolgreich abschließen.
+- Migration idempotent: Eine bereits verschlüsselte Datei mit `enc_version = NULL` erkennen und nur
+  die Spalte nachziehen. Vor dem `rename` das Ergebnis verifizieren (entschlüsseln, Hash vergleichen).
+- Semaphor für paralleles Entschlüsseln (CPU- und Speicherlast begrenzen).
+- Key-Check-Erstinitialisierung (`crypto_kcv:*` anlegen) nur, wenn keine Datei mit `enc_version > 0`
+  existiert. Sonst Abbruch, damit ein fehlender oder leerer `settings`-Eintrag nicht mit einem neuen Key
+  "überschrieben" wird, während schon verschlüsselte Dateien existieren.
 
 Jede Phase ist für sich auslieferbar. Ohne Master-Key bleibt das Verhalten unverändert.
 

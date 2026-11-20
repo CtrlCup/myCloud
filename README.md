@@ -22,6 +22,7 @@ myCloud ist ein Node/Express-Monolith mit schlankem Vanilla-JS-Frontend — kein
 - [Schnellstart](#schnellstart)
 - [Konfiguration](#konfiguration-umgebungsvariablen)
 - [API & KI-Zugriff](#api--ki-zugriff)
+- [Verschlüsselung (optional)](#verschlüsselung-optional)
 - [Update-Hinweise](#update-hinweise)
 - [Versionierung](#versionierung)
 - [Tests](#tests)
@@ -169,6 +170,28 @@ lässt sich vollständig extern nutzen:
 - **Global abschaltbar:** Ein Admin kann API-Key-Authentifizierung instanzweit deaktivieren
   (**Admin-Einstellungen → Registrierung & SSO → API-Zugriff**), ohne bestehende Keys zu löschen —
   Session-Cookie-Logins im Browser bleiben davon unberührt.
+
+## Verschlüsselung (optional)
+
+myCloud kann Dateien mit einem Master-Key verschlüsselt ablegen (AES-256-GCM, Konzept: [`docs/Verschluesselung-und-Backup.md`](docs/Verschluesselung-und-Backup.md)). Mit aktivem Master-Key werden alle neuen Dateien, Thumbnails und Avatare verschlüsselt gespeichert, bestehende Dateien werden im Hintergrund migriert (siehe unten). Ohne Master-Key verhält sich die App unverändert (Branding-Bilder bleiben bewusst Klartext, Spalten-Verschlüsselung folgt in einer späteren Phase).
+
+1. Key erzeugen (die Datei bekommt Modus `0400`, ein vorhandener Key wird nie überschrieben):
+   ```bash
+   mkdir -p secrets
+   docker compose run --rm --no-deps -v ./secrets:/out app node scripts/keys.js init --out /out/master_key
+   ```
+   `--out` ist Pflicht. Die Datei gehört danach dem Container-User (root); für das Docker-Secret aus einer Host-Datei auf Modus `0400`/`0440` und den Besitzer achten (ggf. `sudo chown $USER secrets/master_key`). Alternativ lokal: `cd app && node scripts/keys.js init --out ../secrets/master_key`.
+2. **Recovery-Code sichern:** Die Ausgabe enthält einmalig einen Recovery-Code (Base32 in 4er-Gruppen), der den Master-Key enthält. Offline ablegen (z. B. Passwortmanager), nicht in CI-Logs oder Terminal-Mitschnitten. Erneut anzeigen: `node scripts/keys.js show-recovery <datei>`, Format prüfen: `node scripts/keys.js check <datei>`.
+3. **Ohne Master-Key sind verschlüsselte Daten unwiederbringlich verloren.** Die Key-Datei gehört nicht ins Repository (und nicht in dieselbe Sicherung wie die Daten).
+4. Docker-Secret aktivieren: in `docker-compose.yml` die auskommentierten Zeilen `secrets: [master_key]`, `MYCLOUD_MASTER_KEY_FILE: /run/secrets/master_key`, den `secrets:`-Block am Ende sowie `tmpfs` und `MYCLOUD_TMP_DIR` (entschlüsselte Temp-Dateien nur im RAM) einkommentieren, dann `docker compose up -d`.
+
+**Migration bestehender Dateien:** Beim Start mit Key verschlüsselt ein Hintergrund-Job alle noch unverschlüsselten Dateien (auch im Papierkorb). Er ist fortsetzbar und idempotent (nach einem Neustart läuft er einfach weiter), prüft jeden neuen Blob per Entschlüsselung und Hash, bevor er die Datei umhängt, und löscht den Klartext erst danach. Klartext-Thumbnails werden gelöscht (sie entstehen verschlüsselt neu), Klartext-Avatare werden verschlüsselt. Der Fortschritt steht unter **Admin-Einstellungen → Systemeinstellungen → Verschlüsselung** (dort lässt sich der Job auch starten und stoppen; Status per `GET /api/settings/admin/encryption-status`). Last und Tempo: `MYCLOUD_MIGRATION_CONCURRENCY` (Standard 1) und `MYCLOUD_MIGRATION_PAUSE_MS` (Standard 50). Automatischen Start abschalten: Einstellung `encryption_auto_migrate` = `false`. Alte Blobs werden über eine Outbox-Tabelle (`pending_blob_deletes`) gelöscht, die nach einem Absturz beim nächsten Start abgearbeitet wird. Dateien mit fehlendem Blob oder abweichender Größe werden als „fehlend“ bzw. „fehlgeschlagen“ gezählt, nicht angefasst und brauchen eine manuelle Prüfung.
+
+- **Vor der Aktivierung ein Backup anlegen.** Die Migration verändert den Datenbestand.
+- **Alte Backups und Snapshots enthalten weiterhin Klartext.** Erst nach der Migration angelegte Sicherungen sind verschlüsselt; ältere gezielt löschen oder selbst verschlüsseln.
+- Zusätzlich empfohlen: Volume-/Festplattenverschlüsselung (LUKS/ZFS) für die Datenbank und das Upload-Volume; Datenbankinhalte sind (bis Phase P3) nicht verschlüsselt.
+
+Beim ersten Start mit Key speichert die App einen Prüfwert in der Datenbank. Passt der Key später nicht (oder fehlt er bei einer schon verschlüsselten Instanz), beendet sich die App mit einer Fehlermeldung, statt Dateien unlesbar zu machen. Die Key-Datei enthält 32 Bytes als Hex oder Base64 (eine Zeile) oder JSON `{ "current": 1, "keys": { "1": "<hex>" } }` für spätere Schlüsselrotation.
 
 ## Update-Hinweise
 

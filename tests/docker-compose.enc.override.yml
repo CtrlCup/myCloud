@@ -1,0 +1,15 @@
+# Override für den verschlüsselten Test-Stack (tests/run-all-enc.sh): eigenes Compose-Projekt (mycloudenc),
+# Host-Port 3098, Master-Key-Datei aus ${ENC_KEY_DIR} (vom Skript zur Laufzeit erzeugt), Klartext-Temp-Dateien
+# nur auf tmpfs. Die DB liegt wie im normalen Test-Stack im tmpfs. Berührt mycloudtest nicht.
+services:
+  app:
+    ports: !override
+      - "3098:3000"
+    volumes:
+      - ${ENC_KEY_DIR:-/nonexistent}:/keys:ro
+    tmpfs:
+      - /run/mycloud-tmp:mode=0700
+    environment:
+      APP_URL: http://localhost:3098
+      MYCLOUD_MASTER_KEY_FILE: /keys/master_key
+      MYCLOUD_TMP_DIR: /run/mycloud-tmp

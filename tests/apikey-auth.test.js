@@ -3,15 +3,16 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { execSync } = require('node:child_process');
 
-const BASE = process.env.BASE_URL || 'http://localhost:3099';
+const { BASE } = require('./_env');
 const user = 'apikey' + Date.now();
 const password = 'Test-Passwort-12345!';
 let cookie = '';
 let key, keyId;
 
 const bearer = k => ({ authorization: 'Bearer ' + k });
+const { COMPOSE_CMD } = require('./_env');
 const psql = sql => execSync(
-  `docker compose -p mycloudtest -f tests/docker-compose.test.yml exec -T db psql -U mycloud -d mycloud -c "${sql}"`,
+  `${COMPOSE_CMD} exec -T db psql -U mycloud -d mycloud -c "${sql}"`,
   { cwd: require('node:path').join(__dirname, '..'), stdio: 'pipe' });
 
 test('setup: register and create API key via session', async () => {
