@@ -45,6 +45,10 @@ const PERM_LABELS = {
   edit_files: 'Dateien bearbeiten',
 };
 
+// Monaco-Instanz des Code-Editors. Muss deklariert sein: Schließen vor dem (CDN-)Laden von
+// Monaco warf sonst einen ReferenceError und der Editor ließ sich nicht schließen.
+let monacoEditorInstance = null;
+
 // Real-time collaboration state
 let collabSocket = null;
 let collabUserDecorations = {}; // userId -> decoration IDs
@@ -2128,6 +2132,25 @@ function clearSelection() {
   updateMultiSelectUI();
 }
 
+// Hält ein frei positioniertes Popover vollständig im Viewport (schmale Fenster mit Maus, #31):
+// rechts/unten über den Rand ragende Menüs werden zurückgeschoben, notfalls über dem Anker geöffnet.
+function clampMenuToViewport(menu, x, y) {
+  const margin = 8;
+  // offsetWidth/-Height statt getBoundingClientRect(): die Einblend-Animation skaliert das Menü,
+  // die gemessene Größe wäre sonst zu klein. clientWidth/-Height ohne Scrollbalken.
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  const left = Math.min(x, vw - width - margin);
+  let top = y;
+  if (top + height > vh - margin) {
+    top = Math.min(y - height, vh - height - margin);
+  }
+  menu.style.left = `${Math.max(margin, left)}px`;
+  menu.style.top = `${Math.max(margin, top)}px`;
+}
+
 // Item Context Menu
 function showFileContextMenu(file, x, y) {
   const existing = document.querySelector('.context-menu');
@@ -2274,6 +2297,7 @@ function showFileContextMenu(file, x, y) {
 
   document.body.appendChild(menu);
   lucide.createIcons();
+  clampMenuToViewport(menu, x, y);
 
   const closeMenu = (e) => {
     if (!menu.contains(e.target)) {
@@ -2349,6 +2373,7 @@ document.oncontextmenu = (e) => {
 
   document.body.appendChild(menu);
   lucide.createIcons();
+  clampMenuToViewport(menu, e.clientX, e.clientY);
 
   const closeMenu = (e) => {
     if (!menu.contains(e.target)) {
