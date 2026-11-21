@@ -201,6 +201,11 @@ Beim ersten Start mit Key speichert die App einen Prüfwert in der Datenbank. Pa
 
 Wichtige Änderungen, die beim Aktualisieren relevant sein können (Details jeweils in den Commits und Issues):
 
+### 0.5.0 — Spaltenverschlüsselung (P3)
+- **Mit Master-Key** werden 2FA-Secrets, SMTP-Passwort, SSO-Client-Secret, Versionsverlauf und Freigabe-Nachrichten in der Datenbank verschlüsselt. Bestehende Werte migriert der Hintergrund-Job automatisch (Fortschritt in der Admin-Karte „Verschlüsselung“). Ohne Master-Key ändert sich nichts.
+- **`.env`:** `EMAIL_SMTP_PASS` und `SSO_CLIENT_SECRET` werden nicht mehr aus dem Admin-Panel zurückgeschrieben. Ein vorhandener Wert dient nur noch als Vorgabe, solange die Datenbank keinen hat; maßgeblich sind die Admin-Einstellungen. Die Zeilen können nach dem Update aus der `.env` entfernt werden.
+- **Achtung 2FA:** Fehlt der Master-Key oder ist er falsch, ist die TOTP-Anmeldung gesperrt (Notlösung siehe Abschnitt „Verschlüsselung“).
+
 ### 0.4.30
 - **Datenbank-Start:** Die App wartet beim Start auf PostgreSQL (10 Versuche mit Backoff) und beendet sich nicht mehr beim ersten Versuch. In `docker-compose.example.yml` gibt es zusätzlich einen optionalen Healthcheck für die Datenbank.
 - **E-Mail-Adressen** werden klein geschrieben gespeichert und beim Login ohne Rücksicht auf die Schreibweise verglichen. Beim Start werden bestehende Adressen einmalig normalisiert; Konten mit nur in der Schreibweise abweichenden Adressen bleiben unangetastet und werden im Log gemeldet.
