@@ -131,6 +131,15 @@ test('E15 TOTP: Setup+Bestätigung -> totp_secret in der DB verschlüsselt, 2FA-
     assert.ok(!/COLUMN_|enc:v1/.test(err), 'keine technischen Details in der Meldung');
     const bc = [c2, ...(broken.headers.getSetCookie?.() || []).map((c) => c.split(';')[0])].filter(Boolean).join('; ');
     assert.strictEqual((await fetch(BASE + '/api/settings', { headers: { cookie: bc } })).status, 401, 'keine angemeldete Sitzung');
+
+    // leeres Secret bei aktivem TOTP: gegen ein leeres HMAC-Secret könnte jeder Codes berechnen -> fail closed
+    psql(`UPDATE users SET totp_secret = '' WHERE id = ${user.id}`);
+    const l3 = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user.username, password }) });
+    const c3 = (l3.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).join('; ');
+    const empty = await fetch(BASE + '/api/auth/login/verify-2fa', { method: 'POST', headers: { 'Content-Type': 'application/json', cookie: c3 }, body: JSON.stringify({ code: totp('') }) });
+    assert.strictEqual(empty.status, 500);
+    const ec = [c3, ...(empty.headers.getSetCookie?.() || []).map((c) => c.split(';')[0])].filter(Boolean).join('; ');
+    assert.strictEqual((await fetch(BASE + '/api/settings', { headers: { cookie: ec } })).status, 401, 'leeres Secret: keine Sitzung');
   } finally {
     psql(`UPDATE users SET totp_secret = ${q(stored)} WHERE id = ${user.id}`);
   }

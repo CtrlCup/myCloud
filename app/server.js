@@ -1406,6 +1406,7 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
+const TOTP_UNAVAILABLE = 'Die Zwei-Faktor-Anmeldung ist vorübergehend nicht verfügbar. Bitte wende dich an einen Administrator.';
 app.post('/api/auth/login/verify-2fa', async (req, res) => {
   const { code } = req.body;
   const tempUserId = req.session.tempUserId;
@@ -1434,8 +1435,14 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
 
     if (user.two_factor_totp) {
       const speakeasy = require('speakeasy');
+      const totpSecret = decryptColumn(user.totp_secret, 'users.totp_secret');
+      // Fail closed: gegen ein leeres Secret könnte jeder einen gültigen Code berechnen
+      if (!totpSecret) {
+        console.error(`2FA-Login: TOTP aktiv, aber kein Secret für Nutzer ${tempUserId}`);
+        return res.status(500).json({ error: TOTP_UNAVAILABLE });
+      }
       const verified = speakeasy.totp.verify({
-        secret: decryptColumn(user.totp_secret, 'users.totp_secret'),
+        secret: totpSecret,
         encoding: 'base32',
         token: code,
         window: 1
@@ -1465,11 +1472,11 @@ app.post('/api/auth/login/verify-2fa', async (req, res) => {
       user: { id: user.id, username: user.username, role: user.role, hasCustomUsername: user.has_custom_username }
     });
   } catch (err) {
-    if (!(err && String(err.code).startsWith('COLUMN_'))) console.error('2FA Verification error:', err);
     if (err && String(err.code).startsWith('COLUMN_')) {
       console.error(`2FA-Login: TOTP-Secret von Nutzer ${tempUserId} nicht lesbar: ${err.code}`);
-      return res.status(500).json({ error: 'Die Zwei-Faktor-Anmeldung ist vorübergehend nicht verfügbar. Bitte wende dich an einen Administrator.' });
+      return res.status(500).json({ error: TOTP_UNAVAILABLE });
     }
+    console.error('2FA Verification error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -6511,14 +6518,15 @@ app.get('/api/settings/admin/encryption-status', requireAdmin, denyApiKey, async
               COUNT(*) FILTER (WHERE enc_version IS NULL)::int AS plain
        FROM files WHERE is_folder = false`);
     const enabled = cryptoStore.isEnabled();
+    const colState = colMigration.getState();
     res.json({
       enabled,
       keyId: cryptoStore.getCurrentKeyId(),
       ...c.rows[0],
       ...encMigration.getState(),
-      columns: Object.fromEntries(Object.entries(await countColumns(pool, { cache: !colMigration.getState().running }))
-        .map(([k, v]) => [k, { ...v, unreadable: colMigration.getState().unreadableByColumn[k] || 0 }])),
-      columnMigration: colMigration.getState(),
+      columns: Object.fromEntries(Object.entries(await countColumns(pool, { cache: !colState.running }))
+        .map(([k, v]) => [k, { ...v, unreadable: colState.unreadableByColumn[k] || 0 }])),
+      columnMigration: colState,
       autoMigrate: (await getSetting('encryption_auto_migrate')) !== 'false',
     });
   } catch (err) {
