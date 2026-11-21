@@ -1,6 +1,6 @@
 # Konzept: Verschlüsselte Speicherung, Backup & Wiederherstellung
 
-Stand: 2026-10-03 · Status: **P1 und P2 umgesetzt (inkl. Migration), P3 bis P7 offen** · Umsetzung in Phasen, siehe
+Stand: 2026-11-21 · Status: **P1 bis P3 umgesetzt (inkl. Migration), P4 bis P7 offen** · Umsetzung in Phasen, siehe
 Abschnitt 8 und die GitHub-Issues mit dem Label `encryption`.
 
 Ziel: Dateien und sensible Datenbankinhalte von myCloud liegen **verschlüsselt auf der Platte**.
@@ -181,6 +181,12 @@ per HKDF aus dem Master-Key abgeleitet (Kontext `"mycloud-column-v1"`).
 - `files.name`, Ordnerstruktur, Größen, Zeitstempel: für Sortierung, Namenssuche
   (Trigram-Index) und Konfliktprüfung.
 
+**Umsetzung (P3):** `app/column-crypto.js` (`encryptColumn`/`decryptColumn`, AAD = `mycloud-column-v1|<Kontext>`, z. B. `settings.email_smtp_pass`, bewusst ohne Zeilen-ID, damit Kopieren/Restore geht). Ohne Key Klartext wie bisher, `enc:v1:` ohne Key ist ein Fehler (`COLUMN_NO_KEY`), Klartext mit Key wird als Altbestand gelesen. `settings`: zentral in `getSetting`/`setSetting`/`getAllSettings` (`SECRET_SETTING_KEYS`). `file_versions` hat die Zusatzspalte `size` (Klartext-Länge), damit die Liste nicht entschlüsseln muss. Migration: `app/column-migration.js`, gemeinsam mit der Dateimigration gestartet/gestoppt, Zähler in `GET /api/settings/admin/encryption-status` (`columns`). Secrets aus der `.env` dienen nur noch als Seed, solange die DB keinen Wert hat (sonst würde ein alter `.env`-Wert beim Start einen im Admin-Panel geänderten überschreiben). Klartext, der selbst mit `enc:v1:` beginnt, wird ohne Key als `enc:v1:p:<base64>` maskiert, damit er nie als Chiffrat missverstanden wird; die Migration verschlüsselt ihn später normal. Werte, die zwar wie ein Chiffrat aussehen, aber nicht entschlüsselbar sind (falscher Key, manipuliert, unbekannte keyId), lässt die Migration unverändert und zählt sie als `unreadable`. Lesepfade arbeiten pro Zeile: eine unlesbare Zeile führt zu `null` bzw. HTTP 409 (Version), nie zum Scheitern einer ganzen Liste. Unlesbare Secrets in `settings` führen zu einem Fehler, nicht zu einem stillen Rückgriff auf `.env`.
+
+*Grenze der Kontextbindung:* Der Kontext bindet einen Wert an seine Spalte, nicht an die Zeile. Wer schreibend auf die DB zugreift, kann deshalb verschlüsselte Werte zwischen Zeilen derselben Spalte vertauschen (z. B. ein TOTP-Secret auf einen anderen Nutzer kopieren). Das Modell schützt gegen Leser der DB (Dump, Backup-Leak), nicht gegen einen Angreifer mit Schreibrechten; der kann ohnehin Passwort-Hashes ersetzen.
+
+*Hinweis für P6 (Rotation):* Die Spaltenmigration überspringt bereits gültige `enc:v1:`-Werte. Ein Wechsel auf einen neuen Key braucht deshalb einen eigenen Re-Encrypt-Lauf über die Spalten.
+
 Passwort-Hashes (bcrypt) und API-Key-Hashes bleiben, wie sie sind: Sie sind bereits Einweg-Hashes.
 
 ## 5. Master-Key-Verwaltung
@@ -304,7 +310,7 @@ IdP ggf. anpassen. Nutzer müssen sich neu einloggen.
 |---|---|---|
 | **P1** | `crypto-store.js` (Format v1, Stream-/Range-Entschlüsselung), Master-Key-Laden, Key-Check, `scripts/keys.js init` | – |
 | **P2** | Alle Lese- und Schreibstellen auf `crypto-store` umstellen, Copy-on-Write, Temp-Klartext über tmpfs, Thumbnails, Migration bestehender Dateien, Admin-Anzeige (Vorgaben siehe unten) | P1 |
-| **P3** | Spaltenverschlüsselung (Abschnitt 4) inkl. Migration; `.env`-Rückschreiben der Secrets entfernen (F3) | P1 |
+| **P3** | Spaltenverschlüsselung (Abschnitt 4) inkl. Migration; `.env`-Rückschreiben der Secrets entfernen (F3). **Umgesetzt** (Issue #35): `app/column-crypto.js`, `app/column-migration.js`, `app/env-file.js` | P1 |
 | **P4** | Backup: Format, `scripts/backup.js create/verify`, Konsistenz-Flag, Admin-UI, Zeitplan und Aufbewahrung | P1 (P2 für Copy-on-Write-Konsistenz) |
 | **P5** | Restore-CLI, Kompatibilitätsprüfungen, Doku im README | P4 |
 | **P6** | Schlüsselrotation | P2, P3 |

@@ -129,6 +129,12 @@ function getCurrentKeyId() {
   return k ? k.current : null;
 }
 
+/** Master-Key zu einer keyId (Buffer) oder null, wenn die Verschlüsselung aus ist oder die keyId unbekannt ist. */
+function getMasterKey(keyId) {
+  const k = getKeys();
+  return (k && k.keys.get(keyId)) || null;
+}
+
 /* ---------- Schlüsselableitung (Domain-Separation) ---------- */
 
 const hk = (master, info) => Buffer.from(crypto.hkdfSync('sha256', master, Buffer.alloc(0), info, 32));
@@ -743,7 +749,7 @@ function parseRecoveryCode(code) {
 
 module.exports = {
   HEADER_SIZE, DEFAULT_SEG_SIZE,
-  parseKeyFile, loadMasterKeys, useKeys, isEnabled, getCurrentKeyId,
+  parseKeyFile, loadMasterKeys, useKeys, isEnabled, getCurrentKeyId, getMasterKey,
   getKeyCheckValue, deriveColumnKey,
   isEncrypted, plainSizeOf,
   writeEncrypted, encryptFileInPlace, rewrapHeader, recoverRewrap, createDecryptStream, readDecrypted, withPlaintextTempFile, withPrivateTempDir, sweepOrphans,
