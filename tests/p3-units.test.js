@@ -68,7 +68,7 @@ test('Migration: Klartext, Klartext mit enc:v1:-Prefix und Escape werden verschl
   for (const [i, exp] of [[0, plain[0]], [1, plain[1]], [2, plain[2]], [4, plain[4]]]) {
     assert.strictEqual(decryptColumn(t.file_versions[i].content, 'file_versions.content'), exp);
   }
-  assert.strictEqual(t.file_versions[0].size, 5, 'size aus Klartext (Zeichen) bei NULL gesetzt');
+  assert.strictEqual(t.file_versions[0].size, 6, 'size aus Klartext (Codepoints wie Postgres LENGTH) bei NULL gesetzt');
   assert.strictEqual(t.file_versions[1].size, 10);
   assert.strictEqual(t.file_versions[2].size, 9, 'vorhandene size bleibt');
   assert.strictEqual(t.file_versions[4].size, 17, 'size des dekodierten Klartexts, nicht des Escapes');
@@ -135,8 +135,8 @@ test('getAllSettings crasht nicht bei nicht entschlüsselbarem Secret; getSettin
   const enc = encryptColumn('pw', 'settings.email_smtp_pass');
   cs.useKeys(null);
   const orig = db.pool.query;
-  db.pool.query = async (sql) => (/FROM settings WHERE key/.test(sql)
-    ? { rows: [{ value: enc }] }
+  db.pool.query = async (sql, p) => (/FROM settings WHERE key/.test(sql)
+    ? { rows: [{ value: p[0] === 'cloud_name' ? 'X' : enc }] }
     : { rows: [{ key: 'email_smtp_pass', value: enc }, { key: 'cloud_name', value: 'X' }] });
   const errs = [];
   const origErr = console.error; console.error = (...a) => errs.push(a.join(' '));
@@ -162,6 +162,7 @@ test('Seeding aus process.env (E16 ohne Key): Klartext, nur bei leerem DB-Wert; 
       async query(sql, p) {
         calls.push([sql, p]);
         if (/SELECT value FROM settings WHERE key/.test(sql)) return { rows: existing[p[0]] != null ? [{ value: existing[p[0]] }] : [] };
+        if (/SELECT COUNT\(\*\)/i.test(sql)) return { rows: [{ count: '1' }], rowCount: 1 };
         return { rows: [], rowCount: 0 };
       }, release() {},
     });
@@ -173,7 +174,7 @@ test('Seeding aus process.env (E16 ohne Key): Klartext, nur bei leerem DB-Wert; 
     process.env.EMAIL_SMTP_PASS = 'env-pass-GEHEIM'; process.env.SSO_CLIENT_SECRET = 'env-sso-GEHEIM';
     let calls = await run({ email_smtp_pass: 'db-pass', sso_client_secret: '' });
     const up = calls.filter(([sql, p]) => /INSERT INTO settings/.test(sql) && ['email_smtp_pass', 'sso_client_secret'].includes(p[0]));
-    assert.deepStrictEqual(up.map(([, p]) => p[1]), ['env-pass-GEHEIM', 'env-sso-GEHEIM'], 'Klartext wie bisher');
+    assert.deepStrictEqual(up.map(([, p]) => p[1]).sort(), ['env-pass-GEHEIM', 'env-sso-GEHEIM'], 'Klartext wie bisher');
     assert.ok(up.every(([sql]) => /WHERE settings\.value IS NULL OR settings\.value = ''/.test(sql)), 'überschreibt keinen DB-Wert');
     assert.strictEqual(warns.filter((w) => /EMAIL_SMTP_PASS in \.env weicht von der Datenbank ab und wird ignoriert/.test(w)).length, 1);
     assert.ok(!warns.some((w) => /SSO_CLIENT_SECRET/.test(w)), 'leerer DB-Wert: keine Warnung');

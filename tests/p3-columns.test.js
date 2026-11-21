@@ -119,12 +119,30 @@ test('E15 TOTP: Setup+Bestätigung -> totp_secret in der DB verschlüsselt, 2FA-
   const bad = await fetch(BASE + '/api/auth/login/verify-2fa', { method: 'POST', headers: { 'Content-Type': 'application/json', cookie }, body: JSON.stringify({ code: wrong }) });
   assert.strictEqual(bad.status, 400);
 
-  // beschädigter Wert -> klarer Fehler statt Login (nicht im Klartext-Fallback)
+  // beschädigter Wert -> fail closed: 500 mit generischer Meldung, KEINE Sitzung (kein Bypass, kein Klartext-Fallback)
   psql(`UPDATE users SET totp_secret = 'enc:v1:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' WHERE id = ${user.id}`);
-  const broken = await login2fa(user.username, setup.secret);
-  assert.strictEqual(broken.status, 500);
-  assert.match((await broken.json()).error, /Datenbankwert/);
-  psql(`UPDATE users SET totp_secret = ${q(stored)} WHERE id = ${user.id}`);
+  try {
+    const l2 = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user.username, password }) });
+    const c2 = (l2.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).join('; ');
+    const broken = await fetch(BASE + '/api/auth/login/verify-2fa', { method: 'POST', headers: { 'Content-Type': 'application/json', cookie: c2 }, body: JSON.stringify({ code: totp(setup.secret) }) });
+    assert.strictEqual(broken.status, 500);
+    const err = (await broken.json()).error;
+    assert.match(err, /vorübergehend nicht verfügbar/);
+    assert.ok(!/COLUMN_|enc:v1/.test(err), 'keine technischen Details in der Meldung');
+    const bc = [c2, ...(broken.headers.getSetCookie?.() || []).map((c) => c.split(';')[0])].filter(Boolean).join('; ');
+    assert.strictEqual((await fetch(BASE + '/api/settings', { headers: { cookie: bc } })).status, 401, 'keine angemeldete Sitzung');
+
+    // leeres Secret bei aktivem TOTP: gegen ein leeres HMAC-Secret könnte jeder Codes berechnen -> fail closed
+    psql(`UPDATE users SET totp_secret = '' WHERE id = ${user.id}`);
+    const l3 = await fetch(BASE + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user.username, password }) });
+    const c3 = (l3.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).join('; ');
+    const empty = await fetch(BASE + '/api/auth/login/verify-2fa', { method: 'POST', headers: { 'Content-Type': 'application/json', cookie: c3 }, body: JSON.stringify({ code: totp('') }) });
+    assert.strictEqual(empty.status, 500);
+    const ec = [c3, ...(empty.headers.getSetCookie?.() || []).map((c) => c.split(';')[0])].filter(Boolean).join('; ');
+    assert.strictEqual((await fetch(BASE + '/api/settings', { headers: { cookie: ec } })).status, 401, 'leeres Secret: keine Sitzung');
+  } finally {
+    psql(`UPDATE users SET totp_secret = ${q(stored)} WHERE id = ${user.id}`);
+  }
   assert.strictEqual((await login2fa(user.username, setup.secret)).status, 200);
 
   const dis = await send(user, 'POST', '/api/settings/2fa/totp/disable', {});
@@ -238,6 +256,76 @@ test('Freigabe-Nachricht: in der DB verschlüsselt, API/Liste/öffentliche Meta 
   assert.strictEqual(psql(`SELECT COALESCE(message, 'NULL') FROM shares WHERE id = ${share.id}`), 'NULL');
 });
 
+/* ---------- Grenzfälle: Klartext mit enc:v1:-Prefix, unlesbare Zeilen, Altzeilen ohne size ---------- */
+
+const BAD = 'enc:v1:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; // gültiges Format, nicht entschlüsselbar
+
+test('Klartext mit enc:v1:-Prefix: Freigabe-Nachricht und Version bleiben lesbar (nie als Chiffrat missverstanden)', async () => {
+  const MSG = 'enc:v1:1:AAAA sieht aus wie Chiffrat ' + stamp;
+  const share = await (await send(admin, 'POST', '/api/shares', { fileId, message: MSG })).json();
+  assert.strictEqual(share.message, MSG);
+  const stored = psql(`SELECT message FROM shares WHERE id = ${share.id}`);
+  if (ENC) expectStored(stored, MSG, 'shares.message');
+  else assert.ok(stored.startsWith('enc:v1:p:'), 'E16: Klartext-Escape enc:v1:p:');
+  assert.strictEqual((await (await call(admin, '/api/shares')).json()).find((s) => s.id === share.id).message, MSG);
+  assert.strictEqual((await (await fetch(`${BASE}/api/public/shares/${share.slug}`)).json()).share.message, MSG);
+
+  // eigene Datei: die erste Version entsteht ohne die 3-Minuten-Sperre über den normalen Schreibpfad
+  const VC = 'enc:v1:Inhalt mit Prefix ' + stamp;
+  const f2 = await (await send(admin, 'POST', '/api/files/create-empty', { name: `p3-prefix-${stamp}.txt`, type: 'txt', parentId: null })).json();
+  const id2 = (f2.file || f2).id;
+  assert.strictEqual((await send(admin, 'PUT', '/api/files/content/' + id2, { content: VC })).status, 200);
+  assert.strictEqual((await send(admin, 'PUT', '/api/files/content/' + id2, { content: 'danach' })).status, 200);
+  const vs = await (await call(admin, `/api/files/${id2}/versions`)).json();
+  assert.strictEqual(vs.length, 1);
+  const vStored = psql(`SELECT content FROM file_versions WHERE id = ${vs[0].id}`);
+  if (ENC) expectStored(vStored, VC, 'file_versions.content');
+  else assert.ok(vStored.startsWith('enc:v1:p:'), 'E16: Klartext-Escape enc:v1:p:');
+  assert.strictEqual(Number(vs[0].size), Array.from(VC).length);
+  assert.strictEqual((await (await call(admin, `/api/files/${id2}/versions/${vs[0].id}`)).json()).content, VC);
+  const rest = await send(admin, 'POST', `/api/files/${id2}/versions/${vs[0].id}/restore`, {});
+  assert.strictEqual(rest.status, 200);
+  assert.strictEqual(await content(id2), VC);
+});
+
+test('Unlesbare Zeilen: Freigabeliste und öffentliche Meta funktionieren weiter, Version liefert 409', async () => {
+  const a = await (await send(admin, 'POST', '/api/shares', { fileId, message: 'lesbar ' + stamp })).json();
+  const b = await (await send(admin, 'POST', '/api/shares', { fileId, message: 'wird kaputt' })).json();
+  const origB = psql(`SELECT message FROM shares WHERE id = ${b.id}`);
+  const vid = psql(`INSERT INTO file_versions (file_id, content, size) VALUES (${fileId}, ${q(BAD)}, 3) RETURNING id`).split('\n').find((l) => /^\d+$/.test(l));
+  psql(`UPDATE shares SET message = ${q(BAD)} WHERE id = ${b.id}`);
+  try {
+    const lr = await call(admin, '/api/shares');
+    assert.strictEqual(lr.status, 200, 'Liste scheitert nicht an einer Zeile');
+    const list = await lr.json();
+    assert.strictEqual(list.find((s) => s.id === a.id).message, 'lesbar ' + stamp);
+    assert.strictEqual(list.find((s) => s.id === b.id).message, null);
+    assert.ok(!JSON.stringify(list).includes(BAD), 'Chiffrat nicht ausgeliefert');
+    const pub = await fetch(`${BASE}/api/public/shares/${b.slug}`);
+    assert.strictEqual(pub.status, 200);
+    assert.strictEqual((await pub.json()).share.message, null);
+
+    assert.strictEqual((await call(admin, `/api/files/${fileId}/versions`)).status, 200, 'Versionsliste entschlüsselt nicht');
+    const vr = await call(admin, `/api/files/${fileId}/versions/${vid}`);
+    assert.strictEqual(vr.status, 409);
+    assert.ok(!(await vr.text()).includes(BAD));
+    const before = await content(fileId);
+    assert.strictEqual((await send(admin, 'POST', `/api/files/${fileId}/versions/${vid}/restore`, {})).status, 409);
+    assert.strictEqual(await content(fileId), before, 'Restore einer unlesbaren Version ändert nichts');
+  } finally {
+    psql(`UPDATE shares SET message = ${q(origB)} WHERE id = ${b.id}; DELETE FROM file_versions WHERE id = ${vid};`);
+  }
+});
+
+test('Altzeilen im Versionsverlauf ohne size: Liste zeigt die Klartext-Länge', async () => {
+  const OLD = 'Altzeile äöü 🌍 ' + stamp;
+  const vid = psql(`INSERT INTO file_versions (file_id, content, size) VALUES (${fileId}, ${q(OLD)}, NULL) RETURNING id`).split('\n').find((l) => /^\d+$/.test(l));
+  const row = (await (await call(admin, `/api/files/${fileId}/versions`)).json()).find((x) => String(x.id) === vid);
+  assert.ok(row, 'Altzeile in der Liste');
+  assert.strictEqual(Number(row.size), Array.from(OLD).length);
+  assert.strictEqual((await (await call(admin, `/api/files/${fileId}/versions/${vid}`)).json()).content, OLD);
+});
+
 /* ---------- Status ---------- */
 
 test('Status: columns je Spalte mit total/encrypted/plain', async () => {
@@ -271,6 +359,11 @@ if (ENC) {
   }
 
   test('Migration: Klartext-Altwerte aller fünf Spalten werden verschlüsselt, Funktionen laufen, Zweitlauf ändert nichts', async () => {
+    // Mit Key startet die Migration beim Boot automatisch. Läuft sie beim Einspielen noch, ist ihr Cursor schon an
+    // users/settings vorbei und "start" greift nicht (läuft bereits): erst warten, bis sie fertig ist.
+    for (const t0 = Date.now(); (await status(admin)).columnMigration.running; await new Promise((r) => setTimeout(r, 500))) {
+      assert.ok(Date.now() - t0 < 180000, 'Boot-Migration endet nicht');
+    }
     migUser = await register('p3mig' + stamp);
     migSecret = base32Encode(crypto.randomBytes(20));
     psql(`UPDATE users SET two_factor_totp = true, totp_secret = ${q(migSecret)} WHERE id = ${migUser.id};` +
@@ -282,7 +375,12 @@ if (ENC) {
     psql(`INSERT INTO file_versions (file_id, content) VALUES (${fileId}, NULL)`); // NULL-Zeile bleibt unberührt
 
     const nulls = psql(`SELECT COUNT(*) FROM file_versions WHERE content IS NULL`), empties = psql(`SELECT COUNT(*) FROM file_versions WHERE content = ''`);
-    const before = await status(admin);
+    // Zähler sind 15 s gecacht (Admin-Status pollt): warten, bis die eingespielten Altwerte sichtbar sind
+    let before;
+    for (const t0 = Date.now(); ; await new Promise((r) => setTimeout(r, 1000))) {
+      before = await status(admin);
+      if (Object.values(before.columns).every((c) => c.plain >= 1) || Date.now() - t0 > 20000) break;
+    }
     for (const k of Object.keys(before.columns)) assert.ok(before.columns[k].plain >= 1, 'offen: ' + k);
     // Klartext-Altwert ist mit Key bereits lesbar (Übergang)
     assert.strictEqual((await login2fa(migUser.username, migSecret)).status, 200);
